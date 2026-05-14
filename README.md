@@ -69,12 +69,12 @@ flicky/
 
 ### DeepBook Predict touchpoints (MVP)
 
-| # | Primitive                        | Purpose                                                                                                                |
-| - | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| 1 | `predict::mint`                  | Called in the player-signed swipe PTB on the player's own `PredictManager`. Sized from a per-card budget tied to stake. |
-| 2 | `predict::redeem_permissionless` | Keeper calls per player manager once oracle settles. Predict premium deposits into each player's own manager.           |
-| 3 | `OracleSVI` reads                | Snapshot `p_swiped` recorded in `duel::record_swipe`. Also calibrates deck difficulty.                                  |
-| 4 | `predict-server` indexer         | Backend detects settlement → triggers keeper redeem + `settle_duel`. Frontend renders lockup oracle ticks.              |
+| #   | Primitive                        | Purpose                                                                                                                 |
+| --- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 1   | `predict::mint`                  | Called in the player-signed swipe PTB on the player's own `PredictManager`. Sized from a per-card budget tied to stake. |
+| 2   | `predict::redeem_permissionless` | Keeper calls per player manager once oracle settles. Predict premium deposits into each player's own manager.           |
+| 3   | `OracleSVI` reads                | Snapshot `p_swiped` recorded in `duel::record_swipe`. Also calibrates deck difficulty.                                  |
+| 4   | `predict-server` indexer         | Backend detects settlement → triggers keeper redeem + `settle_duel`. Frontend renders lockup oracle ticks.              |
 
 Plus, on our side:
 
@@ -135,7 +135,7 @@ bunx --bun shadcn@latest add button -c apps/web
 Components land in `packages/ui/src/components` and are imported as:
 
 ```tsx
-import { Button } from "@workspace/ui/components/button";
+import { Button } from "@workspace/ui/components/button"
 ```
 
 ## Status
