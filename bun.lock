@@ -15,8 +15,12 @@
       "name": "server",
       "version": "0.0.1",
       "devDependencies": {
+        "@eslint/js": "^9.39.2",
         "@types/bun": "^1.3.0",
+        "eslint": "^9.39.2",
+        "globals": "^17.2.0",
         "typescript": "^5.9.3",
+        "typescript-eslint": "^8.54.0",
       },
     },
     "apps/web": {
@@ -69,7 +73,6 @@
         "@types/react-dom": "^19.2.3",
         "eslint": "^9.39.2",
         "eslint-plugin-react-hooks": "^7.0.1",
-        "eslint-plugin-react-refresh": "^0.4.24",
         "globals": "^17.2.0",
         "tailwindcss": "^4.1.18",
         "typescript": "^5.9.3",
