@@ -9,9 +9,20 @@
     "build": "bun build src/index.ts --outdir dist --target bun",
     "lint": "eslint",
     "format": "prettier --write \"**/*.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "oracles:create": "bun run src/scripts/create-oracles.ts",
+    "oracles:keeper": "bun run src/scripts/keeper.ts",
+    "oracles:settle": "bun run src/scripts/settle-oracles.ts",
+    "oracles:rotation": "bun run src/scripts/rotation-keeper.ts",
+    "oracles:read": "bun run src/scripts/read-oracles.ts",
+    "package:publish": "bun run src/scripts/publish-package.ts",
+    "package:upgrade": "bun run src/scripts/upgrade-package.ts",
+    "demo:duel": "bun run src/scripts/demo-duel.ts",
+    "demo:duel-deepbook": "bun run src/scripts/demo-duel-deepbook.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@mysten/sui": "^1.30"
+  },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
     "@types/bun": "^1.3.0",
