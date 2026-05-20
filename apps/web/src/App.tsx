@@ -45,7 +45,9 @@ import { Separator } from "@workspace/ui/components/separator"
 
 import { CONFIG } from "@/lib/config"
 import {
+  buildCreateDuelDusdcTx,
   buildCreateDuelTx,
+  buildJoinDuelDusdcTx,
   buildJoinDuelTx,
   buildSettleAndFinalizeTx,
   buildSwipeTx,
@@ -59,23 +61,34 @@ import {
   type DuelState,
   type OracleSviInfo,
 } from "@/lib/flicky"
+import { DEEPBOOK, getWalletDusdcBalance } from "@/lib/deepbook"
 
 // Deckmaster HTTP endpoint. Defaults to the local server during dev.
 const DECKMASTER_BASE_URL =
   import.meta.env.VITE_DECKMASTER_URL ?? "http://localhost:3001"
 
-// ─── stake tier presets (free tier — SUI mist; staked tier is Phase 3) ─────
+// ─── stake tier presets ─────────────────────────────────────────────────────
+
+type Tier = "free" | "staked"
 
 interface StakeTier {
   label: string
   blurb: string
-  mist: bigint
+  amount: bigint
+  coinType: string
 }
 
-const STAKE_TIERS: StakeTier[] = [
-  { label: "Practice", blurb: "0.01 SUI", mist: 10_000_000n },
-  { label: "Standard", blurb: "0.05 SUI", mist: 50_000_000n },
-  { label: "High Roller", blurb: "0.10 SUI", mist: 100_000_000n },
+const FREE_TIERS: StakeTier[] = [
+  { label: "Practice", blurb: "0.01 SUI", amount: 10_000_000n, coinType: CONFIG.stakeType },
+  { label: "Standard", blurb: "0.05 SUI", amount: 50_000_000n, coinType: CONFIG.stakeType },
+  { label: "High Roller", blurb: "0.10 SUI", amount: 100_000_000n, coinType: CONFIG.stakeType },
+]
+
+// PRD §Stake tiers (staked mode): 1 / 5 / 10 dUSDC.
+const STAKED_TIERS: StakeTier[] = [
+  { label: "Practice", blurb: "1 dUSDC", amount: 1_000_000n, coinType: DEEPBOOK.dusdcType },
+  { label: "Standard", blurb: "5 dUSDC", amount: 5_000_000n, coinType: DEEPBOOK.dusdcType },
+  { label: "High Roller", blurb: "10 dUSDC", amount: 10_000_000n, coinType: DEEPBOOK.dusdcType },
 ]
 
 // Swipe-phase pacing
@@ -106,6 +119,15 @@ function fmtUsd(n9: bigint): string {
 
 function fmtSui(mist: bigint): string {
   return `${(Number(mist) / 1e9).toFixed(4)} SUI`
+}
+
+function fmtDusdc(micro: bigint): string {
+  return `${(Number(micro) / 1e6).toFixed(2)} dUSDC`
+}
+
+/** Pick the right formatter for whichever coin type the duel is staked in. */
+function fmtStake(amount: bigint, coinType: string): string {
+  return coinType === DEEPBOOK.dusdcType ? fmtDusdc(amount) : fmtSui(amount)
 }
 
 function shortId(id: string, len = 6): string {
@@ -317,6 +339,7 @@ function Lobby({
   const { oracleId, oracle } = useOracle()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [tier, setTier] = useState<Tier>("free")
 
   const duelsQuery = useQuery({
     queryKey: ["duels"],
@@ -324,17 +347,35 @@ function Lobby({
     refetchInterval: 6_000,
   })
 
-  async function createDuel(stakeMist: bigint) {
+  // Staked tier wants the player's dUSDC wallet balance up-front so the UI
+  // can show "X dUSDC available" + warn before they pick a tier that they
+  // can't afford. Refetched on tier flip / address change.
+  const dusdcQuery = useQuery({
+    queryKey: ["dusdc-balance", address],
+    queryFn: () => getWalletDusdcBalance(client, address),
+    enabled: tier === "staked",
+    refetchInterval: 8_000,
+  })
+
+  async function createDuel(stake: StakeTier) {
     if (!oracleId || !oracle) return
     setBusy(true)
     setErr(null)
     try {
-      // 1. Ask Deckmaster for a deck. Server stores plaintext keyed by hash
-      //    so the keeper can reveal once a challenger joins.
       const ref = oracle.settlementPrice ?? oracle.forward
       const deck = await requestDeck(oracleId, ref)
 
-      const tx = buildCreateDuelTx(deck.hash, stakeMist)
+      const tx =
+        stake.coinType === DEEPBOOK.dusdcType
+          ? await buildCreateDuelDusdcTx(
+              client,
+              address,
+              deck.hash,
+              stake.amount,
+              stake.coinType,
+            )
+          : buildCreateDuelTx(deck.hash, stake.amount, stake.coinType)
+
       const res = await signAndExec({ transaction: tx })
       const full = await client.waitForTransaction({
         digest: res.digest,
@@ -352,6 +393,8 @@ function Lobby({
     }
   }
 
+  const tiers = tier === "free" ? FREE_TIERS : STAKED_TIERS
+
   return (
     <>
       <Card>
@@ -362,12 +405,48 @@ function Lobby({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/* Tier toggle */}
+          <div className="bg-muted inline-flex rounded-md p-0.5 text-xs">
+            <button
+              onClick={() => setTier("free")}
+              className={`rounded px-3 py-1 transition ${
+                tier === "free" ? "bg-background shadow-sm" : "text-muted-foreground"
+              }`}
+            >
+              Free · SUI
+            </button>
+            <button
+              onClick={() => setTier("staked")}
+              className={`rounded px-3 py-1 transition ${
+                tier === "staked" ? "bg-background shadow-sm" : "text-muted-foreground"
+              }`}
+            >
+              Staked · dUSDC
+            </button>
+          </div>
+
+          {tier === "staked" && (
+            <div className="text-muted-foreground text-xs">
+              wallet balance:{" "}
+              {dusdcQuery.data !== undefined ? (
+                <strong className="text-foreground">{fmtDusdc(dusdcQuery.data)}</strong>
+              ) : (
+                <span>…</span>
+              )}{" "}
+              ·{" "}
+              <span>
+                no public faucet on testnet — fund this address from any
+                wallet that holds dUSDC
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-3 gap-2 sm:gap-3">
-            {STAKE_TIERS.map((t) => (
+            {tiers.map((t) => (
               <button
                 key={t.label}
                 disabled={isPending || busy || !oracle}
-                onClick={() => createDuel(t.mist)}
+                onClick={() => createDuel(t)}
                 className="border-input bg-background hover:border-primary hover:bg-primary/5 group flex flex-col rounded-lg border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-50 sm:p-4"
               >
                 <span className="text-muted-foreground text-xs uppercase tracking-wide">
@@ -375,7 +454,7 @@ function Lobby({
                 </span>
                 <span className="mt-1 text-base font-semibold sm:text-lg">{t.blurb}</span>
                 <span className="text-muted-foreground mt-2 text-xs">
-                  pot {fmtSui(t.mist * 2n)}
+                  pot {fmtStake(t.amount * 2n, t.coinType)}
                 </span>
               </button>
             ))}
@@ -452,7 +531,8 @@ function DuelSummary({
           {mine && <Badge variant="outline">yours</Badge>}
         </div>
         <div className="text-muted-foreground text-xs">
-          pot {fmtSui(d.p0Stake + d.p1Stake)} · settled {d.settledCount.toString()}/5
+          pot {fmtStake(d.p0Stake + d.p1Stake, d.stakeCoinType)} · settled{" "}
+          {d.settledCount.toString()}/5
         </div>
       </div>
       <span className="text-muted-foreground text-xs">→</span>
@@ -529,7 +609,7 @@ function PhaseDispatcher({
   }
   if (duel.status === "PENDING") {
     if (isCreator) return <WaitingForOpponentView duel={duel} duelId={duelId} />
-    return <JoinView duel={duel} duelId={duelId} />
+    return <JoinView duel={duel} duelId={duelId} address={address} />
   }
   // ACTIVE
   if (!isPlayer) {
@@ -580,8 +660,14 @@ function WaitingForOpponentView({
         <div className="text-muted-foreground text-xs">{elapsed}s elapsed</div>
       </div>
       <p className="text-muted-foreground text-sm">
-        you staked <strong className="text-foreground">{fmtSui(duel.p0Stake)}</strong>.
-        bot auto-fills after ~5s if no human joins.
+        you staked{" "}
+        <strong className="text-foreground">
+          {fmtStake(duel.p0Stake, duel.stakeCoinType)}
+        </strong>
+        .{" "}
+        {duel.stakeCoinType === DEEPBOOK.dusdcType
+          ? "no bot fill on staked tier — waiting for a human."
+          : "bot auto-fills after ~5s if no human joins."}
       </p>
       {showShareEscape && (
         <div className="space-y-1 pt-3">
@@ -592,21 +678,39 @@ function WaitingForOpponentView({
         </div>
       )}
       <p className="text-muted-foreground pt-2 text-xs">
-        pot when full {fmtSui(duel.p0Stake * 2n)}
+        pot when full {fmtStake(duel.p0Stake * 2n, duel.stakeCoinType)}
       </p>
     </div>
   )
 }
 
-function JoinView({ duel, duelId }: { duel: DuelState; duelId: string }) {
+function JoinView({
+  duel,
+  duelId,
+  address,
+}: {
+  duel: DuelState
+  duelId: string
+  address: string
+}) {
+  const client = useSuiClient()
   const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
   const queryClient = useQueryClient()
   const [err, setErr] = useState<string | null>(null)
+  const isDusdc = duel.stakeCoinType === DEEPBOOK.dusdcType
 
   async function join() {
     setErr(null)
     try {
-      const tx = buildJoinDuelTx(duelId, duel.p0Stake, duel.stakeCoinType)
+      const tx = isDusdc
+        ? await buildJoinDuelDusdcTx(
+            client,
+            address,
+            duelId,
+            duel.p0Stake,
+            duel.stakeCoinType,
+          )
+        : buildJoinDuelTx(duelId, duel.p0Stake, duel.stakeCoinType)
       await signAndExec({ transaction: tx })
       queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
     } catch (e) {
@@ -614,14 +718,15 @@ function JoinView({ duel, duelId }: { duel: DuelState; duelId: string }) {
     }
   }
 
+  const stake = fmtStake(duel.p0Stake, duel.stakeCoinType)
   return (
     <div className="space-y-3 py-4 text-center">
       <Badge variant="outline">open duel</Badge>
       <p className="text-muted-foreground text-sm">
-        creator staked <strong>{fmtSui(duel.p0Stake)}</strong>. match it to start swiping.
+        creator staked <strong>{stake}</strong>. match it to start swiping.
       </p>
       <Button size="lg" onClick={join} disabled={isPending} className="w-full">
-        join · stake {fmtSui(duel.p0Stake)}
+        join · stake {stake}
       </Button>
       {err && (
         <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-left text-xs text-red-500">
@@ -1009,7 +1114,10 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
         </div>
         {myPayout > 0n && (
           <div className="text-muted-foreground text-sm">
-            payout <strong className="text-foreground">{fmtSui(myPayout)}</strong>
+            payout{" "}
+            <strong className="text-foreground">
+              {fmtStake(myPayout, duel.stakeCoinType)}
+            </strong>
           </div>
         )}
       </div>
@@ -1079,7 +1187,8 @@ function SpectatorView({ duel }: { duel: DuelState }) {
     <div className="space-y-3 py-4 text-center">
       <Badge variant="secondary">spectating</Badge>
       <p className="text-muted-foreground text-sm">
-        you're not a player in this duel. pot {fmtSui(duel.p0Stake + duel.p1Stake)}.
+        you're not a player in this duel. pot{" "}
+        {fmtStake(duel.p0Stake + duel.p1Stake, duel.stakeCoinType)}.
       </p>
       <div className="grid grid-cols-2 gap-3 text-sm">
         <div className="bg-muted/40 rounded p-3">

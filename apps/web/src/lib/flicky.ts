@@ -169,6 +169,74 @@ export function buildRevealDeckTx(
   return tx
 }
 
+/**
+ * Source `amount` of `coinType` from the owner's coin objects: merge them
+ * all into the first coin then split off `amount`. Used for create / join
+ * paths when the stake isn't SUI (we can't `splitCoins(tx.gas)` for a
+ * non-gas coin).
+ */
+async function takeCoinFromOwner(
+  client: SuiClient,
+  tx: Transaction,
+  owner: string,
+  coinType: string,
+  amount: bigint,
+) {
+  const coins = await client.getCoins({ owner, coinType })
+  if (coins.data.length === 0) {
+    throw new Error(`no ${coinType} coins in wallet ${owner}`)
+  }
+  const [primary, ...rest] = coins.data.map((c) => tx.object(c.coinObjectId))
+  if (rest.length > 0) tx.mergeCoins(primary, rest)
+  const [taken] = tx.splitCoins(primary, [tx.pure.u64(amount)])
+  return taken
+}
+
+/**
+ * Staked-tier create: same as `buildCreateDuelTx` but the stake is
+ * sourced from the owner's `stakeCoinType` coin objects (e.g. dUSDC)
+ * instead of split off `tx.gas`. PRD §Staked tier.
+ */
+export async function buildCreateDuelDusdcTx(
+  client: SuiClient,
+  owner: string,
+  deckHash: Uint8Array,
+  stakeAmount: bigint,
+  stakeCoinType: string,
+): Promise<Transaction> {
+  if (deckHash.length !== 32) throw new Error("deck hash must be 32 bytes (sha-256)")
+  const tx = new Transaction()
+  const stake = await takeCoinFromOwner(client, tx, owner, stakeCoinType, stakeAmount)
+  tx.add(
+    duelGen.createDuel({
+      package: packageId,
+      arguments: [stake, tx.pure.vector("u8", Array.from(deckHash))],
+      typeArguments: [stakeCoinType],
+    }),
+  )
+  return tx
+}
+
+/** Staked-tier join — same difference as buildCreateDuelDusdcTx. */
+export async function buildJoinDuelDusdcTx(
+  client: SuiClient,
+  owner: string,
+  duelId: string,
+  stakeAmount: bigint,
+  stakeCoinType: string,
+): Promise<Transaction> {
+  const tx = new Transaction()
+  const stake = await takeCoinFromOwner(client, tx, owner, stakeCoinType, stakeAmount)
+  tx.add(
+    duelGen.joinDuel({
+      package: packageId,
+      arguments: [duelId, stake],
+      typeArguments: [stakeCoinType],
+    }),
+  )
+  return tx
+}
+
 /** Challenger joins an existing PENDING duel, matching the creator's stake. */
 export function buildJoinDuelTx(
   duelId: string,

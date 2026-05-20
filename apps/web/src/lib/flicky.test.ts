@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test"
 import { Transaction } from "@mysten/sui/transactions"
 import type { SuiObjectResponse } from "@mysten/sui/jsonRpc"
 import {
+  buildCreateDuelDusdcTx,
   buildCreateDuelTx,
+  buildJoinDuelDusdcTx,
   buildJoinDuelTx,
   buildRevealDeckTx,
   buildSettleAndFinalizeTx,
@@ -13,6 +15,16 @@ import {
   type DeckCard,
 } from "./flicky"
 import { CONFIG } from "./config"
+
+// Minimal SuiClient mock for the dUSDC builders. They only call
+// `client.getCoins({ owner, coinType })`; nothing else.
+function mockClient(coins: Array<{ coinObjectId: string; balance: string }>) {
+  return {
+    getCoins: async () => ({ data: coins }),
+  } as unknown as Parameters<typeof buildCreateDuelDusdcTx>[0]
+}
+
+const DUSDC = "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC"
 
 // === oracleStrikes ===
 
@@ -189,6 +201,48 @@ describe("PTB builders", () => {
   test("buildCreateDuelTx rejects deck hash of wrong length", () => {
     const bad = new Uint8Array(16)
     expect(() => buildCreateDuelTx(bad, 1n)).toThrow(/32 bytes/)
+  })
+
+  test("buildCreateDuelDusdcTx emits one create_duel with dUSDC type arg", async () => {
+    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const hash = await computeDeckHash(cards)
+    const client = mockClient([
+      { coinObjectId: "0xc0", balance: "10000000" },
+      { coinObjectId: "0xc1", balance: "5000000" },
+    ])
+    const tx = await buildCreateDuelDusdcTx(
+      client,
+      "0x86fcc7fdc63be1a6b31c5288e7b87a6b985f16d1af490fcb54f2501d5fa8e78c",
+      hash,
+      5_000_000n,
+      DUSDC,
+    )
+    const data = tx.getData()
+    const createDuel = data.commands.find(
+      (c) => "MoveCall" in c && c.MoveCall?.function === "create_duel",
+    )
+    expect(createDuel).toBeDefined()
+    expect((createDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall.typeArguments).toEqual([DUSDC])
+  })
+
+  test("buildCreateDuelDusdcTx throws when wallet has no dUSDC", async () => {
+    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const hash = await computeDeckHash(cards)
+    const client = mockClient([])
+    await expect(
+      buildCreateDuelDusdcTx(client, "0xabc", hash, 1_000_000n, DUSDC),
+    ).rejects.toThrow(/no .*DUSDC coins/)
+  })
+
+  test("buildJoinDuelDusdcTx emits one join_duel with dUSDC type arg", async () => {
+    const client = mockClient([{ coinObjectId: "0xc0", balance: "10000000" }])
+    const tx = await buildJoinDuelDusdcTx(client, "0xabc", duelId, 1_000_000n, DUSDC)
+    const data = tx.getData()
+    const joinDuel = data.commands.find(
+      (c) => "MoveCall" in c && c.MoveCall?.function === "join_duel",
+    )
+    expect(joinDuel).toBeDefined()
+    expect((joinDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall.typeArguments).toEqual([DUSDC])
   })
 
   test("buildRevealDeckTx emits 5 new_card + 1 reveal_deck", () => {

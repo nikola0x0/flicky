@@ -64,6 +64,7 @@ function loadBotKeypair(): Ed25519Keypair {
 interface ParsedDuel {
   id: string
   status: "PENDING" | "ACTIVE" | "COMPLETE"
+  stakeCoinType: string
   creator: string
   challenger: string
   stake: bigint
@@ -89,9 +90,13 @@ function parseDuelObject(obj: SuiObjectResponse): ParsedDuel | null {
     "2": "ACTIVE",
     "3": "COMPLETE",
   }
+  // e.g. "0xpkg::duel::Duel<0x2::sui::SUI>"
+  const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
+  const stakeCoinType = typeMatch?.[1] ?? "0x2::sui::SUI"
   return {
     id: normalizeSuiObjectId(f.id.id),
     status: statusMap[String(f.status)] ?? "PENDING",
+    stakeCoinType,
     creator: f.creator,
     challenger: f.challenger,
     stake,
@@ -161,6 +166,12 @@ class Bot {
       if (!duel) return
       if (duel.status !== "PENDING") return
       if (duel.creator === this.address) return // don't shadow ourselves
+      // Bot only has SUI on testnet; staked-tier dUSDC duels need a human
+      // opponent. PRD §Free-tier specifics: bot-fill on free queue only.
+      if (duel.stakeCoinType !== "0x2::sui::SUI") {
+        console.log(`[skip] ${shortId(duelId)} — non-SUI stake (${duel.stakeCoinType})`)
+        return
+      }
       if (!TIER_STAKES.has(duel.stake)) {
         console.log(`[skip] ${shortId(duelId)} — stake ${duel.stake} not in tier set`)
         return
