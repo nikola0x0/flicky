@@ -16,7 +16,15 @@
  * no zkLogin, no sponsored gas, no matchmaking. Real PRD multiplayer
  * loop is Phase 3.
  */
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react"
 import {
   ConnectButton,
   useCurrentAccount,
@@ -571,6 +579,12 @@ function JoinView({ duel, duelId }: { duel: DuelState; duelId: string }) {
   )
 }
 
+// Threshold (px) past which a drag commits a swipe. Computed from card width
+// at drag start so it stays proportional across screen sizes.
+const DRAG_COMMIT_FRACTION = 0.3
+// Max rotation applied to the card during drag, in degrees per cardWidth/2 px.
+const DRAG_MAX_ROTATE_DEG = 18
+
 function SwipingView({
   duel,
   duelId,
@@ -588,8 +602,6 @@ function SwipingView({
   const queryClient = useQueryClient()
   const now = useNow(250)
   const card = duel.cards[myNextIdx]
-  // Per-card decide-time clock starts at the player's last swipe (or duel
-  // start for card 0). This matches `duel::record_swipe`'s baseline math.
   const baselineMs = Number(
     isCreator ? duel.p0LastSwipeOrStartMs : duel.p1LastSwipeOrStartMs,
   )
@@ -598,16 +610,79 @@ function SwipingView({
   const speed = speedMultiplier(elapsedMs)
   const [err, setErr] = useState<string | null>(null)
 
-  async function swipe(isUp: boolean) {
+  // ── drag state ────────────────────────────────────────────────────────
+  const cardRef = useRef<HTMLDivElement>(null)
+  const dragStartX = useRef(0)
+  const cardWidth = useRef(0)
+  const [drag, setDrag] = useState<{
+    x: number
+    active: boolean
+    flying: null | "up" | "down"
+  }>({ x: 0, active: false, flying: null })
+
+  // Reset drag whenever we move to a new card (myNextIdx changes).
+  useEffect(() => {
+    setDrag({ x: 0, active: false, flying: null })
     setErr(null)
-    try {
-      const tx = buildSwipeTx(duelId, card.oracleId, myNextIdx, isUp, duel.stakeCoinType)
-      await signAndExec({ transaction: tx })
-      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+  }, [myNextIdx])
+
+  const swipe = useCallback(
+    async (isUp: boolean) => {
+      setErr(null)
+      try {
+        const tx = buildSwipeTx(duelId, card.oracleId, myNextIdx, isUp, duel.stakeCoinType)
+        await signAndExec({ transaction: tx })
+        queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e))
+        // Failed mid-flight: snap the card back to center.
+        setDrag({ x: 0, active: false, flying: null })
+      }
+    },
+    [duelId, card.oracleId, myNextIdx, duel.stakeCoinType, signAndExec, queryClient],
+  )
+
+  function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (isPending || drag.flying) return
+    cardWidth.current = cardRef.current?.offsetWidth ?? 320
+    dragStartX.current = e.clientX
+    setDrag({ x: 0, active: true, flying: null })
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  function onPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!drag.active) return
+    setDrag((d) => ({ ...d, x: e.clientX - dragStartX.current }))
+  }
+  function onPointerUp() {
+    if (!drag.active) return
+    const w = cardWidth.current || 320
+    const threshold = w * DRAG_COMMIT_FRACTION
+    if (drag.x > threshold) {
+      setDrag({ x: drag.x, active: false, flying: "up" })
+      swipe(true)
+    } else if (drag.x < -threshold) {
+      setDrag({ x: drag.x, active: false, flying: "down" })
+      swipe(false)
+    } else {
+      setDrag({ x: 0, active: false, flying: null })
     }
   }
+
+  // Visual transform during drag/flying.
+  const flyOff =
+    drag.flying === "up"
+      ? `translateX(150%) rotate(${DRAG_MAX_ROTATE_DEG + 6}deg)`
+      : drag.flying === "down"
+        ? `translateX(-150%) rotate(${-(DRAG_MAX_ROTATE_DEG + 6)}deg)`
+        : null
+  const w = cardWidth.current || 320
+  const rotate = (drag.x / (w / 2)) * DRAG_MAX_ROTATE_DEG
+  const transform =
+    flyOff ?? (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
+
+  const overlayProgress = Math.min(1, Math.abs(drag.x) / (w * DRAG_COMMIT_FRACTION))
+  const upOverlay = drag.x > 0 ? overlayProgress : 0
+  const downOverlay = drag.x < 0 ? overlayProgress : 0
 
   const timerSec = Math.ceil(timerMs / 1000)
   const timerPct = (timerMs / SWIPE_PHASE_MS) * 100
@@ -637,43 +712,91 @@ function SwipingView({
         />
       </div>
 
-      {/* the card */}
-      <div className="bg-card relative overflow-hidden rounded-xl border p-6 shadow-sm">
-        <div className="text-muted-foreground text-xs uppercase tracking-wide">
-          BTC at expiry
-        </div>
-        <div className="mt-3 text-4xl font-bold tabular-nums sm:text-5xl">
-          {fmtUsd(card.strike)}
-        </div>
-        <div className="text-muted-foreground mt-1 text-sm">
-          will BTC settle <strong className="text-foreground">above</strong> this strike?
-        </div>
-        {oracle && (
-          <div className="text-muted-foreground mt-4 flex justify-between border-t pt-3 text-xs">
-            <span>
-              now <strong className="text-foreground">{fmtUsd(oracle.spot)}</strong>
-            </span>
-            <span>
-              fwd <strong className="text-foreground">{fmtUsd(oracle.forward)}</strong>
-            </span>
-            <span>
-              {oracle.spot > card.strike ? (
-                <span className="text-emerald-500">↑ {fmtUsd(oracle.spot - card.strike)} above</span>
-              ) : (
-                <span className="text-red-500">↓ {fmtUsd(card.strike - oracle.spot)} below</span>
-              )}
-            </span>
+      {/* card container — touch-action: none disables browser scroll while dragging */}
+      <div className="relative select-none" style={{ touchAction: "none" }}>
+        <div
+          ref={cardRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          className={`bg-card relative cursor-grab overflow-hidden rounded-xl border p-6 shadow-sm active:cursor-grabbing ${
+            drag.active ? "" : "transition-transform duration-300 ease-out"
+          } ${drag.flying ? "pointer-events-none" : ""}`}
+          style={{ transform, willChange: "transform" }}
+        >
+          {/* swipe-direction overlays — fade in with drag distance */}
+          <div
+            className="pointer-events-none absolute inset-0 rounded-xl bg-emerald-500/20"
+            style={{ opacity: upOverlay }}
+          />
+          <div
+            className="pointer-events-none absolute inset-0 rounded-xl bg-red-500/20"
+            style={{ opacity: downOverlay }}
+          />
+          {/* Direction badge that appears on whichever side is committing */}
+          {drag.x > 20 && (
+            <div className="absolute right-4 top-4 rotate-12 rounded border-2 border-emerald-500 px-2 py-0.5 text-lg font-black uppercase text-emerald-500">
+              ↑ UP
+            </div>
+          )}
+          {drag.x < -20 && (
+            <div className="absolute left-4 top-4 -rotate-12 rounded border-2 border-red-500 px-2 py-0.5 text-lg font-black uppercase text-red-500">
+              ↓ DOWN
+            </div>
+          )}
+
+          <div className="text-muted-foreground text-xs uppercase tracking-wide">
+            BTC at expiry
           </div>
+          <div className="mt-3 text-4xl font-bold tabular-nums sm:text-5xl">
+            {fmtUsd(card.strike)}
+          </div>
+          <div className="text-muted-foreground mt-1 text-sm">
+            will BTC settle{" "}
+            <strong className="text-foreground">above</strong> this strike?
+          </div>
+          {oracle && (
+            <div className="text-muted-foreground mt-4 flex justify-between border-t pt-3 text-xs">
+              <span>
+                now <strong className="text-foreground">{fmtUsd(oracle.spot)}</strong>
+              </span>
+              <span>
+                fwd <strong className="text-foreground">{fmtUsd(oracle.forward)}</strong>
+              </span>
+              <span>
+                {oracle.spot > card.strike ? (
+                  <span className="text-emerald-500">
+                    ↑ {fmtUsd(oracle.spot - card.strike)} above
+                  </span>
+                ) : (
+                  <span className="text-red-500">
+                    ↓ {fmtUsd(card.strike - oracle.spot)} below
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* hint shown only on card 1 before any drag */}
+        {myNextIdx === 0 && drag.x === 0 && !drag.flying && (
+          <p className="text-muted-foreground mt-3 text-center text-xs">
+            ← swipe DOWN · swipe UP →
+          </p>
         )}
       </div>
 
-      {/* swipe buttons */}
+      {/* button fallback (a11y + non-touch) */}
       <div className="grid grid-cols-2 gap-3">
         <Button
           variant="outline"
           size="lg"
-          disabled={isPending}
-          onClick={() => swipe(false)}
+          disabled={isPending || !!drag.flying}
+          onClick={() => {
+            setDrag({ x: -200, active: false, flying: "down" })
+            swipe(false)
+          }}
           className="h-16 text-base"
         >
           <div className="flex flex-col">
@@ -685,8 +808,11 @@ function SwipingView({
         </Button>
         <Button
           size="lg"
-          disabled={isPending}
-          onClick={() => swipe(true)}
+          disabled={isPending || !!drag.flying}
+          onClick={() => {
+            setDrag({ x: 200, active: false, flying: "up" })
+            swipe(true)
+          }}
           className="h-16 text-base"
         >
           <div className="flex flex-col">
@@ -698,7 +824,6 @@ function SwipingView({
         </Button>
       </div>
 
-      {/* speed tier hint */}
       <p className="text-muted-foreground text-center text-xs">
         decide fast: 0–5s = 1.5× · 5–20s = 1.0× · 20–60s = 0.75×
       </p>
