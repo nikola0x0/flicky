@@ -34,6 +34,25 @@ import { getSuiClient } from "../lib/sui"
 
 const POLL_INTERVAL_MS = Number(process.env.KEEPER_POLL_INTERVAL_MS ?? 10_000)
 
+// DeepBook Predict + dUSDC config — env-driven so a fork or upgrade
+// doesn't silently keep keeper pointed at a stale package. Mirror values
+// in apps/server/.env.example (and apps/web/.env.example for the web).
+function requireEnv(name: string): string {
+  const v = process.env[name]
+  if (!v) {
+    console.error(
+      `${name} is required. Copy apps/server/.env.example to apps/server/.env\n` +
+        `and either keep the default testnet values or override per environment.`,
+    )
+    process.exit(1)
+  }
+  return v
+}
+const DEEPBOOK_PREDICT_PACKAGE = requireEnv("DEEPBOOK_PREDICT_PACKAGE_ID")
+const DEEPBOOK_PREDICT_OBJECT = requireEnv("DEEPBOOK_PREDICT_OBJECT_ID")
+const DUSDC_TYPE = requireEnv("DUSDC_COIN_TYPE")
+const PREDICT_MANAGER_TYPE = `${DEEPBOOK_PREDICT_PACKAGE}::predict_manager::PredictManager`
+
 interface DeployedJson {
   packageId: string | null
 }
@@ -68,14 +87,25 @@ interface DuelLite {
   stakeCoinType: string
   /** sha2-256 of the committed deck, hex with 0x prefix. */
   deckHashHex: string
+  creator: string
+  challenger: string
+  p0Stake: bigint
+  p1Stake: bigint
   /** Cards from `duel.cards`. Empty until `reveal_deck` lands. */
   cards: Array<{ oracleId: string; strike: bigint }>
   cardSettlements: (bigint | null)[]
+  /** Per-card direction picked by each player; null = no swipe. */
+  p0Swipes: (boolean | null)[]
+  p1Swipes: (boolean | null)[]
 }
 
 function hexFromBytes(bytes: number[] | string): string {
   if (typeof bytes === "string") return bytes.startsWith("0x") ? bytes.toLowerCase() : "0x" + bytes
   return "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("")
+}
+
+interface RawSwipe {
+  fields: { is_up: boolean; p_swiped: string; decide_time_ms: string }
 }
 
 function parseDuel(obj: SuiObjectResponse): DuelLite | null {
@@ -84,8 +114,14 @@ function parseDuel(obj: SuiObjectResponse): DuelLite | null {
     id: { id: string }
     status: string
     deck_hash: number[] | string
+    creator: string
+    challenger: string
+    p0_stake: { fields: { value: string } } | string
+    p1_stake: { fields: { value: string } } | string
     cards: Array<{ fields: { oracle_id: string; strike: string } }>
     card_settlements: Array<string | null>
+    p0_swipes: Array<RawSwipe | null>
+    p1_swipes: Array<RawSwipe | null>
   }
   const statusMap: Record<string, "PENDING" | "ACTIVE" | "COMPLETE"> = {
     "1": "PENDING",
@@ -96,16 +132,24 @@ function parseDuel(obj: SuiObjectResponse): DuelLite | null {
   // e.g. "0xpkg::duel::Duel<0x2::sui::SUI>"
   const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
   const stakeCoinType = typeMatch?.[1] ?? "0x2::sui::SUI"
+  const stakeValue = (b: { fields: { value: string } } | string): bigint =>
+    typeof b === "string" ? BigInt(b) : BigInt(b.fields.value)
   return {
     id: normalizeSuiObjectId(f.id.id),
     status,
     stakeCoinType,
     deckHashHex: hexFromBytes(f.deck_hash),
+    creator: f.creator,
+    challenger: f.challenger,
+    p0Stake: stakeValue(f.p0_stake),
+    p1Stake: stakeValue(f.p1_stake),
     cards: f.cards.map((c) => ({
       oracleId: normalizeSuiObjectId(c.fields.oracle_id),
       strike: BigInt(c.fields.strike),
     })),
     cardSettlements: f.card_settlements.map((s) => (s === null ? null : BigInt(s))),
+    p0Swipes: f.p0_swipes.map((s) => (s === null ? null : s.fields.is_up)),
+    p1Swipes: f.p1_swipes.map((s) => (s === null ? null : s.fields.is_up)),
   }
 }
 
@@ -134,6 +178,38 @@ async function fetchPlaintextDeck(
     console.warn(
       `[deckmaster] reveal fetch failed: ${e instanceof Error ? e.message : String(e)}`,
     )
+    return null
+  }
+}
+
+async function readOracleExpiry(
+  client: SuiJsonRpcClient,
+  oracleId: string,
+): Promise<bigint | null> {
+  try {
+    const obj = await client.getObject({ id: oracleId, options: { showContent: true } })
+    if (obj.data?.content?.dataType !== "moveObject") return null
+    const f = obj.data.content.fields as { expiry: string }
+    return BigInt(f.expiry)
+  } catch {
+    return null
+  }
+}
+
+async function findManagerFor(
+  client: SuiJsonRpcClient,
+  owner: string,
+): Promise<string | null> {
+  try {
+    const owned = await client.getOwnedObjects({
+      owner,
+      filter: { StructType: PREDICT_MANAGER_TYPE },
+      options: { showContent: false },
+    })
+    const first = owned.data[0]
+    if (!first?.data) return null
+    return normalizeSuiObjectId(first.data.objectId)
+  } catch {
     return null
   }
 }
@@ -252,11 +328,73 @@ class Keeper {
       await this.tryReveal(duel)
       if (duel.cards.length === 0) return // still unrevealed; next poll
 
-      const oracleId = duel.cards[0].oracleId
-      const settled = await readOracleSettled(this.client, oracleId)
-      if (!settled) return // oracle hasn't ticked past expiry yet
+      // Every card's oracle must be settled before its `settle_card` will
+      // succeed. Decks may span multiple oracles even if today's Deckmaster
+      // picks one, so check each card individually.
+      const uniqueOracleIds = Array.from(
+        new Set(duel.cards.map((c) => c.oracleId)),
+      )
+      const oracleSettled = new Map<string, boolean>()
+      for (const oid of uniqueOracleIds) {
+        oracleSettled.set(oid, await readOracleSettled(this.client, oid))
+      }
+      if (![...oracleSettled.values()].every(Boolean)) return // wait
 
-      // Build PTB: settle every card that isn't already settled, then finalize.
+      // For dUSDC duels, also redeem every player's Predict position so
+      // their dUSDC mint payout lands in their PredictManager. The keeper
+      // signs but the payout goes to the manager's owner (permissionless).
+      // Free-tier duels (stake type = SUI) skip this — no mint happened.
+      const redeems: Array<{
+        managerId: string
+        oracleId: string
+        oracleExpiry: bigint
+        strike: bigint
+        isUp: boolean
+        quantity: bigint
+      }> = []
+      if (duel.stakeCoinType === DUSDC_TYPE) {
+        const expiryByOracle = new Map<string, bigint>()
+        for (const oid of uniqueOracleIds) {
+          const e = await readOracleExpiry(this.client, oid)
+          if (e !== null) expiryByOracle.set(oid, e)
+        }
+        // Mint quantity matches apps/web/src/App.tsx — 2% of own stake.
+        const p0Quantity = (duel.p0Stake * 2n) / 100n
+        const p1Quantity = (duel.p1Stake * 2n) / 100n
+        const p0Manager = await findManagerFor(this.client, duel.creator)
+        const p1Manager = await findManagerFor(this.client, duel.challenger)
+        for (let i = 0; i < duel.cards.length; i++) {
+          const card = duel.cards[i]
+          const expiry = expiryByOracle.get(card.oracleId)
+          if (expiry === undefined) continue
+          const p0 = duel.p0Swipes[i]
+          if (p0 !== null && p0Manager && p0Quantity > 0n) {
+            redeems.push({
+              managerId: p0Manager,
+              oracleId: card.oracleId,
+              oracleExpiry: expiry,
+              strike: card.strike,
+              isUp: p0,
+              quantity: p0Quantity,
+            })
+          }
+          const p1 = duel.p1Swipes[i]
+          if (p1 !== null && p1Manager && p1Quantity > 0n) {
+            redeems.push({
+              managerId: p1Manager,
+              oracleId: card.oracleId,
+              oracleExpiry: expiry,
+              strike: card.strike,
+              isUp: p1,
+              quantity: p1Quantity,
+            })
+          }
+        }
+      }
+
+      // Build PTB: settle every card that isn't already settled, then
+      // redeem positions (if any), then finalize. Redeems are independent
+      // of settle_card so ordering doesn't matter.
       const tx = new Transaction()
       let pending = 0
       for (let i = 0; i < duel.cardSettlements.length; i++) {
@@ -266,12 +404,33 @@ class Keeper {
             typeArguments: [duel.stakeCoinType],
             arguments: [
               tx.object(duelId),
-              tx.object(oracleId),
+              tx.object(duel.cards[i].oracleId),
               tx.pure.u64(BigInt(i)),
             ],
           })
           pending++
         }
+      }
+      for (const r of redeems) {
+        const mk = tx.moveCall({
+          target: `${DEEPBOOK_PREDICT_PACKAGE}::market_key::${r.isUp ? "up" : "down"}`,
+          arguments: [
+            tx.object(r.oracleId),
+            tx.pure.u64(r.oracleExpiry),
+            tx.pure.u64(r.strike),
+          ],
+        })
+        tx.moveCall({
+          target: `${DEEPBOOK_PREDICT_PACKAGE}::predict::redeem_permissionless`,
+          typeArguments: [DUSDC_TYPE],
+          arguments: [
+            tx.object(DEEPBOOK_PREDICT_OBJECT),
+            tx.object(r.managerId),
+            tx.object(r.oracleId),
+            mk,
+            tx.pure.u64(r.quantity),
+          ],
+        })
       }
       tx.moveCall({
         target: `${this.packageId}::duel::finalize`,
@@ -292,7 +451,9 @@ class Keeper {
       await this.client.waitForTransaction({ digest: res.digest })
       this.finalized.add(duelId)
       console.log(
-        `[finalize] ${shortId(duelId)} — settled ${pending} card(s) + finalize · ${shortId(res.digest)}`,
+        `[finalize] ${shortId(duelId)} — settled ${pending} card(s)` +
+          (redeems.length ? ` + ${redeems.length} redeem(s)` : "") +
+          ` + finalize · ${shortId(res.digest)}`,
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

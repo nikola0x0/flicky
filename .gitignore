@@ -36,5 +36,8 @@ local/
 apps/contracts/build/
 apps/contracts/package_summaries/
 
+# Server-side runtime state (deckmaster plaintext store etc.)
+apps/server/.data/
+
 # Local Claude Code state
 .claude/

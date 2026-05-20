@@ -29,10 +29,10 @@ import {
   useConnectWallet,
   useCurrentAccount,
   useDisconnectWallet,
-  useSignAndExecuteTransaction,
   useSuiClient,
   useWallets,
 } from "@mysten/dapp-kit"
+import { useFlickySign } from "@/lib/use-flicky-sign"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@workspace/ui/components/button"
 import {
@@ -51,6 +51,7 @@ import {
   buildCreateDuelTx,
   buildJoinDuelDusdcTx,
   buildJoinDuelTx,
+  buildRevealDeckTx,
   buildSettleAndFinalizeTx,
   buildSwipeTx,
   computeDeckHash,
@@ -604,7 +605,7 @@ function Lobby({
 }) {
   const client = useSuiClient()
   const queryClient = useQueryClient()
-  const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const { oracleId, oracle } = useOracle()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -770,7 +771,7 @@ function DepositPanel({
 }) {
   const client = useSuiClient()
   const queryClient = useQueryClient()
-  const { mutateAsync: signAndExec } = useSignAndExecuteTransaction()
+  const { mutateAsync: signAndExec } = useFlickySign()
   const [copied, setCopied] = useState(false)
   const [creating, setCreating] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -990,7 +991,13 @@ function PhaseDispatcher({
   // empty. Don't route into SwipingView yet — it would dereference
   // duel.cards[0] and crash. Show a transient reveal-pending state.
   if (duel.cards.length === 0) {
-    return <RevealingView />
+    return (
+      <RevealingView
+        duelId={duelId}
+        deckHashHex={duel.deckHashHex}
+        stakeCoinType={duel.stakeCoinType}
+      />
+    )
   }
   if (myNextIdx < 5) {
     return (
@@ -1072,10 +1079,30 @@ function JoinView({
   address: string
 }) {
   const client = useSuiClient()
-  const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const queryClient = useQueryClient()
   const [err, setErr] = useState<string | null>(null)
   const isDusdc = duel.stakeCoinType === DEEPBOOK.dusdcType
+
+  // Probe the deckmaster service for plaintext keyed by the deck hash.
+  // If the service has lost the plaintext (server restart with old in-mem
+  // store, or a duel created against a different deckmaster) no one can
+  // reveal post-join and the duel is bricked — refuse to join in that
+  // case so stake doesn't get locked into a dead duel.
+  const plaintextQuery = useQuery({
+    queryKey: ["deckmaster-reveal", duel.deckHashHex],
+    queryFn: async () => {
+      const res = await fetch(
+        `${DECKMASTER_BASE_URL}/deckmaster/reveal?hash=${encodeURIComponent(duel.deckHashHex)}`,
+      )
+      if (res.status === 404) return { available: false as const }
+      if (!res.ok) throw new Error(`reveal lookup failed: ${res.status}`)
+      return { available: true as const }
+    },
+    retry: false,
+    staleTime: 10_000,
+  })
+  const plaintextMissing = plaintextQuery.data?.available === false
 
   async function join() {
     setErr(null)
@@ -1103,9 +1130,20 @@ function JoinView({
       <p className="text-muted-foreground text-sm">
         creator staked <strong>{stake}</strong>. match it to start swiping.
       </p>
-      <Button size="lg" onClick={join} disabled={isPending} className="w-full">
-        join · stake {stake}
+      <Button
+        size="lg"
+        onClick={join}
+        disabled={isPending || plaintextMissing || plaintextQuery.isLoading}
+        className="w-full"
+      >
+        {plaintextMissing ? "deck unrevealable" : `join · stake ${stake}`}
       </Button>
+      {plaintextMissing && (
+        <p className="text-muted-foreground text-xs">
+          deckmaster lost this duel's plaintext (server restart). ask the
+          creator to re-create the duel.
+        </p>
+      )}
       {err && (
         <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-left text-xs text-red-500">
           {err}
@@ -1137,7 +1175,7 @@ function SwipingView({
   address: string
 }) {
   const client = useSuiClient()
-  const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const queryClient = useQueryClient()
   const now = useNow(250)
   const card = duel.cards[myNextIdx]
@@ -1286,7 +1324,12 @@ function SwipingView({
         <span className={speedColor}>
           {speed.label} {speed.tone === "good" && "⚡"}
         </span>
-        <span className="font-mono text-sm tabular-nums">{timerSec}s</span>
+        <span
+          className="font-mono text-sm tabular-nums"
+          title="decide window for this card — resets after each swipe"
+        >
+          {timerSec}s
+        </span>
       </div>
       <div className="bg-muted h-1.5 overflow-hidden rounded-full">
         <div
@@ -1422,12 +1465,62 @@ function SwipingView({
 /**
  * Status is ACTIVE but deck hasn't been revealed yet — keeper races to
  * call `reveal_deck` once it sees DuelJoined. Usually clears in 5–15 s.
- * If it sticks, the keeper isn't running and the creator's tab is the
- * only one that holds plaintext (the demo's reveal fallback path).
+ * If it sticks (keeper down / unfunded), this view exposes a manual
+ * reveal: any address can call `reveal_deck` since the contract verifies
+ * sha2_256(bcs(cards)) == duel.deck_hash. We pull the plaintext from
+ * the deckmaster service by hash, then sign reveal from the current tab.
  */
-function RevealingView() {
+function RevealingView({
+  duelId,
+  deckHashHex,
+  stakeCoinType,
+}: {
+  duelId: string
+  deckHashHex: string
+  stakeCoinType: string
+}) {
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
+  const queryClient = useQueryClient()
+  const [err, setErr] = useState<string | null>(null)
+
+  const plaintextQuery = useQuery<DeckCard[] | null>({
+    queryKey: ["deckmaster-reveal", deckHashHex],
+    queryFn: async () => {
+      const res = await fetch(
+        `${DECKMASTER_BASE_URL}/deckmaster/reveal?hash=${encodeURIComponent(deckHashHex)}`,
+      )
+      if (res.status === 404) return null
+      if (!res.ok) throw new Error(`reveal lookup failed: ${res.status}`)
+      const body = (await res.json()) as {
+        cards: Array<{ oracle_id: string; strike: string }>
+      }
+      return body.cards.map((c) => ({
+        oracleId: c.oracle_id,
+        strike: BigInt(c.strike),
+      }))
+    },
+    // Keep polling — keeper may still land first, in which case the
+    // duel object update will route us out of this view automatically.
+    refetchInterval: 4_000,
+    retry: false,
+  })
+
+  const cards = plaintextQuery.data ?? null
+
+  async function manualReveal() {
+    if (!cards) return
+    setErr(null)
+    try {
+      const tx = buildRevealDeckTx(duelId, cards, stakeCoinType)
+      await signAndExec({ transaction: tx })
+      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   return (
-    <div className="space-y-3 py-8 text-center">
+    <div className="space-y-4 py-8 text-center">
       <div className="flex justify-center">
         <span className="border-primary inline-block h-10 w-10 animate-spin rounded-full border-4 border-t-transparent" />
       </div>
@@ -1436,6 +1529,21 @@ function RevealingView() {
         the keeper pushes the plaintext on-chain once the challenger joins.
         usually clears within a few seconds.
       </p>
+      {cards && (
+        <div className="space-y-2 pt-2">
+          <p className="text-muted-foreground text-xs">
+            keeper looks slow — you can reveal manually.
+          </p>
+          <Button onClick={manualReveal} disabled={isPending} size="sm">
+            {isPending ? "revealing…" : "reveal now"}
+          </Button>
+        </div>
+      )}
+      {err && (
+        <p className="text-destructive text-xs break-all" role="alert">
+          {err}
+        </p>
+      )}
     </div>
   )
 }
@@ -1473,7 +1581,7 @@ function LockupView({
 }
 
 function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
-  const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const queryClient = useQueryClient()
   const [err, setErr] = useState<string | null>(null)
   const [digest, setDigest] = useState<string | null>(null)
@@ -1481,7 +1589,7 @@ function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
   async function settle() {
     setErr(null)
     try {
-      const tx = buildSettleAndFinalizeTx(duelId, duel.cards[0].oracleId, duel.stakeCoinType)
+      const tx = buildSettleAndFinalizeTx(duelId, duel.cards, duel.stakeCoinType)
       const res = await signAndExec({ transaction: tx })
       setDigest(res.digest)
       queryClient.invalidateQueries({ queryKey: ["duel", duelId] })

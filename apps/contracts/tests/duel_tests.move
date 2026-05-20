@@ -595,6 +595,72 @@ fun full_duel_score_tied_faster_player_wins_pot() {
     teardown(scenario, clock);
 }
 
+#[test]
+fun full_duel_score_tied_skipper_loses_tie_break() {
+    // Regression: a player who skips every swipe (None for every card) used
+    // to accumulate `total_decide_time = 0` and win the score-tie break in
+    // a 0-0 game. Skipped cards now count as the slow-window cap, so the
+    // active swiper wins.
+    let (mut scenario, mut clock) = setup_scenario();
+    create_duel_with_alice(&mut scenario, &clock);
+
+    // Bob joins but will NOT swipe a single card.
+    {
+        let mut d = take_duel(&mut scenario, BOB);
+        d.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
+        ts::return_shared(d);
+    };
+    reveal_atm_deck(&mut scenario);
+
+    // Alice swipes DOWN on every card, settlement above strike → all wrong
+    // → Alice scores 0. Bob skipped → Bob scores 0. Tied at 0-0.
+    let mut t = clock.timestamp_ms();
+    let deck_size = duel::test_deck_size();
+    let mut i = 0;
+    while (i < deck_size) {
+        t = t + 2_000;
+        clock.set_for_testing(t);
+        let oa = take_oracle(&mut scenario, ALICE);
+        let mut da = take_duel(&mut scenario, ALICE);
+        da.record_swipe(&oa, i, false, &clock, scenario.ctx());
+        ts::return_shared(da);
+        ts::return_shared(oa);
+        i = i + 1;
+    };
+
+    let expiry = START_MS + ORACLE_TTL_MS;
+    clock.set_for_testing(expiry + 1_000);
+    {
+        let mut o = take_oracle(&mut scenario, ADMIN);
+        o.settle_for_testing(ATM_STRIKE + 1_000_000_000);
+        ts::return_shared(o);
+    };
+    let mut j = 0;
+    while (j < deck_size) {
+        let o = take_oracle(&mut scenario, ADMIN);
+        let mut d = take_duel(&mut scenario, ADMIN);
+        d.settle_card(&o, j);
+        ts::return_shared(d);
+        ts::return_shared(o);
+        j = j + 1;
+    };
+
+    let mut d = take_duel(&mut scenario, ADMIN);
+    d.finalize(scenario.ctx());
+    assert_eq!(d.p0_score(), 0);
+    assert_eq!(d.p1_score(), 0);
+    ts::return_shared(d);
+
+    // Alice (the swiper) takes the full pot — Bob's skipped swipes
+    // contribute the slow-cap to his total decide-time.
+    scenario.next_tx(ALICE);
+    let payout = scenario.take_from_address<coin::Coin<SUI>>(ALICE);
+    assert_eq!(payout.value(), STAKE_AMOUNT * 2);
+    destroy(payout);
+
+    teardown(scenario, clock);
+}
+
 #[test, expected_failure(abort_code = duel::EOracleNotSettled)]
 fun settle_card_rejects_unsettled_oracle() {
     let (mut scenario, clock) = setup_scenario();

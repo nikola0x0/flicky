@@ -42,6 +42,10 @@ export interface DuelState {
   status: DuelStatus
   creator: string
   challenger: string
+  /** sha2-256 commitment over the deck, "0x"-prefixed lowercase hex.
+   *  Used to fetch plaintext from `/deckmaster/reveal?hash=…` for the
+   *  client-side reveal fallback. */
+  deckHashHex: string
   cards: DuelCard[]
   p0Stake: bigint
   p1Stake: bigint
@@ -276,18 +280,24 @@ export function buildSwipeTx(
   return tx
 }
 
-/** Settle all 5 cards + finalize payout in a single PTB. */
+/**
+ * Settle all 5 cards + finalize payout in a single PTB. Pass the deck's
+ * cards array (not just one oracleId) so each `settle_card` reads the
+ * settlement price from its own card's oracle — decks may span multiple
+ * oracles even though today's Deckmaster picks one.
+ */
 export function buildSettleAndFinalizeTx(
   duelId: string,
-  oracleId: string,
+  cards: DuelCard[],
   stakeCoinType: string = CONFIG.stakeType,
 ): Transaction {
+  if (cards.length !== 5) throw new Error("expected 5 cards to settle")
   const tx = new Transaction()
   for (let i = 0; i < 5; i++) {
     tx.add(
       duelGen.settleCard({
         package: packageId,
-        arguments: [duelId, oracleId, i],
+        arguments: [duelId, cards[i].oracleId, i],
         typeArguments: [stakeCoinType],
       }),
     )
@@ -312,6 +322,7 @@ interface MoveFieldWrapper<T> {
 interface RawDuelFields {
   id: { id: string }
   status: string | number
+  deck_hash: number[] | string
   cards: Array<MoveFieldWrapper<{ oracle_id: string; strike: string }>>
   creator: string
   challenger: string
@@ -364,12 +375,21 @@ export function parseDuel(obj: SuiObjectResponse): DuelState {
   // e.g. "0xpkg::duel::Duel<0x2::sui::SUI>"  →  "0x2::sui::SUI"
   const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
   const stakeCoinType = typeMatch?.[1] ?? CONFIG.stakeType
+  // Sui RPC returns vector<u8> either as number[] or a hex string.
+  const deckHashHex =
+    typeof fields.deck_hash === "string"
+      ? fields.deck_hash.toLowerCase().startsWith("0x")
+        ? fields.deck_hash.toLowerCase()
+        : "0x" + fields.deck_hash.toLowerCase()
+      : "0x" +
+        fields.deck_hash.map((b) => b.toString(16).padStart(2, "0")).join("")
   return {
     id: normalizeSuiObjectId(fields.id.id),
     stakeCoinType,
     status: STATUS_MAP[String(fields.status)] ?? "PENDING",
     creator: fields.creator,
     challenger: fields.challenger,
+    deckHashHex,
     cards,
     p0Stake: balanceValue(fields.p0_stake),
     p1Stake: balanceValue(fields.p1_stake),
@@ -469,13 +489,41 @@ export async function fetchOracleSvi(
 }
 
 /**
- * Find the most recent BTC `OracleSVI` published by DeepBook on testnet
- * that's actually usable — ACTIVE, not settled, with a non-zero price
- * pushed. DeepBook rotates oracles every ~15 min, and the freshest
- * OracleCreated event often points at one the operator hasn't yet
- * activated or primed, which would render as "BTC $0 fwd $0 inactive"
- * in the UI. Walk the candidates from newest to oldest and return the
- * first one that's live; fall back to config default if none qualify.
+ * Minimum expiry headroom we require when picking an oracle, in ms.
+ * Must cover the full swipe phase (up to 60 s) plus a margin for join
+ * latency and clock drift, otherwise `record_swipe` would abort with
+ * `EOracleNotLive`.
+ */
+const ORACLE_MIN_HEADROOM_MS = 90_000n
+
+/**
+ * Pick the BTC `OracleSVI` with the **shortest viable expiry** from
+ * DeepBook's live pool.
+ *
+ * Why shortest, not newest:
+ *
+ * DeepBook testnet runs a rolling pool of multiple oracles at once with
+ * expiries spread across quarter-hour boundaries (`:15, :30, :45, :00`)
+ * AND longer-dated tiers (~1–5 h out). DeepBook publishes the long-dated
+ * oracles *after* the near-dated ones, so "newest by OracleCreated event"
+ * is biased toward the longest-dated oracle in the pool. A duel pinned
+ * to that one only settles when DeepBook's settlement_price for that far
+ * expiry is published — could be 4 h+ later.
+ *
+ * For PvP flow we want duels to settle ASAP after swipes lock, so prefer
+ * the closest expiry that still has enough headroom for the swipe phase.
+ * `ORACLE_MIN_HEADROOM_MS` is the floor.
+ *
+ * Candidate selection:
+ *   1. Read the 30 most recent `registry::OracleCreated` events.
+ *   2. Multi-get the oracle objects in batch.
+ *   3. Keep ones that are ACTIVE + priced (spot/forward > 0) + not
+ *      settled + `expiry - now >= ORACLE_MIN_HEADROOM_MS`.
+ *   4. Return the one with the SMALLEST `expiry`.
+ *   5. Fall back to `CONFIG.fallbackOracleSviId` if none qualify.
+ *
+ * See `docs/oracle-selection.md` for the full rationale, live testnet
+ * observations, and tuning guide.
  */
 export async function findLatestOracleSvi(
   client: SuiClient,
@@ -496,19 +544,20 @@ export async function findLatestOracleSvi(
         candidates.push(normalizeSuiObjectId(p.oracle_id))
       }
     }
-    // Batch-fetch state for the top N candidates and pick the first that's
-    // ACTIVE + priced + not yet settled.
     if (candidates.length > 0) {
       const top = candidates.slice(0, 10)
       const objs = await client.multiGetObjects({
         ids: top,
         options: { showContent: true },
       })
+      const nowMs = BigInt(Date.now())
+      let best: { id: string; expiry: bigint } | null = null
       for (let i = 0; i < objs.length; i++) {
         const obj = objs[i]
         if (obj.data?.content?.dataType !== "moveObject") continue
         const f = obj.data.content.fields as {
           active?: boolean
+          expiry?: string
           prices?: { fields?: { spot?: string; forward?: string } }
           settlement_price?: unknown
         }
@@ -521,10 +570,14 @@ export async function findLatestOracleSvi(
               ?.length ?? 0) > 0)
         const spot = BigInt(f.prices?.fields?.spot ?? "0")
         const forward = BigInt(f.prices?.fields?.forward ?? "0")
-        if (!settled && f.active && spot > 0n && forward > 0n) {
-          return top[i]
+        const expiry = BigInt(f.expiry ?? "0")
+        if (settled || !f.active || spot === 0n || forward === 0n) continue
+        if (expiry - nowMs < ORACLE_MIN_HEADROOM_MS) continue
+        if (best === null || expiry < best.expiry) {
+          best = { id: top[i], expiry }
         }
       }
+      if (best) return best.id
     }
   } catch {
     // fall through

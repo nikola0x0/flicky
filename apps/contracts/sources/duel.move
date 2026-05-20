@@ -446,8 +446,10 @@ public fun finalize<T>(duel: &mut Duel<T>, ctx: &mut TxContext) {
     });
 }
 
-/// Sum of `decide_time_ms` across all recorded swipes (None entries
-/// contribute 0). Used as the score-tie breaker in `finalize`.
+/// Sum of `decide_time_ms` across all recorded swipes. Skipped cards
+/// (None) are counted as the slow-window cap so a player who refuses
+/// to swipe can't beat a player who answered every card on the
+/// score-tie breaker. Used in `finalize`.
 fun total_decide_time(swipes: &vector<Option<Swipe>>): u64 {
     let mut total: u64 = 0;
     let mut i = 0;
@@ -455,6 +457,8 @@ fun total_decide_time(swipes: &vector<Option<Swipe>>): u64 {
         let s = &swipes[i];
         if (s.is_some()) {
             total = total + s.borrow().decide_time_ms;
+        } else {
+            total = total + SPEED_SLOW_MAX_MS;
         };
         i = i + 1;
     };

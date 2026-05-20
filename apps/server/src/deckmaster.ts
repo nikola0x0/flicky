@@ -9,13 +9,16 @@
  * upgrade after this slice — the commit-reveal scaffolding doesn't care
  * which strikes get committed, only that the hash matches.
  *
- * State lives in-memory (`Map<hashHex, plaintext>`). Restart the server
- * and pending duels lose their plaintext → they have to be revealed by
- * the creator's tab instead. For production we'd persist to disk/db.
+ * State is persisted to `apps/server/.data/decks.json` so a server
+ * restart doesn't strand pending duels. The keeper or the player's tab
+ * still has to actually call `reveal_deck` on chain — this just keeps
+ * the plaintext lookup alive across restarts.
  */
 import { bcs } from "@mysten/sui/bcs"
 import { normalizeSuiAddress } from "@mysten/sui/utils"
 import { createHash } from "node:crypto"
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs"
+import { dirname, resolve } from "node:path"
 
 export interface DeckCard {
   oracle_id: string
@@ -59,14 +62,60 @@ export function hashToHex(hash: Uint8Array): string {
 }
 
 /**
- * In-memory store keyed by hash hex. The keeper (or any reveal path)
- * fetches plaintext by hash via GET /deckmaster/reveal?hash=0x...
+ * Store keyed by hash hex. Backed by `apps/server/.data/decks.json` so
+ * pending duels survive a server restart. The keeper (or any reveal
+ * path) fetches plaintext by hash via GET /deckmaster/reveal?hash=0x...
  */
-const store = new Map<string, DeckCard[]>()
+const STORE_PATH = resolve(
+  process.env.DECKMASTER_STORE_PATH ??
+    new URL("../.data/decks.json", import.meta.url).pathname,
+)
+
+const store: Map<string, DeckCard[]> = loadStore()
+
+function loadStore(): Map<string, DeckCard[]> {
+  if (!existsSync(STORE_PATH)) return new Map()
+  try {
+    const raw = readFileSync(STORE_PATH, "utf-8")
+    const obj = JSON.parse(raw) as Record<
+      string,
+      Array<{ oracle_id: string; strike: string }>
+    >
+    const m = new Map<string, DeckCard[]>()
+    for (const [hex, cards] of Object.entries(obj)) {
+      m.set(
+        hex.toLowerCase(),
+        cards.map((c) => ({ oracle_id: c.oracle_id, strike: BigInt(c.strike) })),
+      )
+    }
+    return m
+  } catch (e) {
+    console.warn(
+      `[deckmaster] failed to load ${STORE_PATH}: ${e instanceof Error ? e.message : String(e)}`,
+    )
+    return new Map()
+  }
+}
+
+function persistStore(): void {
+  const obj: Record<string, Array<{ oracle_id: string; strike: string }>> = {}
+  for (const [hex, cards] of store.entries()) {
+    obj[hex] = cards.map((c) => ({ oracle_id: c.oracle_id, strike: c.strike.toString() }))
+  }
+  try {
+    mkdirSync(dirname(STORE_PATH), { recursive: true })
+    writeFileSync(STORE_PATH, JSON.stringify(obj, null, 2), "utf-8")
+  } catch (e) {
+    console.warn(
+      `[deckmaster] failed to persist ${STORE_PATH}: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
 
 export function rememberDeck(hash: Uint8Array, cards: DeckCard[]): string {
   const hex = hashToHex(hash)
   store.set(hex, cards)
+  persistStore()
   return hex
 }
 
@@ -75,7 +124,7 @@ export function fetchDeck(hashHex: string): DeckCard[] | undefined {
 }
 
 export function forgetDeck(hashHex: string): void {
-  store.delete(hashHex.toLowerCase())
+  if (store.delete(hashHex.toLowerCase())) persistStore()
 }
 
 export function knownHashCount(): number {
