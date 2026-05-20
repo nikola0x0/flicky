@@ -26,10 +26,12 @@ import {
   type ReactNode,
 } from "react"
 import {
-  ConnectButton,
+  useConnectWallet,
   useCurrentAccount,
+  useDisconnectWallet,
   useSignAndExecuteTransaction,
   useSuiClient,
+  useWallets,
 } from "@mysten/dapp-kit"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@workspace/ui/components/button"
@@ -140,6 +142,262 @@ function shortId(id: string, len = 6): string {
   return id.length > len * 2 + 2 ? `${id.slice(0, len)}…${id.slice(-len)}` : id
 }
 
+// ─── wallet button (custom-styled replacement for dapp-kit ConnectButton) ───
+
+/**
+ * Two states:
+ *   - disconnected → opens a modal listing available wallets
+ *   - connected → opens a dropdown with copy / explorer / disconnect
+ */
+function WalletButton() {
+  const account = useCurrentAccount()
+  const [modalOpen, setModalOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  if (!account) {
+    return (
+      <>
+        <Button
+          size="sm"
+          onClick={() => setModalOpen(true)}
+          className="h-9 px-4 text-sm font-medium tracking-[-0.005em]"
+        >
+          connect wallet
+        </Button>
+        {modalOpen && <WalletModal onClose={() => setModalOpen(false)} />}
+      </>
+    )
+  }
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setMenuOpen((v) => !v)}
+        className="border-hairline bg-surface-1 hover:bg-surface-2 flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium tracking-[-0.005em] transition"
+      >
+        <span className="bg-primary inline-block h-2 w-2 rounded-full" />
+        <span className="font-mono text-[12px]">{shortId(account.address, 4)}</span>
+        <span className="text-ink-subtle text-[10px]">▾</span>
+      </button>
+      {menuOpen && (
+        <WalletMenu address={account.address} onClose={() => setMenuOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+function WalletModal({ onClose }: { onClose: () => void }) {
+  const wallets = useWallets()
+  const { mutateAsync: connect, isPending, error } = useConnectWallet()
+  const [busyWallet, setBusyWallet] = useState<string | null>(null)
+
+  // Close on Escape.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose()
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  async function pick(name: string) {
+    const wallet = wallets.find((w) => w.name === name)
+    if (!wallet) return
+    setBusyWallet(name)
+    try {
+      await connect({ wallet })
+      onClose()
+    } catch {
+      // error surfaces below
+    } finally {
+      setBusyWallet(null)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        onClick={(e) => e.stopPropagation()}
+        className="border-hairline bg-surface-1 w-full max-w-sm rounded-t-xl border p-5 shadow-2xl sm:rounded-xl"
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-base font-semibold tracking-[-0.01em]">
+            Connect wallet
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-ink-subtle hover:text-foreground text-xl leading-none"
+            aria-label="close"
+          >
+            ×
+          </button>
+        </div>
+        {wallets.length === 0 ? (
+          <p className="text-ink-subtle text-sm">
+            No Sui wallets detected. Install{" "}
+            <a
+              href="https://chromewebstore.google.com/detail/sui-wallet/opcgpfmipidbgpenhmajoajpbobppdil"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline decoration-dotted"
+            >
+              Sui Wallet
+            </a>{" "}
+            or{" "}
+            <a
+              href="https://suiet.app"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline decoration-dotted"
+            >
+              Suiet
+            </a>{" "}
+            and reload.
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {wallets.map((w) => (
+              <button
+                key={w.name}
+                onClick={() => pick(w.name)}
+                disabled={isPending}
+                className="border-hairline hover:bg-surface-2 group flex w-full items-center gap-3 rounded-md border bg-transparent px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {w.icon ? (
+                  <img
+                    src={w.icon}
+                    alt=""
+                    className="h-7 w-7 rounded-md object-cover"
+                  />
+                ) : (
+                  <div className="bg-surface-3 h-7 w-7 rounded-md" />
+                )}
+                <span className="flex-1 text-sm font-medium">{w.name}</span>
+                {busyWallet === w.name && (
+                  <span className="text-ink-subtle text-xs">connecting…</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+        {error && (
+          <p className="mt-3 rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+            {error.message}
+          </p>
+        )}
+        <p className="text-ink-tertiary mt-4 text-[10px]">
+          By connecting, you authorize this app to read your address. No
+          transactions are sent until you confirm them.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function WalletMenu({
+  address,
+  onClose,
+}: {
+  address: string
+  onClose: () => void
+}) {
+  const { mutateAsync: disconnect } = useDisconnectWallet()
+  const [copied, setCopied] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // Click outside / Escape to close.
+  useEffect(() => {
+    function onPointerDown(e: PointerEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose()
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose()
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [onClose])
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(address)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <div
+      ref={menuRef}
+      className="border-hairline bg-surface-1 absolute right-0 top-11 z-40 w-64 overflow-hidden rounded-lg border shadow-2xl"
+    >
+      <div className="border-hairline border-b px-3 py-2.5">
+        <div className="text-ink-subtle text-[10px] font-medium uppercase tracking-[0.06em]">
+          Connected
+        </div>
+        <code className="mt-1 block break-all font-mono text-[11px]">{address}</code>
+      </div>
+      <div className="p-1">
+        <MenuItem onClick={copy}>
+          <span>📋</span>
+          <span>{copied ? "copied!" : "copy address"}</span>
+        </MenuItem>
+        <a
+          href={objUrl(address)}
+          target="_blank"
+          rel="noreferrer"
+          onClick={onClose}
+          className="hover:bg-surface-2 flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition"
+        >
+          <span>🔍</span>
+          <span>open in explorer</span>
+        </a>
+        <MenuItem
+          onClick={async () => {
+            await disconnect()
+            onClose()
+          }}
+          tone="danger"
+        >
+          <span>⏻</span>
+          <span>disconnect</span>
+        </MenuItem>
+      </div>
+    </div>
+  )
+}
+
+function MenuItem({
+  children,
+  onClick,
+  tone,
+}: {
+  children: ReactNode
+  onClick: () => void
+  tone?: "danger"
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`hover:bg-surface-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${
+        tone === "danger" ? "text-red-400 hover:text-red-300" : ""
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
 /**
  * Request a Deckmaster-generated deck from the server. Falls back to
  * client-side generation (less robust — the keeper won't have plaintext
@@ -219,7 +477,7 @@ export default function App() {
             swipe BTC binaries · PvP on Sui testnet
           </p>
         </div>
-        <ConnectButton />
+        <WalletButton />
       </header>
 
       <main className="mx-auto max-w-3xl space-y-4 px-4 pb-12 sm:px-6">
