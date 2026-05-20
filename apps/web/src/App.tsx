@@ -1,18 +1,27 @@
 /**
- * Minimal smoke-test UI for the cleaned-up libs after Phase 1. Exercises:
- *   - findLatestOracleSvi + fetchOracleSvi
- *   - buildCreateDuelTx / buildJoinDuelTx / buildSwipeTx / buildSettleAndFinalizeTx
- *   - listDuelIds + fetchDuel
+ * Flicky game UI — phased state machine driven by on-chain duel state.
  *
- * Real PRD-spec gameplay UI (3 stake buttons → matchmaking → swipe phase →
- * lockup → share card) ships in Phase 3.
+ *   Lobby ─→ WaitingForOpponent ─→ Swiping ─→ Lockup ─→ Settling ─→ Result
+ *           (creator side)         (5 cards,            (call settle
+ *                                   per-card timer)      + finalize)
+ *
+ *   Lobby ─→ Joining ─→ Swiping ─→ Lockup ─→ Settling ─→ Result
+ *           (challenger side)
+ *
+ * Every phase reads from `fetchDuel(client, duelId)` polled every 3 s. The
+ * derived phase + per-player view comes from `d.status`, `myNextCardIdx`,
+ * `settledCount`, and the oracle's `settlementPrice`.
+ *
+ * This is a Phase 2 MVP UI — single-asset (BTC), single-stake-coin (SUI),
+ * no zkLogin, no sponsored gas, no matchmaking. Real PRD multiplayer
+ * loop is Phase 3.
  */
-import { useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import {
   ConnectButton,
   useCurrentAccount,
-  useSuiClient,
   useSignAndExecuteTransaction,
+  useSuiClient,
 } from "@mysten/dapp-kit"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@workspace/ui/components/button"
@@ -25,7 +34,6 @@ import {
 } from "@workspace/ui/components/card"
 import { Badge } from "@workspace/ui/components/badge"
 import { Separator } from "@workspace/ui/components/separator"
-import { Input } from "@workspace/ui/components/input"
 
 import { CONFIG } from "@/lib/config"
 import {
@@ -38,10 +46,32 @@ import {
   findLatestOracleSvi,
   listDuelIds,
   oracleStrikes,
+  type DuelState,
+  type OracleSviInfo,
 } from "@/lib/flicky"
 
+// ─── stake tier presets (free tier — SUI mist; staked tier is Phase 3) ─────
+
+interface StakeTier {
+  label: string
+  blurb: string
+  mist: bigint
+}
+
+const STAKE_TIERS: StakeTier[] = [
+  { label: "Practice", blurb: "0.01 SUI", mist: 10_000_000n },
+  { label: "Standard", blurb: "0.05 SUI", mist: 50_000_000n },
+  { label: "High Roller", blurb: "0.10 SUI", mist: 100_000_000n },
+]
+
+// Swipe-phase pacing
+const SWIPE_PHASE_MS = 60_000
+const SPEED_FAST_MAX_MS = 5_000
+const SPEED_NORMAL_MAX_MS = 20_000
+
 const EXPLORER = "https://suiscan.xyz/testnet"
-const obj = (id: string) => `${EXPLORER}/object/${id}`
+const objUrl = (id: string) => `${EXPLORER}/object/${id}`
+const txExplorerUrl = (digest: string) => `${EXPLORER}/tx/${digest}`
 
 function ExplorerLink({ href, children }: { href: string; children: ReactNode }) {
   return (
@@ -57,40 +87,98 @@ function ExplorerLink({ href, children }: { href: string; children: ReactNode })
 }
 
 function fmtUsd(n9: bigint): string {
-  return `$${(Number(n9) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+  return `$${(Number(n9) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
 }
 
 function fmtSui(mist: bigint): string {
   return `${(Number(mist) / 1e9).toFixed(4)} SUI`
 }
 
-function shortId(id: string, len = 8): string {
+function shortId(id: string, len = 6): string {
   return id.length > len * 2 + 2 ? `${id.slice(0, len)}…${id.slice(-len)}` : id
 }
 
+function speedMultiplier(ms: number): { label: string; mult: number; tone: "good" | "ok" | "warn" } {
+  if (ms <= SPEED_FAST_MAX_MS) return { label: "1.5×", mult: 1.5, tone: "good" }
+  if (ms <= SPEED_NORMAL_MAX_MS) return { label: "1.0×", mult: 1.0, tone: "ok" }
+  return { label: "0.75×", mult: 0.75, tone: "warn" }
+}
+
+// Used for the swipe-phase countdown — re-renders once per second.
+function useNow(intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(t)
+  }, [intervalMs])
+  return now
+}
+
+// ─── top-level ──────────────────────────────────────────────────────────────
+
 export default function App() {
   const account = useCurrentAccount()
+  const [selectedDuel, setSelectedDuel] = useState<string | null>(null)
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-6">
-      <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">flicky · phase 1 smoke test</h1>
+    <div className="bg-background min-h-screen">
+      <header className="mx-auto flex max-w-3xl items-center justify-between p-4 sm:p-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            <span className="text-primary">flicky</span>
+          </h1>
+          <p className="text-muted-foreground text-xs">
+            swipe BTC binaries · PvP on Sui testnet
+          </p>
+        </div>
         <ConnectButton />
       </header>
-      <p className="text-muted-foreground text-sm">
-        Package <code>{shortId(CONFIG.packageId)}</code> on testnet. Real PRD-spec UI ships in
-        phase 3 — this view exists to exercise the rewritten libs.
-      </p>
 
-      <OraclePanel />
-      {account && <LobbyPanel address={account.address} />}
+      <main className="mx-auto max-w-3xl space-y-4 px-4 pb-12 sm:px-6">
+        <OracleStrip />
+        {account ? (
+          selectedDuel ? (
+            <DuelView
+              duelId={selectedDuel}
+              address={account.address}
+              onBack={() => setSelectedDuel(null)}
+            />
+          ) : (
+            <Lobby address={account.address} onEnterDuel={setSelectedDuel} />
+          )
+        ) : (
+          <ConnectPrompt />
+        )}
+
+        <Footer />
+      </main>
     </div>
   )
 }
 
-function OraclePanel() {
-  const client = useSuiClient()
+function ConnectPrompt() {
+  return (
+    <Card className="border-dashed">
+      <CardContent className="text-muted-foreground py-12 text-center text-sm">
+        Connect a Sui testnet wallet to play.
+      </CardContent>
+    </Card>
+  )
+}
 
+function Footer() {
+  return (
+    <p className="text-muted-foreground pt-4 text-center text-xs">
+      package <code>{shortId(CONFIG.packageId)}</code>{" "}
+      <ExplorerLink href={objUrl(CONFIG.packageId)}>flicky on chain</ExplorerLink>
+    </p>
+  )
+}
+
+// ─── oracle strip (always visible) ──────────────────────────────────────────
+
+function useOracle() {
+  const client = useSuiClient()
   const oracleIdQuery = useQuery({
     queryKey: ["oracle-id"],
     queryFn: () => findLatestOracleSvi(client),
@@ -102,253 +190,703 @@ function OraclePanel() {
     enabled: !!oracleIdQuery.data,
     refetchInterval: 5_000,
   })
+  return { oracleId: oracleIdQuery.data, oracle: oracleQuery.data }
+}
+
+function OracleStrip() {
+  const { oracleId, oracle } = useOracle()
+  const now = useNow(5_000)
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>BTC oracle (DeepBook OracleSVI)</CardTitle>
-        <CardDescription>
-          {oracleIdQuery.data ? (
-            <ExplorerLink href={obj(oracleIdQuery.data)}>
-              {shortId(oracleIdQuery.data)}
-            </ExplorerLink>
-          ) : (
-            "discovering…"
-          )}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-1 text-sm">
-        {oracleQuery.data ? (
-          <>
-            <div>
-              spot <strong>{fmtUsd(oracleQuery.data.spot)}</strong> · forward{" "}
-              <strong>{fmtUsd(oracleQuery.data.forward)}</strong>
-            </div>
-            <div>
-              expiry{" "}
-              <span className="text-muted-foreground">
-                {new Date(Number(oracleQuery.data.expiry)).toLocaleString()}
+    <Card className="bg-muted/30 border-none">
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4 text-sm">
+        <div className="flex items-baseline gap-2">
+          <span className="text-muted-foreground text-xs uppercase tracking-wide">BTC</span>
+          {oracle ? (
+            <>
+              <span className="text-xl font-semibold tabular-nums">
+                {fmtUsd(oracle.spot)}
               </span>
-            </div>
-            <div>
-              status{" "}
-              <Badge variant={oracleQuery.data.isActive ? "default" : "secondary"}>
-                {oracleQuery.data.settlementPrice !== null
-                  ? `settled @ ${fmtUsd(oracleQuery.data.settlementPrice)}`
-                  : oracleQuery.data.isActive
-                    ? "active"
-                    : "inactive"}
-              </Badge>
-            </div>
-          </>
-        ) : (
-          <span className="text-muted-foreground">loading…</span>
-        )}
+              <span className="text-muted-foreground text-xs">
+                fwd {fmtUsd(oracle.forward)}
+              </span>
+            </>
+          ) : (
+            <span className="text-muted-foreground text-xs">connecting…</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 text-xs">
+          {oracle && (
+            <Badge variant={oracle.isActive ? "default" : "secondary"}>
+              {oracle.settlementPrice !== null
+                ? `settled ${fmtUsd(oracle.settlementPrice)}`
+                : oracle.isActive
+                  ? expiresIn(oracle, now)
+                  : "inactive"}
+            </Badge>
+          )}
+          {oracleId && (
+            <ExplorerLink href={objUrl(oracleId)}>{shortId(oracleId)}</ExplorerLink>
+          )}
+        </div>
       </CardContent>
     </Card>
   )
 }
 
-function LobbyPanel({ address }: { address: string }) {
+function expiresIn(o: OracleSviInfo, now: number): string {
+  const ms = Number(o.expiry) - now
+  if (ms <= 0) return "expired"
+  const min = Math.floor(ms / 60_000)
+  const sec = Math.floor((ms % 60_000) / 1000)
+  return `${min}m${sec.toString().padStart(2, "0")}s left`
+}
+
+// ─── lobby ──────────────────────────────────────────────────────────────────
+
+function Lobby({
+  address,
+  onEnterDuel,
+}: {
+  address: string
+  onEnterDuel: (id: string) => void
+}) {
   const client = useSuiClient()
   const queryClient = useQueryClient()
   const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
-  const [stakeMist, setStakeMist] = useState<string>(CONFIG.defaultStakeMist.toString())
-  const [status, setStatus] = useState<string>("")
+  const { oracleId, oracle } = useOracle()
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
 
-  const oracleIdQuery = useQuery({
-    queryKey: ["oracle-id"],
-    queryFn: () => findLatestOracleSvi(client),
-    staleTime: 60_000,
-  })
-  const oracleQuery = useQuery({
-    queryKey: ["oracle", oracleIdQuery.data],
-    queryFn: () => fetchOracleSvi(client, oracleIdQuery.data!),
-    enabled: !!oracleIdQuery.data,
-  })
   const duelsQuery = useQuery({
     queryKey: ["duels"],
-    queryFn: () => listDuelIds(client, 20),
-    staleTime: 10_000,
+    queryFn: () => listDuelIds(client, 10),
+    refetchInterval: 6_000,
   })
 
-  async function createDuel() {
-    if (!oracleQuery.data || !oracleIdQuery.data) return
-    const ref = oracleQuery.data.settlementPrice ?? oracleQuery.data.forward
-    const strikes = oracleStrikes(ref)
-    setStatus("submitting create_duel…")
-    try {
-      const tx = buildCreateDuelTx(oracleIdQuery.data, strikes, BigInt(stakeMist))
-      const res = await signAndExec({ transaction: tx })
-      setStatus(`created — tx ${shortId(res.digest)}`)
-      queryClient.invalidateQueries({ queryKey: ["duels"] })
-    } catch (e) {
-      setStatus(`error: ${e instanceof Error ? e.message : String(e)}`)
-    }
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Lobby</CardTitle>
-        <CardDescription>
-          your address <ExplorerLink href={obj(address)}>{shortId(address)}</ExplorerLink>
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex items-end gap-2">
-          <div className="flex-1 space-y-1">
-            <label className="text-sm font-medium">stake (mist, 1e9 = 1 SUI)</label>
-            <Input
-              type="text"
-              value={stakeMist}
-              onChange={(e) => setStakeMist(e.target.value)}
-            />
-          </div>
-          <Button onClick={createDuel} disabled={isPending || !oracleQuery.data}>
-            create duel
-          </Button>
-        </div>
-        {status && <p className="text-muted-foreground text-sm">{status}</p>}
-
-        <Separator />
-
-        <div>
-          <h3 className="mb-2 text-sm font-semibold">recent duels</h3>
-          {duelsQuery.isLoading && (
-            <p className="text-muted-foreground text-sm">loading…</p>
-          )}
-          {duelsQuery.data && duelsQuery.data.length === 0 && (
-            <p className="text-muted-foreground text-sm">none yet</p>
-          )}
-          {duelsQuery.data?.map((id) => (
-            <DuelRow key={id} duelId={id} address={address} />
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function DuelRow({ duelId, address }: { duelId: string; address: string }) {
-  const client = useSuiClient()
-  const queryClient = useQueryClient()
-  const { mutateAsync: signAndExec } = useSignAndExecuteTransaction()
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState<string>("")
-
-  const duelQuery = useQuery({
-    queryKey: ["duel", duelId],
-    queryFn: () => fetchDuel(client, duelId),
-    refetchInterval: 3_000,
-  })
-
-  if (!duelQuery.data) return null
-  const d = duelQuery.data
-  const isCreator = d.creator === address
-  const isChallenger = d.challenger === address
-  const isPlayer = isCreator || isChallenger
-  const myNextIdx = isCreator ? Number(d.p0NextCardIdx) : Number(d.p1NextCardIdx)
-
-  async function action(label: string, buildTx: () => Promise<unknown> | unknown) {
+  async function createDuel(stakeMist: bigint) {
+    if (!oracleId || !oracle) return
     setBusy(true)
-    setMsg(`${label}…`)
+    setErr(null)
     try {
-      const tx = await Promise.resolve(buildTx())
-      const res = await signAndExec({ transaction: tx as never })
-      setMsg(`${label} ok — ${shortId(res.digest)}`)
-      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+      const ref = oracle.settlementPrice ?? oracle.forward
+      const strikes = oracleStrikes(ref)
+      const tx = buildCreateDuelTx(oracleId, strikes, stakeMist)
+      const res = await signAndExec({ transaction: tx })
+      // dapp-kit v1 only returns { digest, rawEffects }. Follow up with
+      // waitForTransaction to pull objectChanges for the new Duel id.
+      const full = await client.waitForTransaction({
+        digest: res.digest,
+        options: { showObjectChanges: true },
+      })
+      const created = full.objectChanges?.find(
+        (c) => c.type === "created" && c.objectType.includes("::duel::Duel<"),
+      )
+      queryClient.invalidateQueries({ queryKey: ["duels"] })
+      if (created?.type === "created") onEnterDuel(created.objectId)
     } catch (e) {
-      setMsg(`error: ${e instanceof Error ? e.message : String(e)}`)
+      setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <div className="bg-muted/30 mt-2 rounded p-3 text-sm">
-      <div className="flex items-center justify-between">
-        <ExplorerLink href={obj(duelId)}>{shortId(duelId)}</ExplorerLink>
-        <Badge>{d.status}</Badge>
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle>Pick your stake</CardTitle>
+          <CardDescription>
+            you stake · opponent matches · winner takes the pot
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+            {STAKE_TIERS.map((t) => (
+              <button
+                key={t.label}
+                disabled={isPending || busy || !oracle}
+                onClick={() => createDuel(t.mist)}
+                className="border-input bg-background hover:border-primary hover:bg-primary/5 group flex flex-col rounded-lg border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-50 sm:p-4"
+              >
+                <span className="text-muted-foreground text-xs uppercase tracking-wide">
+                  {t.label}
+                </span>
+                <span className="mt-1 text-base font-semibold sm:text-lg">{t.blurb}</span>
+                <span className="text-muted-foreground mt-2 text-xs">
+                  pot {fmtSui(t.mist * 2n)}
+                </span>
+              </button>
+            ))}
+          </div>
+          {err && (
+            <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+              {err}
+            </p>
+          )}
+          <p className="text-muted-foreground text-xs">
+            your wallet:{" "}
+            <ExplorerLink href={objUrl(address)}>{shortId(address)}</ExplorerLink>
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Recent duels</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {duelsQuery.isLoading && (
+            <p className="text-muted-foreground text-sm">loading…</p>
+          )}
+          {duelsQuery.data?.length === 0 && (
+            <p className="text-muted-foreground text-sm">no duels yet. be the first.</p>
+          )}
+          {duelsQuery.data?.map((id) => (
+            <DuelSummary
+              key={id}
+              duelId={id}
+              address={address}
+              onOpen={() => onEnterDuel(id)}
+            />
+          ))}
+        </CardContent>
+      </Card>
+    </>
+  )
+}
+
+function DuelSummary({
+  duelId,
+  address,
+  onOpen,
+}: {
+  duelId: string
+  address: string
+  onOpen: () => void
+}) {
+  const client = useSuiClient()
+  const { data: d } = useQuery({
+    queryKey: ["duel", duelId],
+    queryFn: () => fetchDuel(client, duelId),
+    refetchInterval: 5_000,
+  })
+  if (!d) return null
+
+  const mine = d.creator === address || d.challenger === address
+  const statusColor: Record<typeof d.status, "default" | "secondary" | "outline"> = {
+    PENDING: "outline",
+    ACTIVE: "default",
+    COMPLETE: "secondary",
+  }
+  return (
+    <button
+      onClick={onOpen}
+      className="hover:bg-muted/50 flex w-full items-center justify-between rounded p-2 text-left transition"
+    >
+      <div className="text-sm">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-xs">{shortId(duelId)}</span>
+          <Badge variant={statusColor[d.status]}>{d.status}</Badge>
+          {mine && <Badge variant="outline">yours</Badge>}
+        </div>
+        <div className="text-muted-foreground text-xs">
+          pot {fmtSui(d.p0Stake + d.p1Stake)} · settled {d.settledCount.toString()}/5
+        </div>
       </div>
-      <div className="text-muted-foreground mt-1">
-        p0 {fmtSui(d.p0Stake)} · p1 {fmtSui(d.p1Stake)} · settled{" "}
-        {d.settledCount.toString()}/5
+      <span className="text-muted-foreground text-xs">→</span>
+    </button>
+  )
+}
+
+// ─── duel view (phase dispatcher) ───────────────────────────────────────────
+
+function DuelView({
+  duelId,
+  address,
+  onBack,
+}: {
+  duelId: string
+  address: string
+  onBack: () => void
+}) {
+  const client = useSuiClient()
+  const { oracle } = useOracle()
+  const duelQuery = useQuery({
+    queryKey: ["duel", duelId],
+    queryFn: () => fetchDuel(client, duelId),
+    refetchInterval: 2_000,
+  })
+  const d = duelQuery.data
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={onBack}
+            className="text-muted-foreground hover:text-foreground text-sm"
+          >
+            ← lobby
+          </button>
+          <ExplorerLink href={objUrl(duelId)}>{shortId(duelId)}</ExplorerLink>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!d ? (
+          <p className="text-muted-foreground py-12 text-center text-sm">loading…</p>
+        ) : (
+          <PhaseDispatcher duel={d} address={address} duelId={duelId} oracle={oracle} />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function PhaseDispatcher({
+  duel,
+  address,
+  duelId,
+  oracle,
+}: {
+  duel: DuelState
+  address: string
+  duelId: string
+  oracle: OracleSviInfo | undefined
+}) {
+  const isCreator = duel.creator === address
+  const isChallenger = duel.challenger === address
+  const isPlayer = isCreator || isChallenger
+  const myNextIdx = isCreator ? Number(duel.p0NextCardIdx) : Number(duel.p1NextCardIdx)
+  const opponentNextIdx = isCreator
+    ? Number(duel.p1NextCardIdx)
+    : Number(duel.p0NextCardIdx)
+  const allSwiped = myNextIdx === 5 && opponentNextIdx === 5
+
+  if (duel.status === "COMPLETE") {
+    return <ResultView duel={duel} address={address} />
+  }
+  if (duel.status === "PENDING") {
+    if (isCreator) return <WaitingForOpponentView duel={duel} duelId={duelId} />
+    return <JoinView duel={duel} duelId={duelId} />
+  }
+  // ACTIVE
+  if (!isPlayer) {
+    return <SpectatorView duel={duel} />
+  }
+  if (myNextIdx < 5) {
+    return (
+      <SwipingView
+        duel={duel}
+        duelId={duelId}
+        oracle={oracle}
+        myNextIdx={myNextIdx}
+      />
+    )
+  }
+  if (!allSwiped) {
+    return <LockupView myNextIdx={myNextIdx} opponentNextIdx={opponentNextIdx} />
+  }
+  if (oracle && oracle.settlementPrice === null) {
+    return <LockupView myNextIdx={myNextIdx} opponentNextIdx={opponentNextIdx} />
+  }
+  return <SettlingView duel={duel} duelId={duelId} />
+}
+
+// ─── phases ─────────────────────────────────────────────────────────────────
+
+function WaitingForOpponentView({
+  duel,
+  duelId,
+}: {
+  duel: DuelState
+  duelId: string
+}) {
+  return (
+    <div className="space-y-3 py-6 text-center">
+      <Badge variant="outline">waiting for opponent</Badge>
+      <p className="text-lg">
+        you staked <strong>{fmtSui(duel.p0Stake)}</strong>
+      </p>
+      <p className="text-muted-foreground text-sm">
+        share this duel id so a challenger can join:
+      </p>
+      <code className="bg-muted block rounded p-2 text-xs">{duelId}</code>
+      <p className="text-muted-foreground pt-2 text-xs">
+        pot when full: {fmtSui(duel.p0Stake * 2n)}
+      </p>
+    </div>
+  )
+}
+
+function JoinView({ duel, duelId }: { duel: DuelState; duelId: string }) {
+  const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
+  const queryClient = useQueryClient()
+  const [err, setErr] = useState<string | null>(null)
+
+  async function join() {
+    setErr(null)
+    try {
+      const tx = buildJoinDuelTx(duelId, duel.p0Stake, duel.stakeCoinType)
+      await signAndExec({ transaction: tx })
+      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <div className="space-y-3 py-4 text-center">
+      <Badge variant="outline">open duel</Badge>
+      <p className="text-muted-foreground text-sm">
+        creator staked <strong>{fmtSui(duel.p0Stake)}</strong>. match it to start swiping.
+      </p>
+      <Button size="lg" onClick={join} disabled={isPending} className="w-full">
+        join · stake {fmtSui(duel.p0Stake)}
+      </Button>
+      {err && (
+        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-left text-xs text-red-500">
+          {err}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function SwipingView({
+  duel,
+  duelId,
+  oracle,
+  myNextIdx,
+}: {
+  duel: DuelState
+  duelId: string
+  oracle: OracleSviInfo | undefined
+  myNextIdx: number
+}) {
+  const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
+  const queryClient = useQueryClient()
+  const now = useNow(250)
+  const card = duel.cards[myNextIdx]
+  const startedAt = Number(duel.startedAtMs)
+  const elapsedMs = Math.max(0, now - startedAt)
+  const timerMs = Math.max(0, SWIPE_PHASE_MS - elapsedMs)
+  const speed = speedMultiplier(elapsedMs % SWIPE_PHASE_MS)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function swipe(isUp: boolean) {
+    setErr(null)
+    try {
+      const tx = buildSwipeTx(duelId, card.oracleId, myNextIdx, isUp, duel.stakeCoinType)
+      await signAndExec({ transaction: tx })
+      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const timerSec = Math.ceil(timerMs / 1000)
+  const timerPct = (timerMs / SWIPE_PHASE_MS) * 100
+  const speedColor =
+    speed.tone === "good"
+      ? "text-emerald-500"
+      : speed.tone === "warn"
+        ? "text-amber-500"
+        : "text-muted-foreground"
+
+  return (
+    <div className="space-y-4">
+      {/* phase header */}
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-muted-foreground">
+          card <strong className="text-foreground">{myNextIdx + 1}</strong>/5
+        </span>
+        <span className={speedColor}>
+          {speed.label} {speed.tone === "good" && "⚡"}
+        </span>
+        <span className="font-mono text-sm tabular-nums">{timerSec}s</span>
       </div>
-      <div className="text-muted-foreground">
-        scores p0 <strong>{(Number(d.p0Score) / 1e9).toFixed(3)}</strong> · p1{" "}
-        <strong>{(Number(d.p1Score) / 1e9).toFixed(3)}</strong>
+      <div className="bg-muted h-1.5 overflow-hidden rounded-full">
+        <div
+          className="bg-primary h-full transition-all duration-300"
+          style={{ width: `${timerPct}%` }}
+        />
       </div>
 
-      <div className="mt-2 flex flex-wrap gap-2">
-        {d.status === "PENDING" && !isCreator && (
-          <Button
-            size="sm"
-            disabled={busy}
-            onClick={() =>
-              action("join_duel", () =>
-                buildJoinDuelTx(duelId, d.p0Stake, d.stakeCoinType),
-              )
-            }
-          >
-            join ({fmtSui(d.p0Stake)})
-          </Button>
-        )}
-        {d.status === "ACTIVE" && isPlayer && myNextIdx < 5 && (
-          <>
-            <Button
-              size="sm"
-              disabled={busy}
-              onClick={() =>
-                action("swipe UP", () =>
-                  buildSwipeTx(
-                    duelId,
-                    d.cards[myNextIdx].oracleId,
-                    myNextIdx,
-                    true,
-                    d.stakeCoinType,
-                  ),
-                )
-              }
-            >
-              swipe card {myNextIdx} UP
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() =>
-                action("swipe DOWN", () =>
-                  buildSwipeTx(
-                    duelId,
-                    d.cards[myNextIdx].oracleId,
-                    myNextIdx,
-                    false,
-                    d.stakeCoinType,
-                  ),
-                )
-              }
-            >
-              swipe card {myNextIdx} DOWN
-            </Button>
-          </>
-        )}
-        {d.status === "ACTIVE" && d.settledCount === 0n && (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() =>
-              action("settle+finalize", () =>
-                buildSettleAndFinalizeTx(duelId, d.cards[0].oracleId, d.stakeCoinType),
-              )
-            }
-          >
-            settle + finalize
-          </Button>
+      {/* the card */}
+      <div className="bg-card relative overflow-hidden rounded-xl border p-6 shadow-sm">
+        <div className="text-muted-foreground text-xs uppercase tracking-wide">
+          BTC at expiry
+        </div>
+        <div className="mt-3 text-4xl font-bold tabular-nums sm:text-5xl">
+          {fmtUsd(card.strike)}
+        </div>
+        <div className="text-muted-foreground mt-1 text-sm">
+          will BTC settle <strong className="text-foreground">above</strong> this strike?
+        </div>
+        {oracle && (
+          <div className="text-muted-foreground mt-4 flex justify-between border-t pt-3 text-xs">
+            <span>
+              now <strong className="text-foreground">{fmtUsd(oracle.spot)}</strong>
+            </span>
+            <span>
+              fwd <strong className="text-foreground">{fmtUsd(oracle.forward)}</strong>
+            </span>
+            <span>
+              {oracle.spot > card.strike ? (
+                <span className="text-emerald-500">↑ {fmtUsd(oracle.spot - card.strike)} above</span>
+              ) : (
+                <span className="text-red-500">↓ {fmtUsd(card.strike - oracle.spot)} below</span>
+              )}
+            </span>
+          </div>
         )}
       </div>
-      {msg && <p className="text-muted-foreground mt-2 text-xs">{msg}</p>}
+
+      {/* swipe buttons */}
+      <div className="grid grid-cols-2 gap-3">
+        <Button
+          variant="outline"
+          size="lg"
+          disabled={isPending}
+          onClick={() => swipe(false)}
+          className="h-16 text-base"
+        >
+          <div className="flex flex-col">
+            <span>↓ DOWN</span>
+            <span className="text-muted-foreground text-xs font-normal">
+              ≤ {fmtUsd(card.strike)}
+            </span>
+          </div>
+        </Button>
+        <Button
+          size="lg"
+          disabled={isPending}
+          onClick={() => swipe(true)}
+          className="h-16 text-base"
+        >
+          <div className="flex flex-col">
+            <span>↑ UP</span>
+            <span className="text-primary-foreground/80 text-xs font-normal">
+              &gt; {fmtUsd(card.strike)}
+            </span>
+          </div>
+        </Button>
+      </div>
+
+      {/* speed tier hint */}
+      <p className="text-muted-foreground text-center text-xs">
+        decide fast: 0–5s = 1.5× · 5–20s = 1.0× · 20–60s = 0.75×
+      </p>
+
+      {err && (
+        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+          {err}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function LockupView({
+  myNextIdx,
+  opponentNextIdx,
+}: {
+  myNextIdx: number
+  opponentNextIdx: number
+}) {
+  const allSwiped = myNextIdx === 5 && opponentNextIdx === 5
+  return (
+    <div className="space-y-4 py-6 text-center">
+      <Badge variant="outline">lockup phase</Badge>
+      <p className="text-2xl">🔒</p>
+      <p className="text-lg">
+        {allSwiped
+          ? "watching the oracle tick toward settlement…"
+          : "waiting for opponent to finish swiping…"}
+      </p>
+      <p className="text-muted-foreground text-sm">
+        swipes are locked. the deck settles when BTC's oracle resolves.
+      </p>
+      <div className="text-muted-foreground flex justify-center gap-6 pt-2 text-xs">
+        <span>
+          you <strong className="text-foreground">{myNextIdx}</strong>/5
+        </span>
+        <span>
+          opponent <strong className="text-foreground">{opponentNextIdx}</strong>/5
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
+  const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
+  const queryClient = useQueryClient()
+  const [err, setErr] = useState<string | null>(null)
+  const [digest, setDigest] = useState<string | null>(null)
+
+  async function settle() {
+    setErr(null)
+    try {
+      const tx = buildSettleAndFinalizeTx(duelId, duel.cards[0].oracleId, duel.stakeCoinType)
+      const res = await signAndExec({ transaction: tx })
+      setDigest(res.digest)
+      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <div className="space-y-4 py-6 text-center">
+      <Badge variant="default">oracle settled</Badge>
+      <p className="text-lg">resolve the duel — settle 5 cards + payout</p>
+      <Button size="lg" onClick={settle} disabled={isPending} className="w-full">
+        settle + finalize
+      </Button>
+      {digest && (
+        <p className="text-muted-foreground text-xs">
+          tx <ExplorerLink href={txExplorerUrl(digest)}>{shortId(digest)}</ExplorerLink>
+        </p>
+      )}
+      {err && (
+        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-left text-xs text-red-500">
+          {err}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function ResultView({ duel, address }: { duel: DuelState; address: string }) {
+  const isCreator = duel.creator === address
+  const myScore = isCreator ? duel.p0Score : duel.p1Score
+  const oppScore = isCreator ? duel.p1Score : duel.p0Score
+  const tie = duel.p0Score === duel.p1Score
+  const won = !tie && myScore > oppScore
+  const lost = !tie && myScore < oppScore
+
+  const total = duel.p0Stake + duel.p1Stake
+  const myPayout = won ? total : tie ? (isCreator ? duel.p0Stake : duel.p1Stake) : 0n
+
+  const banner = won
+    ? { emoji: "🏆", text: "you won", tone: "text-emerald-500" }
+    : lost
+      ? { emoji: "💀", text: "you lost", tone: "text-red-500" }
+      : { emoji: "🤝", text: "tie", tone: "text-amber-500" }
+
+  // Per-card outcome — needs the strike + settlement + your swipe
+  const myCards = useMemo(() => {
+    const swipes = isCreator ? duel.p0Swipes : duel.p1Swipes
+    return duel.cards.map((c, i) => {
+      const swipe = swipes[i]
+      const settle = duel.cardSettlements[i]
+      const actualUp = settle !== null && settle > c.strike
+      const correct = swipe !== null && actualUp === swipe.isUp
+      return { card: c, swipe, settle, actualUp, correct }
+    })
+  }, [duel, isCreator])
+
+  return (
+    <div className="space-y-5">
+      <div className="space-y-2 py-6 text-center">
+        <div className="text-5xl">{banner.emoji}</div>
+        <div className={`text-2xl font-bold uppercase tracking-wide ${banner.tone}`}>
+          {banner.text}
+        </div>
+        {myPayout > 0n && (
+          <div className="text-muted-foreground text-sm">
+            payout <strong className="text-foreground">{fmtSui(myPayout)}</strong>
+          </div>
+        )}
+      </div>
+
+      <Separator />
+
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="bg-muted/40 rounded p-3">
+          <div className="text-muted-foreground text-xs">your score</div>
+          <div className="text-2xl font-semibold tabular-nums">
+            {(Number(myScore) / 1e9).toFixed(2)}
+          </div>
+        </div>
+        <div className="bg-muted/40 rounded p-3">
+          <div className="text-muted-foreground text-xs">opponent</div>
+          <div className="text-2xl font-semibold tabular-nums">
+            {(Number(oppScore) / 1e9).toFixed(2)}
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-muted-foreground mb-2 text-xs uppercase tracking-wide">
+          cards
+        </h3>
+        <div className="space-y-1.5">
+          {myCards.map((m, i) => (
+            <div
+              key={i}
+              className="bg-muted/30 flex items-center justify-between rounded p-2 text-sm"
+            >
+              <div>
+                <span className="text-muted-foreground">card {i + 1} · </span>
+                <span className="tabular-nums">{fmtUsd(m.card.strike)}</span>
+              </div>
+              <div className="flex items-center gap-3 text-xs">
+                {m.swipe ? (
+                  <span className="text-muted-foreground">
+                    you {m.swipe.isUp ? "↑" : "↓"}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground italic">no swipe</span>
+                )}
+                <span>
+                  settled{" "}
+                  <strong>
+                    {m.settle !== null ? (m.actualUp ? "↑" : "↓") : "—"}
+                  </strong>
+                </span>
+                <Badge
+                  variant={m.correct ? "default" : "secondary"}
+                  className={m.correct ? "bg-emerald-500/20 text-emerald-500" : ""}
+                >
+                  {m.correct ? "✓" : "✗"}
+                </Badge>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SpectatorView({ duel }: { duel: DuelState }) {
+  return (
+    <div className="space-y-3 py-4 text-center">
+      <Badge variant="secondary">spectating</Badge>
+      <p className="text-muted-foreground text-sm">
+        you're not a player in this duel. pot {fmtSui(duel.p0Stake + duel.p1Stake)}.
+      </p>
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="bg-muted/40 rounded p-3">
+          <div className="text-muted-foreground text-xs">creator</div>
+          <div className="font-semibold">
+            {(Number(duel.p0Score) / 1e9).toFixed(2)}
+          </div>
+        </div>
+        <div className="bg-muted/40 rounded p-3">
+          <div className="text-muted-foreground text-xs">challenger</div>
+          <div className="font-semibold">
+            {(Number(duel.p1Score) / 1e9).toFixed(2)}
+          </div>
+        </div>
+      </div>
+      <p className="text-muted-foreground text-xs">
+        swipes {Number(duel.p0NextCardIdx)}/5 · {Number(duel.p1NextCardIdx)}/5 · settled{" "}
+        {duel.settledCount.toString()}/5
+      </p>
     </div>
   )
 }
