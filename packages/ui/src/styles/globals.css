@@ -8,6 +8,22 @@
 @source "../../../components/**/*.{ts,tsx}";
 @source "../**/*.{ts,tsx}";
 
+/*
+ * Linear-app-derived palette.
+ *
+ *   canvas #010102        deepest dark
+ *   surface 0f1011..18191a  staged charcoal tiers
+ *   hairline 23252a       1 px borders
+ *   ink #f7f8f8           body
+ *   ink-subtle #8a8f98    muted text
+ *   primary #5e6ad2       lavender accent (used sparingly per Linear)
+ *
+ * Source: DESIGN.md generated via `npx getdesign add linear.app`.
+ * The shadcn variable contract (background/foreground/primary/…) is
+ * preserved so existing components inherit. Extras (--surface-1..4,
+ * --hairline-strong, --ink-subtle, --ink-tertiary) are exposed for
+ * views that want explicit tiers.
+ */
 @theme inline {
   --font-heading: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
@@ -41,83 +57,112 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
-  --font-sans: "Inter Variable", sans-serif;
+  /* Linear-specific surface tiers + hairlines, accessible via `bg-surface-1` etc. */
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-surface-4: var(--surface-4);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-ink-subtle: var(--ink-subtle);
+  --color-ink-tertiary: var(--ink-tertiary);
+  /* Linear's radius scale (denser than shadcn default). */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 24px;
+  --radius-4xl: 32px;
+  --font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "Menlo", monospace;
 }
 
+/* Light mode — Linear inverse surfaces (less polished, dark is canonical). */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --background: #fafafa;
+  --foreground: #18191a;
+  --card: #ffffff;
+  --card-foreground: #18191a;
+  --popover: #ffffff;
+  --popover-foreground: #18191a;
+  --primary: #5e6ad2;
+  --primary-foreground: #ffffff;
+  --secondary: #f5f6f6;
+  --secondary-foreground: #18191a;
+  --muted: #f5f6f6;
+  --muted-foreground: #62666d;
+  --accent: #f5f6f6;
+  --accent-foreground: #18191a;
+  --destructive: #e5484d;
+  --border: #e6e7e9;
+  --input: #e6e7e9;
+  --ring: #5e69d1;
+  --chart-1: #5e6ad2;
+  --chart-2: #828fff;
+  --chart-3: #7a7fad;
+  --chart-4: #62666d;
+  --chart-5: #18191a;
+  --radius: 0.5rem;
+  --surface-1: #ffffff;
+  --surface-2: #fafafa;
+  --surface-3: #f5f6f6;
+  --surface-4: #ebecec;
+  --hairline: #e6e7e9;
+  --hairline-strong: #d0d6e0;
+  --ink-subtle: #62666d;
+  --ink-tertiary: #8a8f98;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #18191a;
+  --sidebar-primary: #5e6ad2;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f5f6f6;
+  --sidebar-accent-foreground: #18191a;
+  --sidebar-border: #e6e7e9;
+  --sidebar-ring: #5e69d1;
 }
 
+/* Dark mode — Linear canvas. Default for flicky. */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: #010102;
+  --foreground: #f7f8f8;
+  --card: #0f1011;
+  --card-foreground: #f7f8f8;
+  --popover: #141516;
+  --popover-foreground: #f7f8f8;
+  --primary: #5e6ad2;
+  --primary-foreground: #ffffff;
+  --secondary: #141516;
+  --secondary-foreground: #d0d6e0;
+  --muted: #0f1011;
+  --muted-foreground: #8a8f98;
+  --accent: #18191a;
+  --accent-foreground: #f7f8f8;
+  --destructive: #ef5e5e;
+  --border: #23252a;
+  --input: #23252a;
+  --ring: #5e69d1;
+  --chart-1: #5e6ad2;
+  --chart-2: #828fff;
+  --chart-3: #7a7fad;
+  --chart-4: #d0d6e0;
+  --chart-5: #f7f8f8;
+  --surface-1: #0f1011;
+  --surface-2: #141516;
+  --surface-3: #18191a;
+  --surface-4: #191a1b;
+  --hairline: #23252a;
+  --hairline-strong: #34343a;
+  --ink-subtle: #8a8f98;
+  --ink-tertiary: #62666d;
+  --sidebar: #0f1011;
+  --sidebar-foreground: #f7f8f8;
+  --sidebar-primary: #5e6ad2;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #18191a;
+  --sidebar-accent-foreground: #f7f8f8;
+  --sidebar-border: #23252a;
+  --sidebar-ring: #5e69d1;
 }
 
 @layer base {
@@ -126,6 +171,18 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings:
+      "ss01" on,
+      "cv11" on;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* Display-weight tightening for headings per Linear's negative-tracking ethos. */
+  h1,
+  h2,
+  h3 {
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
   button:not(:disabled),
   [role="button"]:not(:disabled) {

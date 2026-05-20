@@ -212,10 +212,10 @@ export default function App() {
     <div className="bg-background min-h-screen">
       <header className="mx-auto flex max-w-3xl items-center justify-between p-4 sm:p-6">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
+          <h1 className="text-2xl font-semibold tracking-[-0.03em]">
             <span className="text-primary">flicky</span>
           </h1>
-          <p className="text-muted-foreground text-xs">
+          <p className="text-ink-subtle text-xs tracking-[-0.005em]">
             swipe BTC binaries · PvP on Sui testnet
           </p>
         </div>
@@ -286,10 +286,12 @@ function OracleStrip() {
   const now = useNow(5_000)
 
   return (
-    <Card className="bg-muted/30 border-none">
+    <Card className="bg-surface-1 border-hairline">
       <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4 text-sm">
         <div className="flex items-baseline gap-2">
-          <span className="text-muted-foreground text-xs uppercase tracking-wide">BTC</span>
+          <span className="text-ink-subtle text-[11px] font-medium uppercase tracking-[0.06em]">
+            BTC
+          </span>
           {oracle ? (
             <>
               <span className="text-xl font-semibold tabular-nums">
@@ -1036,7 +1038,7 @@ function SwipingView({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
-          className={`bg-card relative cursor-grab overflow-hidden rounded-xl border p-6 shadow-sm active:cursor-grabbing ${
+          className={`bg-surface-1 border-hairline relative cursor-grab overflow-hidden rounded-xl border p-6 shadow-[0_1px_0_0_var(--surface-3)_inset,0_24px_64px_-32px_rgba(0,0,0,0.6)] active:cursor-grabbing ${
             drag.active ? "" : "transition-transform duration-300 ease-out"
           } ${drag.flying ? "pointer-events-none" : ""}`}
           style={{ transform, willChange: "transform" }}
@@ -1062,15 +1064,15 @@ function SwipingView({
             </div>
           )}
 
-          <div className="text-muted-foreground text-xs uppercase tracking-wide">
+          <div className="text-ink-subtle text-[11px] font-medium uppercase tracking-[0.06em]">
             BTC at expiry
           </div>
-          <div className="mt-3 text-4xl font-bold tabular-nums sm:text-5xl">
+          <div className="mt-3 text-5xl font-semibold tabular-nums tracking-[-0.04em] sm:text-6xl">
             {fmtUsd(card.strike)}
           </div>
-          <div className="text-muted-foreground mt-1 text-sm">
+          <div className="text-muted-foreground mt-2 text-sm tracking-[-0.01em]">
             will BTC settle{" "}
-            <strong className="text-foreground">above</strong> this strike?
+            <strong className="text-foreground font-semibold">above</strong> this strike?
           </div>
           {oracle && (
             <div className="text-muted-foreground mt-4 flex justify-between border-t pt-3 text-xs">
@@ -1291,8 +1293,8 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
     <div className="space-y-5">
       <div ref={captureRef} className="bg-card space-y-5 rounded-lg p-2">
       <div className="space-y-2 py-6 text-center">
-        <div className="text-5xl">{banner.emoji}</div>
-        <div className={`text-2xl font-bold uppercase tracking-wide ${banner.tone}`}>
+        <div className="text-6xl">{banner.emoji}</div>
+        <div className={`text-3xl font-semibold uppercase tracking-[-0.02em] ${banner.tone}`}>
           {banner.text}
         </div>
         {myPayout > 0n && (

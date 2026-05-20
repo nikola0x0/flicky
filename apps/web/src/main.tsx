@@ -24,7 +24,7 @@ const networks = {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ThemeProvider>
+    <ThemeProvider defaultTheme="dark">
       <QueryClientProvider client={queryClient}>
         <SuiClientProvider networks={networks} defaultNetwork="testnet">
           <WalletProvider autoConnect>
