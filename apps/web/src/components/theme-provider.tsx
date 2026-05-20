@@ -219,6 +219,12 @@ export function ThemeProvider({
   )
 }
 
+/**
+ * Public API of the theme provider. No callers yet — kept because a theme
+ * toggle is a near-term Phase 3 addition. Knip respects the `@public` tag.
+ *
+ * @public
+ */
 export const useTheme = () => {
   const context = React.useContext(ThemeProviderContext)
 

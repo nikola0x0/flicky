@@ -14,21 +14,22 @@ import { normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
 type SuiClient = SuiJsonRpcClient
 
 import * as duelGen from "@/sui/gen/flicky/duel"
-import * as oracleGen from "@/sui/gen/deepbook_predict/oracle"
 import { CONFIG } from "./config"
 
 const { packageId, deepbookPredictPackageId } = CONFIG
 
 // === Types ===
 
-export type DuelStatus = "PENDING" | "ACTIVE" | "COMPLETE"
+// Sub-shapes of DuelState. Kept as named internal aliases for readability;
+// reachable externally via the structural shape of `DuelState` itself.
+type DuelStatus = "PENDING" | "ACTIVE" | "COMPLETE"
 
-export interface DuelCard {
+interface DuelCard {
   oracleId: string
   strike: bigint
 }
 
-export interface DuelSwipe {
+interface DuelSwipe {
   isUp: boolean
   pSwiped: bigint
   decideTimeMs: bigint
@@ -438,6 +439,3 @@ export function oracleStrikes(
 ): bigint[] {
   return pcts.map((pct) => (ref * pct) / 100n)
 }
-
-// Re-export oracle struct + status helpers for convenience.
-export { oracleGen }

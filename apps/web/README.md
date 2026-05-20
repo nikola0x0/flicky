@@ -15,6 +15,7 @@ bun --filter web dev          # vite (default :5173)
 bun --filter web build        # tsc -b && vite build
 bun --filter web test         # bun test src/lib
 bun --filter web typecheck    # tsc --noEmit -p tsconfig.app.json
+bun --filter web knip         # scan for unused files/exports/deps
 bun --filter web preview      # serve the production build
 ```
 
