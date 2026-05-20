@@ -5,6 +5,7 @@ import {
   knownHashCount,
   rememberDeck,
 } from "./deckmaster"
+import { handleSponsorRequest } from "./sponsor"
 
 const PORT = Number(process.env.PORT ?? 3001)
 
@@ -25,6 +26,11 @@ const server = Bun.serve({
   port: PORT,
   async fetch(req, server) {
     const url = new URL(req.url)
+
+    // /sponsor has its own CORS rules (origin allowlist via env). Check it
+    // BEFORE the wildcard CORS preflight below.
+    const sponsored = await handleSponsorRequest(req)
+    if (sponsored) return sponsored
 
     if (req.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS_HEADERS })
@@ -92,6 +98,12 @@ const server = Bun.serve({
 console.log(`flicky server listening on http://localhost:${server.port}`)
 console.log(`  POST /deckmaster/generate  body: { oracle_id, reference }`)
 console.log(`  GET  /deckmaster/reveal    ?hash=0x...`)
+console.log(`  POST /sponsor              body: { action: "create" | "execute", ... }`)
+if (!process.env.ENOKI_PRIVATE_KEY) {
+  console.log(
+    `  [sponsor]                 ENOKI_PRIVATE_KEY not set → /sponsor will 503`,
+  )
+}
 
 // Re-export for bot/keeper that import in-process.
 export { buildDeck, fetchDeck, hashToHex }

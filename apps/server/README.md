@@ -37,6 +37,36 @@ click the "settle + finalize" button; payouts appear unprompted. Reuses
 the two services with separate wallets. Keeper functions are
 permissionless on chain — any funded wallet works.
 
+## Sponsored gas (Enoki)
+
+`POST /sponsor` lets the web client run any flicky / DeepBook Predict
+PTB without the player wallet holding SUI. Two-step protocol:
+
+```
+POST /sponsor  { action: "create", network, transactionKindBytes, sender }
+  → { bytes, digest }                  // Enoki sponsor signature pre-baked
+
+POST /sponsor  { action: "execute", digest, signature }
+  → { digest }                         // final on-chain digest
+```
+
+The web client builds the PTB, sends just the transaction *kind* (no gas),
+gets back the sponsor-signed bytes, has the player wallet sign those
+bytes (`signTransaction` — NOT signAndExecute), and submits via the
+execute action.
+
+Move-call allowlist in `src/sponsor.ts` covers every entry function
+flicky's PTBs issue (`duel::*`) plus the DeepBook Predict targets
+(`predict::*`, `predict_manager::*`, `market_key::*`). Enoki rejects any
+transaction whose MoveCalls escape the list — protects the sponsor
+wallet from being drained by an attacker building arbitrary
+transactions through this route.
+
+Env required: `ENOKI_PRIVATE_KEY` (from
+<https://portal.enoki.mystenlabs.com>). Without it the endpoint
+returns 503 and the web client falls back to wallet-paid
+signAndExecute.
+
 ## Env
 
 Copy `.env.example` → `.env.local` and fill what the script you're running needs.

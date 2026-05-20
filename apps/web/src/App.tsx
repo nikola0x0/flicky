@@ -105,7 +105,7 @@ const SPEED_FAST_MAX_MS = 5_000
 const SPEED_NORMAL_MAX_MS = 20_000
 
 const EXPLORER = "https://suiscan.xyz/testnet"
-const objUrl = (id: string) => `${EXPLORER}/object/${id}`
+const addressUrl = (id: string) => `${EXPLORER}/address/${id}`
 const txExplorerUrl = (digest: string) => `${EXPLORER}/tx/${digest}`
 
 function ExplorerLink({ href, children }: { href: string; children: ReactNode }) {
@@ -353,7 +353,7 @@ function WalletMenu({
           <span>{copied ? "copied!" : "copy address"}</span>
         </MenuItem>
         <a
-          href={objUrl(address)}
+          href={addressUrl(address)}
           target="_blank"
           rel="noreferrer"
           onClick={onClose}
@@ -389,9 +389,8 @@ function MenuItem({
   return (
     <button
       onClick={onClick}
-      className={`hover:bg-surface-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${
-        tone === "danger" ? "text-red-400 hover:text-red-300" : ""
-      }`}
+      className={`hover:bg-surface-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${tone === "danger" ? "text-red-400 hover:text-red-300" : ""
+        }`}
     >
       {children}
     </button>
@@ -516,7 +515,7 @@ function Footer() {
   return (
     <p className="text-muted-foreground pt-4 text-center text-xs">
       package <code>{shortId(CONFIG.packageId)}</code>{" "}
-      <ExplorerLink href={objUrl(CONFIG.packageId)}>flicky on chain</ExplorerLink>
+      <ExplorerLink href={addressUrl(CONFIG.packageId)}>flicky on chain</ExplorerLink>
     </p>
   )
 }
@@ -574,7 +573,7 @@ function OracleStrip() {
             </Badge>
           )}
           {oracleId && (
-            <ExplorerLink href={objUrl(oracleId)}>{shortId(oracleId)}</ExplorerLink>
+            <ExplorerLink href={addressUrl(oracleId)}>{shortId(oracleId)}</ExplorerLink>
           )}
         </div>
       </CardContent>
@@ -634,12 +633,12 @@ function Lobby({
       const tx =
         stake.coinType === DEEPBOOK.dusdcType
           ? await buildCreateDuelDusdcTx(
-              client,
-              address,
-              deck.hash,
-              stake.amount,
-              stake.coinType,
-            )
+            client,
+            address,
+            deck.hash,
+            stake.amount,
+            stake.coinType,
+          )
           : buildCreateDuelTx(deck.hash, stake.amount, stake.coinType)
 
       const res = await signAndExec({ transaction: tx })
@@ -675,17 +674,15 @@ function Lobby({
           <div className="bg-muted inline-flex rounded-md p-0.5 text-xs">
             <button
               onClick={() => setTier("free")}
-              className={`rounded px-3 py-1 transition ${
-                tier === "free" ? "bg-background shadow-sm" : "text-muted-foreground"
-              }`}
+              className={`rounded px-3 py-1 transition ${tier === "free" ? "bg-background shadow-sm" : "text-muted-foreground"
+                }`}
             >
               Free · SUI
             </button>
             <button
               onClick={() => setTier("staked")}
-              className={`rounded px-3 py-1 transition ${
-                tier === "staked" ? "bg-background shadow-sm" : "text-muted-foreground"
-              }`}
+              className={`rounded px-3 py-1 transition ${tier === "staked" ? "bg-background shadow-sm" : "text-muted-foreground"
+                }`}
             >
               Staked · dUSDC
             </button>
@@ -723,7 +720,7 @@ function Lobby({
           )}
           <p className="text-muted-foreground text-xs">
             your wallet:{" "}
-            <ExplorerLink href={objUrl(address)}>{shortId(address)}</ExplorerLink>
+            <ExplorerLink href={addressUrl(address)}>{shortId(address)}</ExplorerLink>
           </p>
         </CardContent>
       </Card>
@@ -940,7 +937,7 @@ function DuelView({
           >
             ← lobby
           </button>
-          <ExplorerLink href={objUrl(duelId)}>{shortId(duelId)}</ExplorerLink>
+          <ExplorerLink href={addressUrl(duelId)}>{shortId(duelId)}</ExplorerLink>
         </div>
       </CardHeader>
       <CardContent>
@@ -1075,12 +1072,12 @@ function JoinView({
     try {
       const tx = isDusdc
         ? await buildJoinDuelDusdcTx(
-            client,
-            address,
-            duelId,
-            duel.p0Stake,
-            duel.stakeCoinType,
-          )
+          client,
+          address,
+          duelId,
+          duel.p0Stake,
+          duel.stakeCoinType,
+        )
         : buildJoinDuelTx(duelId, duel.p0Stake, duel.stakeCoinType)
       await signAndExec({ transaction: tx })
       queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
@@ -1181,15 +1178,15 @@ function SwipingView({
           isDusdc && managerQuery.data && oracle && mintQuantity > 0n
         const tx = canBundleMint
           ? buildStakedSwipeTx({
-              duelId,
-              oracleSviId: card.oracleId,
-              managerId: managerQuery.data!.id,
-              oracleExpiry: oracle!.expiry,
-              strike: card.strike,
-              isUp,
-              quantity: mintQuantity,
-              cardIdx: myNextIdx,
-            })
+            duelId,
+            oracleSviId: card.oracleId,
+            managerId: managerQuery.data!.id,
+            oracleExpiry: oracle!.expiry,
+            strike: card.strike,
+            isUp,
+            quantity: mintQuantity,
+            cardIdx: myNextIdx,
+          })
           : buildSwipeTx(duelId, card.oracleId, myNextIdx, isUp, duel.stakeCoinType)
         await signAndExec({ transaction: tx })
         queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
@@ -1296,9 +1293,8 @@ function SwipingView({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
-          className={`bg-surface-1 border-hairline relative cursor-grab overflow-hidden rounded-xl border p-6 shadow-[0_1px_0_0_var(--surface-3)_inset,0_24px_64px_-32px_rgba(0,0,0,0.6)] active:cursor-grabbing ${
-            drag.active ? "" : "transition-transform duration-300 ease-out"
-          } ${drag.flying ? "pointer-events-none" : ""}`}
+          className={`bg-surface-1 border-hairline relative cursor-grab overflow-hidden rounded-xl border p-6 shadow-[0_1px_0_0_var(--surface-3)_inset,0_24px_64px_-32px_rgba(0,0,0,0.6)] active:cursor-grabbing ${drag.active ? "" : "transition-transform duration-300 ease-out"
+            } ${drag.flying ? "pointer-events-none" : ""}`}
           style={{ transform, willChange: "transform" }}
         >
           {/* swipe-direction overlays — fade in with drag distance */}
@@ -1550,77 +1546,77 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
   return (
     <div className="space-y-5">
       <div ref={captureRef} className="bg-card space-y-5 rounded-lg p-2">
-      <div className="space-y-2 py-6 text-center">
-        <div className="text-6xl">{banner.emoji}</div>
-        <div className={`text-3xl font-semibold uppercase tracking-[-0.02em] ${banner.tone}`}>
-          {banner.text}
-        </div>
-        {myPayout > 0n && (
-          <div className="text-muted-foreground text-sm">
-            payout{" "}
-            <strong className="text-foreground">
-              {fmtStake(myPayout, duel.stakeCoinType)}
-            </strong>
+        <div className="space-y-2 py-6 text-center">
+          <div className="text-6xl">{banner.emoji}</div>
+          <div className={`text-3xl font-semibold uppercase tracking-[-0.02em] ${banner.tone}`}>
+            {banner.text}
           </div>
-        )}
-      </div>
-
-      <Separator />
-
-      <div className="grid grid-cols-2 gap-3 text-sm">
-        <div className="bg-muted/40 rounded p-3">
-          <div className="text-muted-foreground text-xs">your score</div>
-          <div className="text-2xl font-semibold tabular-nums">
-            {(Number(myScore) / 1e9).toFixed(2)}
-          </div>
-        </div>
-        <div className="bg-muted/40 rounded p-3">
-          <div className="text-muted-foreground text-xs">opponent</div>
-          <div className="text-2xl font-semibold tabular-nums">
-            {(Number(oppScore) / 1e9).toFixed(2)}
-          </div>
-        </div>
-      </div>
-
-      <div>
-        <h3 className="text-muted-foreground mb-2 text-xs uppercase tracking-wide">
-          cards
-        </h3>
-        <div className="space-y-1.5">
-          {myCards.map((m, i) => (
-            <div
-              key={i}
-              className="bg-muted/30 flex items-center justify-between rounded p-2 text-sm"
-            >
-              <div>
-                <span className="text-muted-foreground">card {i + 1} · </span>
-                <span className="tabular-nums">{fmtUsd(m.card.strike)}</span>
-              </div>
-              <div className="flex items-center gap-3 text-xs">
-                {m.swipe ? (
-                  <span className="text-muted-foreground">
-                    you {m.swipe.isUp ? "↑" : "↓"}
-                  </span>
-                ) : (
-                  <span className="text-muted-foreground italic">no swipe</span>
-                )}
-                <span>
-                  settled{" "}
-                  <strong>
-                    {m.settle !== null ? (m.actualUp ? "↑" : "↓") : "—"}
-                  </strong>
-                </span>
-                <Badge
-                  variant={m.correct ? "default" : "secondary"}
-                  className={m.correct ? "bg-emerald-500/20 text-emerald-500" : ""}
-                >
-                  {m.correct ? "✓" : "✗"}
-                </Badge>
-              </div>
+          {myPayout > 0n && (
+            <div className="text-muted-foreground text-sm">
+              payout{" "}
+              <strong className="text-foreground">
+                {fmtStake(myPayout, duel.stakeCoinType)}
+              </strong>
             </div>
-          ))}
+          )}
         </div>
-      </div>
+
+        <Separator />
+
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div className="bg-muted/40 rounded p-3">
+            <div className="text-muted-foreground text-xs">your score</div>
+            <div className="text-2xl font-semibold tabular-nums">
+              {(Number(myScore) / 1e9).toFixed(2)}
+            </div>
+          </div>
+          <div className="bg-muted/40 rounded p-3">
+            <div className="text-muted-foreground text-xs">opponent</div>
+            <div className="text-2xl font-semibold tabular-nums">
+              {(Number(oppScore) / 1e9).toFixed(2)}
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-muted-foreground mb-2 text-xs uppercase tracking-wide">
+            cards
+          </h3>
+          <div className="space-y-1.5">
+            {myCards.map((m, i) => (
+              <div
+                key={i}
+                className="bg-muted/30 flex items-center justify-between rounded p-2 text-sm"
+              >
+                <div>
+                  <span className="text-muted-foreground">card {i + 1} · </span>
+                  <span className="tabular-nums">{fmtUsd(m.card.strike)}</span>
+                </div>
+                <div className="flex items-center gap-3 text-xs">
+                  {m.swipe ? (
+                    <span className="text-muted-foreground">
+                      you {m.swipe.isUp ? "↑" : "↓"}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground italic">no swipe</span>
+                  )}
+                  <span>
+                    settled{" "}
+                    <strong>
+                      {m.settle !== null ? (m.actualUp ? "↑" : "↓") : "—"}
+                    </strong>
+                  </span>
+                  <Badge
+                    variant={m.correct ? "default" : "secondary"}
+                    className={m.correct ? "bg-emerald-500/20 text-emerald-500" : ""}
+                  >
+                    {m.correct ? "✓" : "✗"}
+                  </Badge>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       <Button

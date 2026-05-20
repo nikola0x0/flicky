@@ -36,8 +36,5 @@ local/
 apps/contracts/build/
 apps/contracts/package_summaries/
 
-# Auto-generated TS bindings from `bun --filter @flicky/contracts codegen`.
-apps/web/src/sui/gen/
-
 # Local Claude Code state
 .claude/
