@@ -986,6 +986,12 @@ function PhaseDispatcher({
   if (!isPlayer) {
     return <SpectatorView duel={duel} />
   }
+  // Between join_duel and reveal_deck the duel is ACTIVE but `cards` is
+  // empty. Don't route into SwipingView yet — it would dereference
+  // duel.cards[0] and crash. Show a transient reveal-pending state.
+  if (duel.cards.length === 0) {
+    return <RevealingView />
+  }
   if (myNextIdx < 5) {
     return (
       <SwipingView
@@ -1409,6 +1415,27 @@ function SwipingView({
           {err}
         </p>
       )}
+    </div>
+  )
+}
+
+/**
+ * Status is ACTIVE but deck hasn't been revealed yet — keeper races to
+ * call `reveal_deck` once it sees DuelJoined. Usually clears in 5–15 s.
+ * If it sticks, the keeper isn't running and the creator's tab is the
+ * only one that holds plaintext (the demo's reveal fallback path).
+ */
+function RevealingView() {
+  return (
+    <div className="space-y-3 py-8 text-center">
+      <div className="flex justify-center">
+        <span className="border-primary inline-block h-10 w-10 animate-spin rounded-full border-4 border-t-transparent" />
+      </div>
+      <p className="text-lg font-semibold tracking-[-0.01em]">revealing deck…</p>
+      <p className="text-muted-foreground text-sm">
+        the keeper pushes the plaintext on-chain once the challenger joins.
+        usually clears within a few seconds.
+      </p>
     </div>
   )
 }
