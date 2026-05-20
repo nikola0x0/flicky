@@ -13,7 +13,8 @@
     "format": "prettier --write \"**/*.ts\"",
     "typecheck": "tsc --noEmit",
     "deepbook:discover": "bun run src/scripts/deepbook-discover.ts",
-    "demo:duel": "bun run src/scripts/demo-duel.ts"
+    "demo:duel": "bun run src/scripts/demo-duel.ts",
+    "bot": "bun run src/scripts/bot.ts"
   },
   "dependencies": {
     "@mysten/sui": "^1.30"

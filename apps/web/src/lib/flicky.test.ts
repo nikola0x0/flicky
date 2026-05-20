@@ -108,6 +108,8 @@ describe("parseDuel", () => {
     expect(d.p1NextCardIdx).toBe(1n)
     expect(d.settledCount).toBe(1n)
     expect(d.startedAtMs).toBe(1000n)
+    expect(d.p0LastSwipeOrStartMs).toBe(100n)
+    expect(d.p1LastSwipeOrStartMs).toBe(150n)
   })
 
   test("parses 5 cards with strikes", () => {

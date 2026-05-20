@@ -19,7 +19,14 @@ bun --filter server typecheck         # tsc --noEmit
 
 bun --filter server deepbook:discover # list active DeepBook OracleSVI on testnet
 bun --filter server demo:duel         # end-to-end DeepBook-backed duel demo
+bun --filter server bot               # matchmaking bot (auto-joins + swipes PENDING duels)
 ```
+
+The `bot` is what makes the single-player demo work: spin it up in one
+terminal, launch `bun --filter web dev` in another, click a stake tier,
+and the bot will pick up the new duel within ~5s, join with a matching
+stake, and play out its 5 swipes. Requires `BOT_SECRET_KEY` in
+`.env.local` and ≥ 0.2 testnet SUI on the bot wallet.
 
 ## Env
 
@@ -58,5 +65,6 @@ src/
 └── scripts/
     ├── deepbook-discover.ts  # list/inspect DeepBook OracleSVI on testnet
     ├── demo-duel.ts          # interactive duel against a real OracleSVI
+    ├── bot.ts                # matchmaking bot — auto-joins + swipes
     └── e2e.test.ts           # automated live-testnet E2E (opt-in via test:e2e)
 ```

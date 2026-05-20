@@ -49,6 +49,10 @@ export interface DuelState {
   p1NextCardIdx: bigint
   settledCount: bigint
   startedAtMs: bigint
+  /** Baseline for the NEXT swipe's decide-time clock — last swipe time
+   *  for that player, or `startedAtMs` if no swipes yet. */
+  p0LastSwipeOrStartMs: bigint
+  p1LastSwipeOrStartMs: bigint
   p0Swipes: (DuelSwipe | null)[]
   p1Swipes: (DuelSwipe | null)[]
   cardSettlements: (bigint | null)[]
@@ -245,6 +249,8 @@ export function parseDuel(obj: SuiObjectResponse): DuelState {
     p1NextCardIdx: BigInt(fields.p1_next_card_idx),
     settledCount: BigInt(fields.settled_count),
     startedAtMs: BigInt(fields.started_at_ms),
+    p0LastSwipeOrStartMs: BigInt(fields.p0_last_swipe_or_start_ms),
+    p1LastSwipeOrStartMs: BigInt(fields.p1_last_swipe_or_start_ms),
     p0Swipes: fields.p0_swipes.map(parseSwipe),
     p1Swipes: fields.p1_swipes.map(parseSwipe),
     cardSettlements: fields.card_settlements.map((s) =>

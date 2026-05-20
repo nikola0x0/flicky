@@ -481,6 +481,7 @@ function PhaseDispatcher({
         duelId={duelId}
         oracle={oracle}
         myNextIdx={myNextIdx}
+        isCreator={isCreator}
       />
     )
   }
@@ -502,18 +503,35 @@ function WaitingForOpponentView({
   duel: DuelState
   duelId: string
 }) {
+  const now = useNow(1000)
+  // PENDING duels have started_at_ms == 0 (set only on join_duel). Track
+  // elapsed from when this view mounted — close enough for a spinner.
+  const [mountedAt] = useState(() => Date.now())
+  const elapsed = Math.max(0, Math.floor((now - mountedAt) / 1000))
+  const showShareEscape = elapsed > 30
   return (
-    <div className="space-y-3 py-6 text-center">
-      <Badge variant="outline">waiting for opponent</Badge>
-      <p className="text-lg">
-        you staked <strong>{fmtSui(duel.p0Stake)}</strong>
-      </p>
+    <div className="space-y-4 py-8 text-center">
+      <div className="flex justify-center">
+        <span className="border-primary inline-block h-12 w-12 animate-spin rounded-full border-4 border-t-transparent" />
+      </div>
+      <div className="space-y-1">
+        <div className="text-lg font-semibold">matching…</div>
+        <div className="text-muted-foreground text-xs">{elapsed}s elapsed</div>
+      </div>
       <p className="text-muted-foreground text-sm">
-        share this duel id so a challenger can join:
+        you staked <strong className="text-foreground">{fmtSui(duel.p0Stake)}</strong>.
+        bot auto-fills after ~5s if no human joins.
       </p>
-      <code className="bg-muted block rounded p-2 text-xs">{duelId}</code>
+      {showShareEscape && (
+        <div className="space-y-1 pt-3">
+          <p className="text-muted-foreground text-xs">
+            still no opponent. share manually:
+          </p>
+          <code className="bg-muted block break-all rounded p-2 text-xs">{duelId}</code>
+        </div>
+      )}
       <p className="text-muted-foreground pt-2 text-xs">
-        pot when full: {fmtSui(duel.p0Stake * 2n)}
+        pot when full {fmtSui(duel.p0Stake * 2n)}
       </p>
     </div>
   )
@@ -558,20 +576,26 @@ function SwipingView({
   duelId,
   oracle,
   myNextIdx,
+  isCreator,
 }: {
   duel: DuelState
   duelId: string
   oracle: OracleSviInfo | undefined
   myNextIdx: number
+  isCreator: boolean
 }) {
   const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
   const queryClient = useQueryClient()
   const now = useNow(250)
   const card = duel.cards[myNextIdx]
-  const startedAt = Number(duel.startedAtMs)
-  const elapsedMs = Math.max(0, now - startedAt)
+  // Per-card decide-time clock starts at the player's last swipe (or duel
+  // start for card 0). This matches `duel::record_swipe`'s baseline math.
+  const baselineMs = Number(
+    isCreator ? duel.p0LastSwipeOrStartMs : duel.p1LastSwipeOrStartMs,
+  )
+  const elapsedMs = Math.max(0, now - baselineMs)
   const timerMs = Math.max(0, SWIPE_PHASE_MS - elapsedMs)
-  const speed = speedMultiplier(elapsedMs % SWIPE_PHASE_MS)
+  const speed = speedMultiplier(elapsedMs)
   const [err, setErr] = useState<string | null>(null)
 
   async function swipe(isUp: boolean) {
