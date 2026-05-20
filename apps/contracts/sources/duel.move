@@ -31,7 +31,9 @@ module flicky::duel;
 
 use deepbook_predict::oracle::{Self as db_oracle, OracleSVI};
 use flicky::pricing;
+use std::hash;
 use sui::balance::{Self, Balance};
+use sui::bcs;
 use sui::clock::Clock;
 use sui::coin::{Self, Coin};
 use sui::event;
@@ -55,6 +57,15 @@ const EZeroStake: u64 = 13;
 /// ACTIVE (inactive, already expired, or settled). Prevents trivially-known
 /// outcomes from being scored.
 const EOracleNotLive: u64 = 14;
+/// `deck_hash` must be exactly 32 bytes (sha2-256 length).
+const EInvalidDeckHash: u64 = 15;
+/// `reveal_deck` called twice on the same Duel.
+const EDeckAlreadyRevealed: u64 = 16;
+/// Plaintext deck passed to `reveal_deck` does not hash to the committed
+/// `deck_hash`. Anti-front-run guarantee.
+const EDeckHashMismatch: u64 = 17;
+/// `record_swipe` requires the deck to have been revealed first.
+const EDeckNotRevealed: u64 = 18;
 
 // === Status ===
 const STATUS_PENDING: u8 = 1;
@@ -98,6 +109,9 @@ public struct Swipe has copy, drop, store {
 public struct Duel<phantom T> has key {
     id: UID,
     status: u8,
+    /// sha2-256 of `bcs::to_bytes(&cards)` committed at create time. Cards
+    /// stay empty until `reveal_deck` is called with the plaintext.
+    deck_hash: vector<u8>,
     cards: vector<Card>,
     creator: address,
     /// `@0x0` until a challenger joins.
@@ -131,6 +145,11 @@ public struct DuelCreated has copy, drop {
     duel_id: ID,
     creator: address,
     stake_amount: u64,
+    deck_hash: vector<u8>,
+}
+
+public struct DeckRevealed has copy, drop {
+    duel_id: ID,
 }
 
 public struct DuelJoined has copy, drop {
@@ -181,13 +200,18 @@ public fun card_strike(card: &Card): u64 { card.strike }
 
 // === Public: lifecycle ===
 
-/// Creator stakes and locks in a 5-card deck. Returns the new shared duel ID.
+/// Creator stakes and commits the deck's hash. Cards are revealed later
+/// via `reveal_deck`. Returns the new shared duel ID.
+///
+/// The `deck_hash` is `sha2_256(bcs::to_bytes(&cards))` computed off-chain
+/// by the Deckmaster. Committing the hash before the challenger joins
+/// prevents front-running with parallel Predict positions.
 public fun create_duel<T>(
     stake: Coin<T>,
-    cards: vector<Card>,
+    deck_hash: vector<u8>,
     ctx: &mut TxContext,
 ): ID {
-    assert!(cards.length() == DECK_SIZE, EInvalidDeckSize);
+    assert!(deck_hash.length() == 32, EInvalidDeckHash);
     let stake_amount = stake.value();
     assert!(stake_amount > 0, EZeroStake);
 
@@ -204,7 +228,8 @@ public fun create_duel<T>(
     let duel = Duel<T> {
         id: object::new(ctx),
         status: STATUS_PENDING,
-        cards,
+        deck_hash,
+        cards: vector<Card>[],
         creator,
         challenger: @0x0,
         p0_stake: stake.into_balance(),
@@ -224,10 +249,30 @@ public fun create_duel<T>(
 
     let duel_id = object::id(&duel);
 
-    event::emit(DuelCreated { duel_id, creator, stake_amount });
+    event::emit(DuelCreated {
+        duel_id,
+        creator,
+        stake_amount,
+        deck_hash: duel.deck_hash,
+    });
 
     transfer::share_object(duel);
     duel_id
+}
+
+/// Reveal the committed deck. Permissionless — anyone with the plaintext
+/// can call. Verifies `sha2_256(bcs::to_bytes(&cards)) == duel.deck_hash`
+/// and populates `duel.cards`. Must run after `join_duel` (duel.status ==
+/// ACTIVE) and before any `record_swipe`.
+public fun reveal_deck<T>(duel: &mut Duel<T>, cards: vector<Card>) {
+    assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
+    assert!(duel.cards.is_empty(), EDeckAlreadyRevealed);
+    assert!(cards.length() == DECK_SIZE, EInvalidDeckSize);
+    let serialized = bcs::to_bytes(&cards);
+    let computed = hash::sha2_256(serialized);
+    assert!(computed == duel.deck_hash, EDeckHashMismatch);
+    duel.cards = cards;
+    event::emit(DeckRevealed { duel_id: object::id(duel) });
 }
 
 /// Challenger matches the creator's stake and starts the match. Both decks
@@ -275,6 +320,7 @@ public fun record_swipe<T>(
     ctx: &TxContext,
 ) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
+    assert!(!duel.cards.is_empty(), EDeckNotRevealed);
     assert!(card_idx < DECK_SIZE, ECardIndexOOB);
 
     let sender = ctx.sender();
@@ -399,6 +445,8 @@ public fun challenger<T>(duel: &Duel<T>): address { duel.challenger }
 public fun started_at_ms<T>(duel: &Duel<T>): u64 { duel.started_at_ms }
 
 public fun deck<T>(duel: &Duel<T>): &vector<Card> { &duel.cards }
+
+public fun deck_hash<T>(duel: &Duel<T>): vector<u8> { duel.deck_hash }
 
 public fun p0_score<T>(duel: &Duel<T>): u64 { duel.p0_score }
 

@@ -4,10 +4,13 @@ import type { SuiObjectResponse } from "@mysten/sui/jsonRpc"
 import {
   buildCreateDuelTx,
   buildJoinDuelTx,
+  buildRevealDeckTx,
   buildSettleAndFinalizeTx,
   buildSwipeTx,
+  computeDeckHash,
   oracleStrikes,
   parseDuel,
+  type DeckCard,
 } from "./flicky"
 import { CONFIG } from "./config"
 
@@ -174,17 +177,44 @@ describe("PTB builders", () => {
     (p) => (80_000_000_000_000n * p) / 100n,
   )
 
-  test("buildCreateDuelTx emits 5 new_card + 1 create_duel + the gas split", () => {
-    const tx = buildCreateDuelTx(oracleId, strikes, 10_000_000n)
+  test("buildCreateDuelTx emits exactly one duel::create_duel call", async () => {
+    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const hash = await computeDeckHash(cards)
+    const tx = buildCreateDuelTx(hash, 10_000_000n)
     const targets = moveCallTargets(tx)
-    const newCards = targets.filter((t) => t.endsWith("::duel::new_card"))
-    const createDuels = targets.filter((t) => t.endsWith("::duel::create_duel"))
-    expect(newCards).toHaveLength(5)
-    expect(createDuels).toHaveLength(1)
+    expect(targets).toHaveLength(1)
+    expect(targets[0]).toMatch(/::duel::create_duel$/)
   })
 
-  test("buildCreateDuelTx rejects deck size != 5", () => {
-    expect(() => buildCreateDuelTx(oracleId, [1n, 2n, 3n], 1n)).toThrow(/5 strikes/)
+  test("buildCreateDuelTx rejects deck hash of wrong length", () => {
+    const bad = new Uint8Array(16)
+    expect(() => buildCreateDuelTx(bad, 1n)).toThrow(/32 bytes/)
+  })
+
+  test("buildRevealDeckTx emits 5 new_card + 1 reveal_deck", () => {
+    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const tx = buildRevealDeckTx(duelId, cards)
+    const targets = moveCallTargets(tx)
+    expect(targets.filter((t) => t.endsWith("::duel::new_card"))).toHaveLength(5)
+    expect(targets.filter((t) => t.endsWith("::duel::reveal_deck"))).toHaveLength(1)
+  })
+
+  test("buildRevealDeckTx rejects wrong card count", () => {
+    expect(() => buildRevealDeckTx(duelId, [])).toThrow(/exactly 5/)
+  })
+
+  test("computeDeckHash returns 32 bytes deterministically", async () => {
+    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const a = await computeDeckHash(cards)
+    const b = await computeDeckHash(cards)
+    expect(a).toHaveLength(32)
+    expect(Array.from(a)).toEqual(Array.from(b))
+    // Different deck → different hash.
+    const c = await computeDeckHash([
+      ...cards.slice(0, 4),
+      { oracleId, strike: cards[4].strike + 1n },
+    ])
+    expect(Array.from(a)).not.toEqual(Array.from(c))
   })
 
   test("buildJoinDuelTx emits exactly one duel::join_duel call", () => {

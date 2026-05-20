@@ -8,7 +8,8 @@
  */
 import { Transaction } from "@mysten/sui/transactions"
 import type { SuiJsonRpcClient, SuiObjectResponse } from "@mysten/sui/jsonRpc"
-import { normalizeSuiObjectId } from "@mysten/sui/utils"
+import { bcs } from "@mysten/sui/bcs"
+import { normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
 
 type SuiClient = SuiJsonRpcClient
 
@@ -64,6 +65,45 @@ const STATUS_MAP: Record<string, DuelStatus> = {
   "3": "COMPLETE",
 }
 
+// === Deck commit-reveal helpers ===
+
+export interface DeckCard {
+  oracleId: string
+  strike: bigint
+}
+
+/**
+ * BCS schema matching the on-chain `flicky::duel::Card` layout
+ * (`oracle_id: ID, strike: u64`). The vector serialization + sha2-256
+ * here must reproduce what `bcs::to_bytes(&cards)` + `hash::sha2_256`
+ * produce in Move — see `apps/contracts/sources/duel.move::reveal_deck`.
+ */
+const CardBcs = bcs.struct("Card", {
+  oracle_id: bcs.Address,
+  strike: bcs.u64(),
+})
+const DeckBcs = bcs.vector(CardBcs)
+
+function serializeDeck(cards: DeckCard[]): Uint8Array {
+  return DeckBcs.serialize(
+    cards.map((c) => ({
+      oracle_id: normalizeSuiAddress(c.oracleId),
+      strike: c.strike.toString(),
+    })),
+  ).toBytes()
+}
+
+/** SHA-256 of the BCS-encoded deck. Used as `deck_hash` in create_duel. */
+export async function computeDeckHash(cards: DeckCard[]): Promise<Uint8Array> {
+  const bytes = serializeDeck(cards)
+  // Wrap into a fresh ArrayBuffer so TS doesn't complain about the
+  // SharedArrayBuffer-vs-ArrayBuffer type widening on Uint8Array.
+  const buf = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(buf).set(bytes)
+  const digest = await crypto.subtle.digest("SHA-256", buf)
+  return new Uint8Array(digest)
+}
+
 // === PTB builders ===
 //
 // The free-tier flow uses gas-paid SUI as stake. The staked-tier flow uses
@@ -71,35 +111,56 @@ const STATUS_MAP: Record<string, DuelStatus> = {
 // call per swipe — see `./deepbook.ts` for that.
 
 /**
- * Create a duel — split `stakeAmount` off the gas wallet, build 5 cards
- * referencing the same OracleSVI, share the new Duel<T> object.
+ * Create a duel by committing the deck's sha2-256 hash. The plaintext
+ * stays off-chain until `buildRevealDeckTx` runs after the challenger
+ * joins. Anti-front-run guarantee.
  */
 export function buildCreateDuelTx(
-  oracleId: string,
-  strikes: bigint[],
+  deckHash: Uint8Array,
   stakeAmount: bigint,
   stakeCoinType: string = CONFIG.stakeType,
 ): Transaction {
-  if (strikes.length !== 5) throw new Error("must be 5 strikes")
+  if (deckHash.length !== 32) throw new Error("deck hash must be 32 bytes (sha-256)")
 
   const tx = new Transaction()
   const [stake] = tx.splitCoins(tx.gas, [tx.pure.u64(stakeAmount)])
 
-  const cards = strikes.map((strike) =>
-    tx.add(
-      duelGen.newCard({
-        package: packageId,
-        arguments: [oracleId, strike],
-      }),
-    ),
-  )
-
   tx.add(
     duelGen.createDuel({
       package: packageId,
+      arguments: [stake, tx.pure.vector("u8", Array.from(deckHash))],
+      typeArguments: [stakeCoinType],
+    }),
+  )
+  return tx
+}
+
+/**
+ * Reveal the previously-committed deck. Permissionless — any address can
+ * call. Contract verifies sha2_256(bcs(cards)) == duel.deck_hash.
+ */
+export function buildRevealDeckTx(
+  duelId: string,
+  cards: DeckCard[],
+  stakeCoinType: string = CONFIG.stakeType,
+): Transaction {
+  if (cards.length !== 5) throw new Error("must reveal exactly 5 cards")
+  const tx = new Transaction()
+
+  const cardArgs = cards.map((c) =>
+    tx.add(
+      duelGen.newCard({
+        package: packageId,
+        arguments: [c.oracleId, c.strike],
+      }),
+    ),
+  )
+  tx.add(
+    duelGen.revealDeck({
+      package: packageId,
       arguments: [
-        stake,
-        tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cards }),
+        duelId,
+        tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cardArgs }),
       ],
       typeArguments: [stakeCoinType],
     }),

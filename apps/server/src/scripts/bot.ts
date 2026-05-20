@@ -211,6 +211,13 @@ class Bot {
         console.log(`[done-swiping] ${shortId(duelId)}`)
         return
       }
+      // Cards stay empty until the keeper (or any reveal path) lands
+      // reveal_deck on chain. Just back off and re-check; no swipe possible
+      // without revealed cards.
+      if (duel.cards.length === 0) {
+        await sleep(2_000)
+        continue
+      }
       const idx = duel.p1NextCardIdx
       const card = duel.cards[idx]
       // Small per-card jitter (1.5–4 s) keeps the bot in the 0–5s "fast"

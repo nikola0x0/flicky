@@ -66,8 +66,16 @@ interface DuelLite {
   id: string
   status: "PENDING" | "ACTIVE" | "COMPLETE"
   stakeCoinType: string
-  oracleId: string
+  /** sha2-256 of the committed deck, hex with 0x prefix. */
+  deckHashHex: string
+  /** Cards from `duel.cards`. Empty until `reveal_deck` lands. */
+  cards: Array<{ oracleId: string; strike: bigint }>
   cardSettlements: (bigint | null)[]
+}
+
+function hexFromBytes(bytes: number[] | string): string {
+  if (typeof bytes === "string") return bytes.startsWith("0x") ? bytes.toLowerCase() : "0x" + bytes
+  return "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
 function parseDuel(obj: SuiObjectResponse): DuelLite | null {
@@ -75,6 +83,7 @@ function parseDuel(obj: SuiObjectResponse): DuelLite | null {
   const f = obj.data.content.fields as {
     id: { id: string }
     status: string
+    deck_hash: number[] | string
     cards: Array<{ fields: { oracle_id: string; strike: string } }>
     card_settlements: Array<string | null>
   }
@@ -91,8 +100,41 @@ function parseDuel(obj: SuiObjectResponse): DuelLite | null {
     id: normalizeSuiObjectId(f.id.id),
     status,
     stakeCoinType,
-    oracleId: normalizeSuiObjectId(f.cards[0].fields.oracle_id),
+    deckHashHex: hexFromBytes(f.deck_hash),
+    cards: f.cards.map((c) => ({
+      oracleId: normalizeSuiObjectId(c.fields.oracle_id),
+      strike: BigInt(c.fields.strike),
+    })),
     cardSettlements: f.card_settlements.map((s) => (s === null ? null : BigInt(s))),
+  }
+}
+
+interface DeckmasterDeck {
+  cards: Array<{ oracle_id: string; strike: string }>
+  hash: string
+}
+
+async function fetchPlaintextDeck(
+  baseUrl: string,
+  hashHex: string,
+): Promise<Array<{ oracleId: string; strike: bigint }> | null> {
+  try {
+    const res = await fetch(`${baseUrl}/deckmaster/reveal?hash=${hashHex}`)
+    if (res.status === 404) return null
+    if (!res.ok) {
+      console.warn(`[deckmaster] reveal ${hashHex} → ${res.status}`)
+      return null
+    }
+    const body = (await res.json()) as DeckmasterDeck
+    return body.cards.map((c) => ({
+      oracleId: c.oracle_id,
+      strike: BigInt(c.strike),
+    }))
+  } catch (e) {
+    console.warn(
+      `[deckmaster] reveal fetch failed: ${e instanceof Error ? e.message : String(e)}`,
+    )
+    return null
   }
 }
 
@@ -124,14 +166,70 @@ class Keeper {
   readonly keypair: Ed25519Keypair
   readonly address: string
   readonly packageId: string
+  readonly deckmasterUrl: string
   readonly finalized = new Set<string>()
+  readonly revealed = new Set<string>()
   readonly inFlight = new Set<string>()
 
-  constructor(client: SuiJsonRpcClient, keypair: Ed25519Keypair, packageId: string) {
+  constructor(
+    client: SuiJsonRpcClient,
+    keypair: Ed25519Keypair,
+    packageId: string,
+    deckmasterUrl: string,
+  ) {
     this.client = client
     this.keypair = keypair
     this.packageId = packageId
+    this.deckmasterUrl = deckmasterUrl
     this.address = keypair.toSuiAddress()
+  }
+
+  /** Reveal the deck if it hasn't been revealed yet and we have plaintext. */
+  async tryReveal(duel: DuelLite) {
+    if (this.revealed.has(duel.id)) return
+    if (duel.cards.length > 0) {
+      this.revealed.add(duel.id)
+      return
+    }
+    if (duel.status !== "ACTIVE") return // need challenger to have joined
+    const plaintext = await fetchPlaintextDeck(this.deckmasterUrl, duel.deckHashHex)
+    if (!plaintext) return // creator's tab will have to reveal
+    const tx = new Transaction()
+    const cardArgs = plaintext.map((c) =>
+      tx.moveCall({
+        target: `${this.packageId}::duel::new_card`,
+        arguments: [tx.object(c.oracleId), tx.pure.u64(c.strike)],
+      }),
+    )
+    tx.moveCall({
+      target: `${this.packageId}::duel::reveal_deck`,
+      typeArguments: [duel.stakeCoinType],
+      arguments: [
+        tx.object(duel.id),
+        tx.makeMoveVec({
+          type: `${this.packageId}::duel::Card`,
+          elements: cardArgs,
+        }),
+      ],
+    })
+    const res = await this.client.signAndExecuteTransaction({
+      transaction: tx,
+      signer: this.keypair,
+      options: { showEffects: true },
+    })
+    if (res.effects?.status.status === "success") {
+      await this.client.waitForTransaction({ digest: res.digest })
+      this.revealed.add(duel.id)
+      console.log(`[reveal] ${shortId(duel.id)} · ${shortId(res.digest)}`)
+    } else {
+      const reason = res.effects?.status.error ?? "unknown"
+      // EDeckAlreadyRevealed = 16: race with another revealer. Mark done.
+      if (reason.includes("16") || reason.includes("EDeckAlreadyRevealed")) {
+        this.revealed.add(duel.id)
+        return
+      }
+      console.warn(`[reveal-skip] ${shortId(duel.id)}: ${reason}`)
+    }
   }
 
   async tryClose(duelId: string) {
@@ -150,7 +248,12 @@ class Keeper {
       }
       if (duel.status !== "ACTIVE") return // PENDING — wait for join
 
-      const settled = await readOracleSettled(this.client, duel.oracleId)
+      // Reveal first if we can (and if it hasn't happened yet).
+      await this.tryReveal(duel)
+      if (duel.cards.length === 0) return // still unrevealed; next poll
+
+      const oracleId = duel.cards[0].oracleId
+      const settled = await readOracleSettled(this.client, oracleId)
       if (!settled) return // oracle hasn't ticked past expiry yet
 
       // Build PTB: settle every card that isn't already settled, then finalize.
@@ -163,7 +266,7 @@ class Keeper {
             typeArguments: [duel.stakeCoinType],
             arguments: [
               tx.object(duelId),
-              tx.object(duel.oracleId),
+              tx.object(oracleId),
               tx.pure.u64(BigInt(i)),
             ],
           })
@@ -183,8 +286,6 @@ class Keeper {
       })
       if (res.effects?.status.status !== "success") {
         const reason = res.effects?.status.error ?? "unknown"
-        // EAllCardsNotSettled = 11 (we mis-counted) or EDuelNotActive = 2
-        // (someone beat us to it) — both safe to ignore on next poll.
         console.warn(`[skip] ${shortId(duelId)}: ${reason}`)
         return
       }
@@ -195,8 +296,6 @@ class Keeper {
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      // Silence the "already finalized" and "already settled" races — they
-      // happen normally if a player manually clicked the settle button.
       if (
         msg.includes("EDuelNotActive") ||
         msg.includes("ECardAlreadySettled") ||
@@ -232,7 +331,9 @@ async function main() {
   const packageId = loadPackageId()
   const keypair = loadKeeperKeypair()
   const client = getSuiClient()
-  const keeper = new Keeper(client, keypair, packageId)
+  const deckmasterUrl =
+    process.env.DECKMASTER_URL ?? `http://localhost:${process.env.PORT ?? 3001}`
+  const keeper = new Keeper(client, keypair, packageId, deckmasterUrl)
 
   const balance = await client.getBalance({ owner: keeper.address })
   console.log(`flicky package: ${packageId}`)
@@ -240,6 +341,7 @@ async function main() {
   console.log(
     `keeper balance: ${(Number(balance.totalBalance) / 1e9).toFixed(4)} SUI`,
   )
+  console.log(`deckmaster:     ${deckmasterUrl}`)
   console.log(`polling:        every ${POLL_INTERVAL_MS}ms\n`)
 
   if (BigInt(balance.totalBalance) < 50_000_000n) {

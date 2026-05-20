@@ -49,14 +49,20 @@ import {
   buildJoinDuelTx,
   buildSettleAndFinalizeTx,
   buildSwipeTx,
+  computeDeckHash,
   fetchDuel,
   fetchOracleSvi,
   findLatestOracleSvi,
   listDuelIds,
   oracleStrikes,
+  type DeckCard,
   type DuelState,
   type OracleSviInfo,
 } from "@/lib/flicky"
+
+// Deckmaster HTTP endpoint. Defaults to the local server during dev.
+const DECKMASTER_BASE_URL =
+  import.meta.env.VITE_DECKMASTER_URL ?? "http://localhost:3001"
 
 // ─── stake tier presets (free tier — SUI mist; staked tier is Phase 3) ─────
 
@@ -104,6 +110,52 @@ function fmtSui(mist: bigint): string {
 
 function shortId(id: string, len = 6): string {
   return id.length > len * 2 + 2 ? `${id.slice(0, len)}…${id.slice(-len)}` : id
+}
+
+/**
+ * Request a Deckmaster-generated deck from the server. Falls back to
+ * client-side generation (less robust — the keeper won't have plaintext
+ * for reveal, so reveal must come from this browser tab) if the server is
+ * unreachable.
+ */
+async function requestDeck(
+  oracleId: string,
+  reference: bigint,
+): Promise<{ cards: DeckCard[]; hash: Uint8Array }> {
+  try {
+    const res = await fetch(`${DECKMASTER_BASE_URL}/deckmaster/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        oracle_id: oracleId,
+        reference: reference.toString(),
+      }),
+    })
+    if (!res.ok) throw new Error(`deckmaster ${res.status}`)
+    const body = (await res.json()) as {
+      cards: Array<{ oracle_id: string; strike: string }>
+      hash: string
+    }
+    const cards: DeckCard[] = body.cards.map((c) => ({
+      oracleId: c.oracle_id,
+      strike: BigInt(c.strike),
+    }))
+    const hashHex = body.hash.replace(/^0x/, "")
+    const hash = new Uint8Array(
+      hashHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)),
+    )
+    return { cards, hash }
+  } catch {
+    // Fallback: generate locally. The keeper won't have plaintext, so
+    // reveal must run from this tab via buildRevealDeckTx (not implemented
+    // in the lobby UI — Phase 3.5).
+    const cards: DeckCard[] = oracleStrikes(reference).map((strike) => ({
+      oracleId,
+      strike,
+    }))
+    const hash = await computeDeckHash(cards)
+    return { cards, hash }
+  }
 }
 
 function speedMultiplier(ms: number): { label: string; mult: number; tone: "good" | "ok" | "warn" } {
@@ -277,12 +329,13 @@ function Lobby({
     setBusy(true)
     setErr(null)
     try {
+      // 1. Ask Deckmaster for a deck. Server stores plaintext keyed by hash
+      //    so the keeper can reveal once a challenger joins.
       const ref = oracle.settlementPrice ?? oracle.forward
-      const strikes = oracleStrikes(ref)
-      const tx = buildCreateDuelTx(oracleId, strikes, stakeMist)
+      const deck = await requestDeck(oracleId, ref)
+
+      const tx = buildCreateDuelTx(deck.hash, stakeMist)
       const res = await signAndExec({ transaction: tx })
-      // dapp-kit v1 only returns { digest, rawEffects }. Follow up with
-      // waitForTransaction to pull objectChanges for the new Duel id.
       const full = await client.waitForTransaction({
         digest: res.digest,
         options: { showObjectChanges: true },

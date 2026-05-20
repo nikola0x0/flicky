@@ -7,7 +7,9 @@ module flicky::duel_tests;
 use deepbook_predict::i64 as db_i64;
 use deepbook_predict::oracle::{Self as db_oracle, OracleSVI};
 use flicky::duel::{Self, Duel};
+use std::hash;
 use std::unit_test::{assert_eq, destroy};
+use sui::bcs;
 use sui::clock::{Self, Clock};
 use sui::coin;
 use sui::sui::SUI;
@@ -70,6 +72,10 @@ fun atm_deck(oracle: &OracleSVI): vector<duel::Card> {
     deck
 }
 
+fun deck_hash_of(cards: &vector<duel::Card>): vector<u8> {
+    hash::sha2_256(bcs::to_bytes(cards))
+}
+
 fun take_oracle(scenario: &mut Scenario, sender: address): OracleSVI {
     scenario.next_tx(sender);
     scenario.take_shared<OracleSVI>()
@@ -84,20 +90,34 @@ fun mint_sui(amount: u64, scenario: &mut Scenario): coin::Coin<SUI> {
     coin::mint_for_testing<SUI>(amount, scenario.ctx())
 }
 
-/// Common setup: create oracle + duel created by ALICE.
+/// Common setup: create oracle + duel created by ALICE with the standard
+/// ATM deck hash. The deck stays unrevealed until `reveal_atm_deck` is
+/// called (typically right after the challenger joins).
 fun create_duel_with_alice(scenario: &mut Scenario, clock: &Clock): ID {
     create_seeded_oracle(scenario, clock);
     scenario.next_tx(ALICE);
     let oracle_ref = scenario.take_shared<OracleSVI>();
-    let deck = atm_deck(&oracle_ref);
+    let cards = atm_deck(&oracle_ref);
+    let h = deck_hash_of(&cards);
     ts::return_shared(oracle_ref);
-    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, scenario), deck, scenario.ctx())
+    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, scenario), h, scenario.ctx())
+}
+
+/// Reveal the ATM deck. Permissionless on chain, but in tests we call as
+/// ADMIN so the scenario's tx ordering stays simple.
+fun reveal_atm_deck(scenario: &mut Scenario) {
+    let oracle_ref = take_oracle(scenario, ADMIN);
+    let cards = atm_deck(&oracle_ref);
+    let mut duel = take_duel(scenario, ADMIN);
+    duel.reveal_deck(cards);
+    ts::return_shared(duel);
+    ts::return_shared(oracle_ref);
 }
 
 // === create_duel ===
 
 #[test]
-fun create_duel_starts_pending() {
+fun create_duel_starts_pending_with_empty_deck() {
     let (mut scenario, clock) = setup_scenario();
     create_duel_with_alice(&mut scenario, &clock);
 
@@ -108,19 +128,22 @@ fun create_duel_starts_pending() {
     assert_eq!(duel.p0_stake_value(), STAKE_AMOUNT);
     assert_eq!(duel.p1_stake_value(), 0);
     assert_eq!(duel.started_at_ms(), 0);
-    assert_eq!(duel.deck().length(), duel::test_deck_size());
+    // Deck is hidden until reveal_deck.
+    assert_eq!(duel.deck().length(), 0);
+    assert_eq!(duel.deck_hash().length(), 32);
 
     ts::return_shared(duel);
     teardown(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = duel::EInvalidDeckSize)]
-fun create_duel_rejects_wrong_deck_size() {
+#[test, expected_failure(abort_code = duel::EInvalidDeckHash)]
+fun create_duel_rejects_wrong_hash_length() {
     let (mut scenario, clock) = setup_scenario();
     create_seeded_oracle(&mut scenario, &clock);
-    let oracle_ref = take_oracle(&mut scenario, ALICE);
-    let short_deck = vector[duel::new_card(&oracle_ref, ATM_STRIKE)];
-    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), short_deck, scenario.ctx());
+    scenario.next_tx(ALICE);
+    // 16-byte hash (not 32) — should abort.
+    let bad = vector[0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), bad, scenario.ctx());
     abort 999
 }
 
@@ -129,9 +152,9 @@ fun create_duel_rejects_zero_stake() {
     let (mut scenario, clock) = setup_scenario();
     create_seeded_oracle(&mut scenario, &clock);
     let oracle_ref = take_oracle(&mut scenario, ALICE);
-    let deck = atm_deck(&oracle_ref);
+    let h = deck_hash_of(&atm_deck(&oracle_ref));
     ts::return_shared(oracle_ref);
-    duel::create_duel<SUI>(mint_sui(0, &mut scenario), deck, scenario.ctx());
+    duel::create_duel<SUI>(mint_sui(0, &mut scenario), h, scenario.ctx());
     abort 999
 }
 
@@ -189,6 +212,73 @@ fun join_duel_rejects_second_join() {
     abort 999
 }
 
+// === reveal_deck ===
+
+#[test]
+fun reveal_deck_populates_cards() {
+    let (mut scenario, clock) = setup_scenario();
+    create_duel_with_alice(&mut scenario, &clock);
+
+    // Bob joins.
+    let mut duel = take_duel(&mut scenario, BOB);
+    duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
+    ts::return_shared(duel);
+
+    reveal_atm_deck(&mut scenario);
+
+    let duel = take_duel(&mut scenario, ALICE);
+    assert_eq!(duel.deck().length(), 5);
+    ts::return_shared(duel);
+    teardown(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = duel::EDuelNotActive)]
+fun reveal_deck_rejects_when_pending() {
+    let (mut scenario, clock) = setup_scenario();
+    create_duel_with_alice(&mut scenario, &clock);
+    // Skip Bob's join — reveal on PENDING duel must abort.
+    let oracle_ref = take_oracle(&mut scenario, ADMIN);
+    let cards = atm_deck(&oracle_ref);
+    let mut duel = take_duel(&mut scenario, ADMIN);
+    duel.reveal_deck(cards);
+    abort 999
+}
+
+#[test, expected_failure(abort_code = duel::EDeckHashMismatch)]
+fun reveal_deck_rejects_wrong_plaintext() {
+    let (mut scenario, clock) = setup_scenario();
+    create_duel_with_alice(&mut scenario, &clock);
+
+    let mut duel = take_duel(&mut scenario, BOB);
+    duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
+    ts::return_shared(duel);
+
+    // Reveal with cards that don't match the committed hash (different strike).
+    let oracle_ref = take_oracle(&mut scenario, ADMIN);
+    let mut wrong = vector<duel::Card>[];
+    duel::test_deck_size().do!(|_| {
+        wrong.push_back(duel::new_card(&oracle_ref, ATM_STRIKE + 1_000_000_000));
+    });
+    let mut d = take_duel(&mut scenario, ADMIN);
+    d.reveal_deck(wrong);
+    abort 999
+}
+
+#[test, expected_failure(abort_code = duel::EDeckAlreadyRevealed)]
+fun reveal_deck_rejects_second_reveal() {
+    let (mut scenario, clock) = setup_scenario();
+    create_duel_with_alice(&mut scenario, &clock);
+
+    let mut duel = take_duel(&mut scenario, BOB);
+    duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
+    ts::return_shared(duel);
+
+    reveal_atm_deck(&mut scenario);
+    // Second reveal must abort.
+    reveal_atm_deck(&mut scenario);
+    abort 999
+}
+
 // === record_swipe ===
 
 #[test]
@@ -201,6 +291,7 @@ fun record_swipe_works() {
         duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
         ts::return_shared(duel);
     };
+    reveal_atm_deck(&mut scenario);
 
     // Alice swipes card 0 UP at +2s (fast multiplier).
     clock.set_for_testing(START_MS + 2_000);
@@ -214,6 +305,23 @@ fun record_swipe_works() {
     teardown(scenario, clock);
 }
 
+#[test, expected_failure(abort_code = duel::EDeckNotRevealed)]
+fun record_swipe_rejects_before_reveal() {
+    let (mut scenario, clock) = setup_scenario();
+    create_duel_with_alice(&mut scenario, &clock);
+
+    {
+        let mut duel = take_duel(&mut scenario, BOB);
+        duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
+        ts::return_shared(duel);
+    };
+    // Skip reveal — swipe must abort.
+    let oracle_ref = take_oracle(&mut scenario, ALICE);
+    let mut duel = take_duel(&mut scenario, ALICE);
+    duel.record_swipe(&oracle_ref, 0, true, &clock, scenario.ctx());
+    abort 999
+}
+
 #[test, expected_failure(abort_code = duel::EOutOfTurn)]
 fun record_swipe_rejects_out_of_order() {
     let (mut scenario, clock) = setup_scenario();
@@ -224,6 +332,7 @@ fun record_swipe_rejects_out_of_order() {
         duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
         ts::return_shared(duel);
     };
+    reveal_atm_deck(&mut scenario);
 
     let oracle_ref = take_oracle(&mut scenario, ALICE);
     let mut duel = take_duel(&mut scenario, ALICE);
@@ -242,6 +351,7 @@ fun record_swipe_rejects_non_player() {
         duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
         ts::return_shared(duel);
     };
+    reveal_atm_deck(&mut scenario);
 
     let oracle_ref = take_oracle(&mut scenario, EVE);
     let mut duel = take_duel(&mut scenario, EVE);
@@ -278,6 +388,7 @@ fun run_full_duel(
     let mut duel = take_duel(scenario, BOB);
     duel.join_duel(mint_sui(STAKE_AMOUNT, scenario), clock, scenario.ctx());
     ts::return_shared(duel);
+    reveal_atm_deck(scenario);
 
     // Both players swipe all 5 cards. Advance the clock by swipe_delay_ms
     // between swipes so each swipe's `decide_time_ms` lands in the chosen tier.
@@ -417,6 +528,7 @@ fun settle_card_rejects_unsettled_oracle() {
     let mut duel = take_duel(&mut scenario, BOB);
     duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
     ts::return_shared(duel);
+    reveal_atm_deck(&mut scenario);
 
     let oracle_ref = take_oracle(&mut scenario, ADMIN);
     let mut d = take_duel(&mut scenario, ADMIN);
@@ -431,6 +543,7 @@ fun finalize_rejects_partial_settlement() {
     let mut duel = take_duel(&mut scenario, BOB);
     duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
     ts::return_shared(duel);
+    reveal_atm_deck(&mut scenario);
 
     // Skip swipes, just settle oracle and try to finalize without any cards
     // settled.
@@ -512,6 +625,7 @@ fun record_swipe_rejects_after_expiry() {
     let mut duel = take_duel(&mut scenario, BOB);
     duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
     ts::return_shared(duel);
+    reveal_atm_deck(&mut scenario);
 
     // Advance past oracle expiry → status moves to PENDING_SETTLEMENT and the
     // fairness guard must reject any further swipes.
