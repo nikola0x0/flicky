@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "deepbook:discover": "bun run src/scripts/deepbook-discover.ts",
     "demo:duel": "bun run src/scripts/demo-duel.ts",
-    "bot": "bun run src/scripts/bot.ts"
+    "bot": "bun run src/scripts/bot.ts",
+    "keeper": "bun run src/scripts/keeper.ts"
   },
   "dependencies": {
     "@mysten/sui": "^1.30"

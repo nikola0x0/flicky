@@ -20,6 +20,7 @@ bun --filter server typecheck         # tsc --noEmit
 bun --filter server deepbook:discover # list active DeepBook OracleSVI on testnet
 bun --filter server demo:duel         # end-to-end DeepBook-backed duel demo
 bun --filter server bot               # matchmaking bot (auto-joins + swipes PENDING duels)
+bun --filter server keeper            # settled-redeem keeper (auto-settle + finalize on settled oracles)
 ```
 
 The `bot` is what makes the single-player demo work: spin it up in one
@@ -27,6 +28,14 @@ terminal, launch `bun --filter web dev` in another, click a stake tier,
 and the bot will pick up the new duel within ~5s, join with a matching
 stake, and play out its 5 swipes. Requires `BOT_SECRET_KEY` in
 `.env.local` and ≥ 0.2 testnet SUI on the bot wallet.
+
+The `keeper` closes the loop on the other side: it polls ACTIVE duels
+and, once the backing oracle has settled, bundles every not-yet-settled
+`settle_card` + `finalize` into a single PTB. Players never need to
+click the "settle + finalize" button; payouts appear unprompted. Reuses
+`BOT_SECRET_KEY` by default; override with `KEEPER_SECRET_KEY` to run
+the two services with separate wallets. Keeper functions are
+permissionless on chain — any funded wallet works.
 
 ## Env
 
@@ -66,5 +75,6 @@ src/
     ├── deepbook-discover.ts  # list/inspect DeepBook OracleSVI on testnet
     ├── demo-duel.ts          # interactive duel against a real OracleSVI
     ├── bot.ts                # matchmaking bot — auto-joins + swipes
+    ├── keeper.ts             # settled-redeem keeper — auto settle + finalize
     └── e2e.test.ts           # automated live-testnet E2E (opt-in via test:e2e)
 ```

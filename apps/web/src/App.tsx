@@ -890,20 +890,30 @@ function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
   return (
     <div className="space-y-4 py-6 text-center">
       <Badge variant="default">oracle settled</Badge>
-      <p className="text-lg">resolve the duel — settle 5 cards + payout</p>
-      <Button size="lg" onClick={settle} disabled={isPending} className="w-full">
-        settle + finalize
-      </Button>
-      {digest && (
-        <p className="text-muted-foreground text-xs">
-          tx <ExplorerLink href={txExplorerUrl(digest)}>{shortId(digest)}</ExplorerLink>
-        </p>
-      )}
-      {err && (
-        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-left text-xs text-red-500">
-          {err}
-        </p>
-      )}
+      <p className="text-lg">paying out…</p>
+      <p className="text-muted-foreground text-sm">
+        the keeper auto-closes settled duels — payouts appear within ~10s.
+      </p>
+      <details className="text-muted-foreground mx-auto max-w-sm text-left text-xs">
+        <summary className="cursor-pointer text-center underline-offset-2 hover:underline">
+          impatient? settle manually
+        </summary>
+        <div className="mt-3 space-y-2">
+          <Button size="sm" onClick={settle} disabled={isPending} className="w-full">
+            settle + finalize
+          </Button>
+          {digest && (
+            <p>
+              tx <ExplorerLink href={txExplorerUrl(digest)}>{shortId(digest)}</ExplorerLink>
+            </p>
+          )}
+          {err && (
+            <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-red-500">
+              {err}
+            </p>
+          )}
+        </div>
+      </details>
     </div>
   )
 }
