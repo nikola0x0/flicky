@@ -9,11 +9,12 @@
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "test": "bun test src/lib",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@mysten/dapp-kit": "^0.16",
-    "@mysten/sui": "1.36.1",
+    "@mysten/dapp-kit": "latest",
+    "@mysten/sui": "^2",
     "@tanstack/react-query": "^5.100.10",
     "@workspace/ui": "workspace:*",
     "lucide-react": "^1.14.0",

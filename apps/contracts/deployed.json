@@ -1,0 +1,10 @@
+{
+  "network": "testnet",
+  "packageId": "0xb0d6b92b37b5eebdb3446eb471cd84114231e49794a0da13758cc22ae2ed6680",
+  "originalPackageId": "0xb0d6b92b37b5eebdb3446eb471cd84114231e49794a0da13758cc22ae2ed6680",
+  "publishedAt": "2026-05-20T12:47:12.796Z",
+  "publishTxDigest": "F1umerfsZZoQzKm4zTfJCCzjGUmdhypR9iNTeioxVu3z",
+  "publisherAddress": "0x86fcc7fdc63be1a6b31c5288e7b87a6b985f16d1af490fcb54f2501d5fa8e78c",
+  "upgradeCap": "0x4dfa0a3210084091cce8e9f523708be8d42a7e0df5b92f08bcbf0203efc95e61",
+  "notes": "Written by scripts/publish.ts. originalPackageId is preserved across upgrades."
+}

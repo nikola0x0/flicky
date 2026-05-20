@@ -31,3 +31,11 @@ npm-debug.log*
 
 # Local scratch
 local/
+
+# Move build + codegen outputs
+apps/contracts/build/
+apps/contracts/package_summaries/
+
+# Auto-generated TS bindings from `bun --filter @flicky/contracts codegen`.
+# Regenerate locally with that command; do not commit.
+apps/web/src/sui/gen/
