@@ -105,7 +105,11 @@ const SPEED_FAST_MAX_MS = 5_000
 const SPEED_NORMAL_MAX_MS = 20_000
 
 const EXPLORER = "https://suiscan.xyz/testnet"
+/** Wallet-style explorer page: shows owned objects + tx history. */
 const addressUrl = (id: string) => `${EXPLORER}/address/${id}`
+/** Object-style page anchored on tx-blocks tab — gives a duel/oracle/
+ *  package a useful default landing showing all transactions touching it. */
+const objectUrl = (id: string) => `${EXPLORER}/object/${id}/tx-blocks`
 const txExplorerUrl = (digest: string) => `${EXPLORER}/tx/${digest}`
 
 function ExplorerLink({ href, children }: { href: string; children: ReactNode }) {
@@ -515,7 +519,7 @@ function Footer() {
   return (
     <p className="text-muted-foreground pt-4 text-center text-xs">
       package <code>{shortId(CONFIG.packageId)}</code>{" "}
-      <ExplorerLink href={addressUrl(CONFIG.packageId)}>flicky on chain</ExplorerLink>
+      <ExplorerLink href={objectUrl(CONFIG.packageId)}>flicky on chain</ExplorerLink>
     </p>
   )
 }
@@ -573,7 +577,7 @@ function OracleStrip() {
             </Badge>
           )}
           {oracleId && (
-            <ExplorerLink href={addressUrl(oracleId)}>{shortId(oracleId)}</ExplorerLink>
+            <ExplorerLink href={objectUrl(oracleId)}>{shortId(oracleId)}</ExplorerLink>
           )}
         </div>
       </CardContent>
@@ -937,7 +941,7 @@ function DuelView({
           >
             ← lobby
           </button>
-          <ExplorerLink href={addressUrl(duelId)}>{shortId(duelId)}</ExplorerLink>
+          <ExplorerLink href={objectUrl(duelId)}>{shortId(duelId)}</ExplorerLink>
         </div>
       </CardHeader>
       <CardContent>
@@ -1607,10 +1611,18 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
                     </strong>
                   </span>
                   <Badge
-                    variant={m.correct ? "default" : "secondary"}
-                    className={m.correct ? "bg-emerald-500/20 text-emerald-500" : ""}
+                    variant={
+                      !m.swipe ? "outline" : m.correct ? "default" : "secondary"
+                    }
+                    className={
+                      !m.swipe
+                        ? "text-ink-subtle"
+                        : m.correct
+                          ? "bg-emerald-500/20 text-emerald-500"
+                          : "bg-red-500/15 text-red-400"
+                    }
                   >
-                    {m.correct ? "✓" : "✗"}
+                    {!m.swipe ? "—" : m.correct ? "✓" : "✗"}
                   </Badge>
                 </div>
               </div>

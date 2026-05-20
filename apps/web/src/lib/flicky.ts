@@ -469,8 +469,13 @@ export async function fetchOracleSvi(
 }
 
 /**
- * Find the most recent BTC `OracleSVI` published by DeepBook on testnet.
- * Returns the configured fallback if event query fails.
+ * Find the most recent BTC `OracleSVI` published by DeepBook on testnet
+ * that's actually usable — ACTIVE, not settled, with a non-zero price
+ * pushed. DeepBook rotates oracles every ~15 min, and the freshest
+ * OracleCreated event often points at one the operator hasn't yet
+ * activated or primed, which would render as "BTC $0 fwd $0 inactive"
+ * in the UI. Walk the candidates from newest to oldest and return the
+ * first one that's live; fall back to config default if none qualify.
  */
 export async function findLatestOracleSvi(
   client: SuiClient,
@@ -481,13 +486,44 @@ export async function findLatestOracleSvi(
       query: {
         MoveEventType: `${deepbookPredictPackageId}::registry::OracleCreated`,
       },
-      limit: 20,
+      limit: 30,
       order: "descending",
     })
+    const candidates: string[] = []
     for (const e of evts.data) {
       const p = e.parsedJson as { oracle_id: string; underlying_asset: string }
       if (p.underlying_asset === asset) {
-        return normalizeSuiObjectId(p.oracle_id)
+        candidates.push(normalizeSuiObjectId(p.oracle_id))
+      }
+    }
+    // Batch-fetch state for the top N candidates and pick the first that's
+    // ACTIVE + priced + not yet settled.
+    if (candidates.length > 0) {
+      const top = candidates.slice(0, 10)
+      const objs = await client.multiGetObjects({
+        ids: top,
+        options: { showContent: true },
+      })
+      for (let i = 0; i < objs.length; i++) {
+        const obj = objs[i]
+        if (obj.data?.content?.dataType !== "moveObject") continue
+        const f = obj.data.content.fields as {
+          active?: boolean
+          prices?: { fields?: { spot?: string; forward?: string } }
+          settlement_price?: unknown
+        }
+        const settled =
+          (typeof f.settlement_price === "string" && f.settlement_price !== "0") ||
+          (typeof f.settlement_price === "object" &&
+            f.settlement_price !== null &&
+            // Some Sui RPC variants wrap Option in { fields: { vec: [...] } }
+            ((f.settlement_price as { fields?: { vec?: string[] } }).fields?.vec
+              ?.length ?? 0) > 0)
+        const spot = BigInt(f.prices?.fields?.spot ?? "0")
+        const forward = BigInt(f.prices?.fields?.forward ?? "0")
+        if (!settled && f.active && spot > 0n && forward > 0n) {
+          return top[i]
+        }
       }
     }
   } catch {
