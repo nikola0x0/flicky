@@ -28,12 +28,30 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
+import { createHash } from "node:crypto"
 import { Transaction } from "@mysten/sui/transactions"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography"
-import { SUI_CLOCK_OBJECT_ID, normalizeSuiObjectId } from "@mysten/sui/utils"
+import { bcs } from "@mysten/sui/bcs"
+import { SUI_CLOCK_OBJECT_ID, normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
 import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc"
 import { getSuiClient } from "../lib/sui"
+
+const CardBcs = bcs.struct("Card", {
+  oracle_id: bcs.Address,
+  strike: bcs.u64(),
+})
+const DeckBcs = bcs.vector(CardBcs)
+
+function deckHash(cards: Array<{ oracle_id: string; strike: bigint }>): Uint8Array {
+  const bytes = DeckBcs.serialize(
+    cards.map((c) => ({
+      oracle_id: normalizeSuiAddress(c.oracle_id),
+      strike: c.strike.toString(),
+    })),
+  ).toBytes()
+  return new Uint8Array(createHash("sha256").update(bytes).digest())
+}
 
 const DEEPBOOK_PREDICT_PACKAGE =
   "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
@@ -117,6 +135,7 @@ describeFn("e2e duel against testnet", () => {
   let challengerAddr: string
   let oracle: OracleSVI | null = null
   let duelId: string | null = null
+  let revealCards: Array<{ oracle_id: string; strike: bigint }> = []
 
   beforeAll(async () => {
     const pkg = loadPackageId()
@@ -176,22 +195,15 @@ describeFn("e2e duel against testnet", () => {
       // Strikes anywhere on the grid; they don't affect the tie-flow.
       const ref = oracle.settlementPrice!
       const strikes = [70n, 80n, 90n, 100n, 110n].map((p) => (ref * p) / 100n)
+      const cards = strikes.map((strike) => ({ oracle_id: oracle!.id, strike }))
+      const hash = deckHash(cards)
 
       const tx = new Transaction()
       const [stake] = tx.splitCoins(tx.gas, [tx.pure.u64(STAKE_MIST)])
-      const cards = strikes.map((strike) =>
-        tx.moveCall({
-          target: `${packageId}::duel::new_card`,
-          arguments: [tx.object(oracle!.id), tx.pure.u64(strike)],
-        }),
-      )
       tx.moveCall({
         target: `${packageId}::duel::create_duel`,
         typeArguments: ["0x2::sui::SUI"],
-        arguments: [
-          stake,
-          tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cards }),
-        ],
+        arguments: [stake, tx.pure.vector("u8", Array.from(hash))],
       })
       const res = await client.signAndExecuteTransaction({
         transaction: tx,
@@ -208,6 +220,8 @@ describeFn("e2e duel against testnet", () => {
       if (created?.type !== "created") throw new Error("no Duel object created")
       duelId = normalizeSuiObjectId(created.objectId)
       console.log(`duel: ${duelId}`)
+      // Stash the plaintext for the reveal step below.
+      revealCards = cards
     },
     60_000,
   )
@@ -215,7 +229,7 @@ describeFn("e2e duel against testnet", () => {
   test(
     "swipe against settled oracle is correctly rejected (EOracleNotLive)",
     async () => {
-      if (!oracle || !duelId) return
+      if (!oracle || !duelId || revealCards.length === 0) return
       // First, challenger must join to flip status → ACTIVE.
       {
         const tx = new Transaction()
@@ -228,6 +242,36 @@ describeFn("e2e duel against testnet", () => {
         const res = await client.signAndExecuteTransaction({
           transaction: tx,
           signer: challenger,
+          options: { showEffects: true },
+        })
+        expect(res.effects?.status.status).toBe("success")
+        await client.waitForTransaction({ digest: res.digest })
+      }
+      // Reveal the deck so settle_card / record_swipe can index `cards`
+      // and the swipe-rejection test below trips the EOracleNotLive (14)
+      // assertion rather than EDeckNotRevealed (18).
+      {
+        const tx = new Transaction()
+        const cardArgs = revealCards.map((c) =>
+          tx.moveCall({
+            target: `${packageId}::duel::new_card`,
+            arguments: [tx.object(c.oracle_id), tx.pure.u64(c.strike)],
+          }),
+        )
+        tx.moveCall({
+          target: `${packageId}::duel::reveal_deck`,
+          typeArguments: ["0x2::sui::SUI"],
+          arguments: [
+            tx.object(duelId),
+            tx.makeMoveVec({
+              type: `${packageId}::duel::Card`,
+              elements: cardArgs,
+            }),
+          ],
+        })
+        const res = await client.signAndExecuteTransaction({
+          transaction: tx,
+          signer: admin,
           options: { showEffects: true },
         })
         expect(res.effects?.status.status).toBe("success")

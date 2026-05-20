@@ -397,8 +397,12 @@ public fun settle_card<T>(duel: &mut Duel<T>, oracle: &OracleSVI, card_idx: u64)
     });
 }
 
-/// Permissionless once all cards are settled. Pays the entire pot to the
-/// higher-scoring player; refunds each stake on a tie.
+/// Permissionless once all cards are settled.
+///
+/// Payout rules (PRD §Payout):
+///   - Higher score wins the entire pot.
+///   - Tie on score → lower total decide-time wins.
+///   - Still tied → each player gets their own stake back.
 public fun finalize<T>(duel: &mut Duel<T>, ctx: &mut TxContext) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(duel.settled_count == DECK_SIZE, EAllCardsNotSettled);
@@ -414,7 +418,17 @@ public fun finalize<T>(duel: &mut Duel<T>, ctx: &mut TxContext) {
     } else if (duel.p1_score > duel.p0_score) {
         (0, total, p1)
     } else {
-        (total_p0, total_p1, @0x0)
+        // Score-tied → faster total decide-time wins.
+        let p0_time = total_decide_time(&duel.p0_swipes);
+        let p1_time = total_decide_time(&duel.p1_swipes);
+        if (p0_time < p1_time) {
+            (total, 0, p0)
+        } else if (p1_time < p0_time) {
+            (0, total, p1)
+        } else {
+            // Still tied — refund each player's own stake.
+            (total_p0, total_p1, @0x0)
+        }
     };
 
     pay_player(&mut duel.p0_stake, &mut duel.p1_stake, p0, payout_to_p0, ctx);
@@ -430,6 +444,21 @@ public fun finalize<T>(duel: &mut Duel<T>, ctx: &mut TxContext) {
         payout_to_p0,
         payout_to_p1,
     });
+}
+
+/// Sum of `decide_time_ms` across all recorded swipes (None entries
+/// contribute 0). Used as the score-tie breaker in `finalize`.
+fun total_decide_time(swipes: &vector<Option<Swipe>>): u64 {
+    let mut total: u64 = 0;
+    let mut i = 0;
+    while (i < swipes.length()) {
+        let s = &swipes[i];
+        if (s.is_some()) {
+            total = total + s.borrow().decide_time_ms;
+        };
+        i = i + 1;
+    };
+    total
 }
 
 // === Read API ===

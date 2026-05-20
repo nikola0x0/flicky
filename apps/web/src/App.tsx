@@ -61,7 +61,13 @@ import {
   type DuelState,
   type OracleSviInfo,
 } from "@/lib/flicky"
-import { DEEPBOOK, getWalletDusdcBalance } from "@/lib/deepbook"
+import {
+  DEEPBOOK,
+  buildCreateManagerTx,
+  buildStakedSwipeTx,
+  findPredictManager,
+  getWalletDusdcBalance,
+} from "@/lib/deepbook"
 
 // Deckmaster HTTP endpoint. Defaults to the local server during dev.
 const DECKMASTER_BASE_URL =
@@ -426,19 +432,10 @@ function Lobby({
           </div>
 
           {tier === "staked" && (
-            <div className="text-muted-foreground text-xs">
-              wallet balance:{" "}
-              {dusdcQuery.data !== undefined ? (
-                <strong className="text-foreground">{fmtDusdc(dusdcQuery.data)}</strong>
-              ) : (
-                <span>…</span>
-              )}{" "}
-              ·{" "}
-              <span>
-                no public faucet on testnet — fund this address from any
-                wallet that holds dUSDC
-              </span>
-            </div>
+            <DepositPanel
+              address={address}
+              balance={dusdcQuery.data}
+            />
           )}
 
           <div className="grid grid-cols-3 gap-2 sm:gap-3">
@@ -493,6 +490,119 @@ function Lobby({
         </CardContent>
       </Card>
     </>
+  )
+}
+
+/**
+ * PRD §Funding the wallet: inline panel that shows the player's address +
+ * dUSDC wallet balance + copy button + "send dUSDC from any wallet" hint.
+ * No on-ramp, no faucet — same as PRD ("Deposit screen as the only money-in
+ * path"). Without zkLogin we use the connected wallet's address; with
+ * zkLogin (Phase 3.x) this becomes the zkLogin-derived address.
+ */
+function DepositPanel({
+  address,
+  balance,
+}: {
+  address: string
+  balance: bigint | undefined
+}) {
+  const client = useSuiClient()
+  const queryClient = useQueryClient()
+  const { mutateAsync: signAndExec } = useSignAndExecuteTransaction()
+  const [copied, setCopied] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const managerQuery = useQuery({
+    queryKey: ["predict-manager", address],
+    queryFn: () => findPredictManager(client, address),
+    refetchInterval: 12_000,
+  })
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(address)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // clipboard not available; user can select manually
+    }
+  }
+
+  async function createManager() {
+    setCreating(true)
+    setErr(null)
+    try {
+      await signAndExec({ transaction: buildCreateManagerTx() })
+      queryClient.invalidateQueries({ queryKey: ["predict-manager", address] })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  return (
+    <div className="border-muted/60 bg-muted/20 space-y-2 rounded-md border-dashed border p-3 text-xs">
+      <div className="flex items-center justify-between">
+        <span className="text-muted-foreground uppercase tracking-wide">
+          your dUSDC wallet
+        </span>
+        <span className="font-medium">
+          {balance !== undefined ? (
+            <strong className="text-foreground">{fmtDusdc(balance)}</strong>
+          ) : (
+            <span className="text-muted-foreground">…</span>
+          )}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <code className="bg-background flex-1 truncate rounded border px-2 py-1 font-mono text-[10px]">
+          {address}
+        </code>
+        <Button size="sm" variant="outline" onClick={copy} className="h-7 px-2 text-xs">
+          {copied ? "copied!" : "copy"}
+        </Button>
+      </div>
+      <p className="text-muted-foreground">
+        send testnet dUSDC from any wallet → this address to fund staked
+        duels. there's no in-app faucet.
+      </p>
+      <div className="border-t border-dashed pt-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground">
+            PredictManager:{" "}
+            {managerQuery.data ? (
+              <span className="text-foreground font-mono">
+                {shortId(managerQuery.data.id)}
+              </span>
+            ) : managerQuery.isLoading ? (
+              "…"
+            ) : (
+              <span className="italic">not yet created</span>
+            )}
+          </span>
+          {!managerQuery.data && !managerQuery.isLoading && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={creating}
+              onClick={createManager}
+              className="h-7 px-2 text-xs"
+            >
+              create
+            </Button>
+          )}
+        </div>
+        <p className="text-muted-foreground mt-1 text-[10px]">
+          required for `predict::mint` per swipe (real DeepBook Predict
+          positions). without it, dUSDC duels still escrow stake but skip
+          the mint bundle.
+        </p>
+        {err && <p className="text-red-500 text-[10px]">{err}</p>}
+      </div>
+    </div>
   )
 }
 
@@ -623,6 +733,7 @@ function PhaseDispatcher({
         oracle={oracle}
         myNextIdx={myNextIdx}
         isCreator={isCreator}
+        address={address}
       />
     )
   }
@@ -749,13 +860,16 @@ function SwipingView({
   oracle,
   myNextIdx,
   isCreator,
+  address,
 }: {
   duel: DuelState
   duelId: string
   oracle: OracleSviInfo | undefined
   myNextIdx: number
   isCreator: boolean
+  address: string
 }) {
+  const client = useSuiClient()
   const { mutateAsync: signAndExec, isPending } = useSignAndExecuteTransaction()
   const queryClient = useQueryClient()
   const now = useNow(250)
@@ -767,6 +881,21 @@ function SwipingView({
   const timerMs = Math.max(0, SWIPE_PHASE_MS - elapsedMs)
   const speed = speedMultiplier(elapsedMs)
   const [err, setErr] = useState<string | null>(null)
+
+  // For dUSDC duels, look up the player's PredictManager. When present we
+  // bundle `predict::mint` into each swipe PTB per PRD §Match-anatomy
+  // step 2 — atomic mint + record_swipe on the player's own manager.
+  // Without a manager, swipes still work but skip the mint bundle.
+  const isDusdc = duel.stakeCoinType === DEEPBOOK.dusdcType
+  const managerQuery = useQuery({
+    queryKey: ["predict-manager", address],
+    queryFn: () => findPredictManager(client, address),
+    enabled: isDusdc,
+    staleTime: 30_000,
+  })
+  // Quantity to mint per swipe — small relative to the duel stake so the
+  // manager doesn't drain across 5 cards. 10% of stake / 5 = 2% per card.
+  const mintQuantity = (duel.p0Stake * 2n) / 100n
 
   // ── drag state ────────────────────────────────────────────────────────
   const cardRef = useRef<HTMLDivElement>(null)
@@ -788,16 +917,40 @@ function SwipingView({
     async (isUp: boolean) => {
       setErr(null)
       try {
-        const tx = buildSwipeTx(duelId, card.oracleId, myNextIdx, isUp, duel.stakeCoinType)
+        const canBundleMint =
+          isDusdc && managerQuery.data && oracle && mintQuantity > 0n
+        const tx = canBundleMint
+          ? buildStakedSwipeTx({
+              duelId,
+              oracleSviId: card.oracleId,
+              managerId: managerQuery.data!.id,
+              oracleExpiry: oracle!.expiry,
+              strike: card.strike,
+              isUp,
+              quantity: mintQuantity,
+              cardIdx: myNextIdx,
+            })
+          : buildSwipeTx(duelId, card.oracleId, myNextIdx, isUp, duel.stakeCoinType)
         await signAndExec({ transaction: tx })
         queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e))
-        // Failed mid-flight: snap the card back to center.
         setDrag({ x: 0, active: false, flying: null })
       }
     },
-    [duelId, card.oracleId, myNextIdx, duel.stakeCoinType, signAndExec, queryClient],
+    [
+      duelId,
+      card.oracleId,
+      card.strike,
+      myNextIdx,
+      duel.stakeCoinType,
+      isDusdc,
+      managerQuery.data,
+      oracle,
+      mintQuantity,
+      signAndExec,
+      queryClient,
+    ],
   )
 
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
@@ -857,6 +1010,11 @@ function SwipingView({
       <div className="flex items-center justify-between text-xs">
         <span className="text-muted-foreground">
           card <strong className="text-foreground">{myNextIdx + 1}</strong>/5
+          {isDusdc && managerQuery.data && (
+            <span className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-500">
+              + predict mint
+            </span>
+          )}
         </span>
         <span className={speedColor}>
           {speed.label} {speed.tone === "good" && "⚡"}
@@ -1105,8 +1263,33 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
     })
   }, [duel, isCreator])
 
+  // Share-card: snapshot of the captureRef'd div as a PNG download.
+  const captureRef = useRef<HTMLDivElement>(null)
+  const [sharing, setSharing] = useState(false)
+  async function shareCard() {
+    if (!captureRef.current) return
+    setSharing(true)
+    try {
+      const { toPng } = await import("html-to-image")
+      const dataUrl = await toPng(captureRef.current, {
+        pixelRatio: 2,
+        backgroundColor: getComputedStyle(document.body).backgroundColor || "#000",
+        cacheBust: true,
+      })
+      const a = document.createElement("a")
+      a.href = dataUrl
+      a.download = `flicky-${won ? "won" : tie ? "tie" : "lost"}-${duel.id.slice(2, 10)}.png`
+      a.click()
+    } catch (e) {
+      console.error("share-card", e)
+    } finally {
+      setSharing(false)
+    }
+  }
+
   return (
     <div className="space-y-5">
+      <div ref={captureRef} className="bg-card space-y-5 rounded-lg p-2">
       <div className="space-y-2 py-6 text-center">
         <div className="text-5xl">{banner.emoji}</div>
         <div className={`text-2xl font-bold uppercase tracking-wide ${banner.tone}`}>
@@ -1178,6 +1361,17 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
           ))}
         </div>
       </div>
+      </div>
+
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={sharing}
+        onClick={shareCard}
+        className="w-full"
+      >
+        {sharing ? "rendering…" : "↓ share-card (PNG)"}
+      </Button>
     </div>
   )
 }
