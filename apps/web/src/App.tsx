@@ -67,9 +67,13 @@ import {
 import {
   DEEPBOOK,
   buildCreateManagerTx,
+  buildDepositDusdcTx,
   buildStakedSwipeTx,
+  extractManagerIdFromChanges,
   findPredictManager,
+  getManagerDusdcBalance,
   getWalletDusdcBalance,
+  writeManagerCache,
 } from "@/lib/deepbook"
 
 // Deckmaster HTTP endpoint. Defaults to the local server during dev.
@@ -617,15 +621,32 @@ function Lobby({
     refetchInterval: 6_000,
   })
 
-  // Staked tier wants the player's dUSDC wallet balance up-front so the UI
-  // can show "X dUSDC available" + warn before they pick a tier that they
-  // can't afford. Refetched on tier flip / address change.
+  // Probe the player's dUSDC wallet balance + PredictManager state up
+  // front, regardless of which tier is currently selected. The Predict
+  // setup checklist is surfaced as a persistent panel in the Lobby so
+  // the player can fund ahead of switching to Staked — discovery should
+  // not be gated behind a tier toggle.
   const dusdcQuery = useQuery({
     queryKey: ["dusdc-balance", address],
     queryFn: () => getWalletDusdcBalance(client, address),
-    enabled: tier === "staked",
     refetchInterval: 8_000,
   })
+  const managerQuery = useQuery({
+    queryKey: ["predict-manager", address],
+    queryFn: () => findPredictManager(client, address),
+    refetchInterval: 12_000,
+  })
+  const managerBalanceQuery = useQuery({
+    queryKey: ["predict-manager-balance", managerQuery.data?.id],
+    queryFn: () =>
+      managerQuery.data
+        ? getManagerDusdcBalance(client, managerQuery.data.id)
+        : Promise.resolve(0n),
+    enabled: !!managerQuery.data,
+    refetchInterval: 10_000,
+  })
+  const stakedReady =
+    !!managerQuery.data && (managerBalanceQuery.data ?? 0n) > 0n
 
   async function createDuel(stake: StakeTier) {
     if (!oracleId || !oracle) return
@@ -693,30 +714,45 @@ function Lobby({
             </button>
           </div>
 
-          {tier === "staked" && (
-            <DepositPanel
-              address={address}
-              balance={dusdcQuery.data}
-            />
-          )}
+          <DepositPanel address={address} walletBalance={dusdcQuery.data} />
 
           <div className="grid grid-cols-3 gap-2 sm:gap-3">
-            {tiers.map((t) => (
-              <button
-                key={t.label}
-                disabled={isPending || busy || !oracle}
-                onClick={() => createDuel(t)}
-                className="border-input bg-background hover:border-primary hover:bg-primary/5 group flex flex-col rounded-lg border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-50 sm:p-4"
-              >
-                <span className="text-muted-foreground text-xs uppercase tracking-wide">
-                  {t.label}
-                </span>
-                <span className="mt-1 text-base font-semibold sm:text-lg">{t.blurb}</span>
-                <span className="text-muted-foreground mt-2 text-xs">
-                  pot {fmtStake(t.amount * 2n, t.coinType)}
-                </span>
-              </button>
-            ))}
+            {tiers.map((t) => {
+              const insufficientWallet =
+                tier === "staked" &&
+                dusdcQuery.data !== undefined &&
+                dusdcQuery.data < t.amount
+              const blocked =
+                tier === "staked" && (!stakedReady || insufficientWallet)
+              const reason = !stakedReady
+                ? "complete setup above"
+                : insufficientWallet
+                  ? `need ${fmtStake(t.amount, t.coinType)}`
+                  : null
+              return (
+                <button
+                  key={t.label}
+                  disabled={isPending || busy || !oracle || blocked}
+                  onClick={() => createDuel(t)}
+                  title={reason ?? undefined}
+                  className="border-input bg-background hover:border-primary hover:bg-primary/5 group flex flex-col rounded-lg border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-50 sm:p-4"
+                >
+                  <span className="text-muted-foreground text-xs tracking-wide uppercase">
+                    {t.label}
+                  </span>
+                  <span className="mt-1 text-base font-semibold sm:text-lg">
+                    {t.blurb}
+                  </span>
+                  <span className="text-muted-foreground mt-2 text-xs">
+                    {reason ? (
+                      <span className="text-amber-500">{reason}</span>
+                    ) : (
+                      <>pot {fmtStake(t.amount * 2n, t.coinType)}</>
+                    )}
+                  </span>
+                </button>
+              )
+            })}
           </div>
           {err && (
             <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
@@ -762,24 +798,58 @@ function Lobby({
  * path"). Without zkLogin we use the connected wallet's address; with
  * zkLogin (Phase 3.x) this becomes the zkLogin-derived address.
  */
+/** Default first-time deposit nudge — 1 dUSDC covers ~10 swipes at 2%/card stake. */
+const DEFAULT_DEPOSIT_DUSDC = 1n
+
+/**
+ * Staked-tier onboarding checklist. Surfaces the two prerequisites for
+ * real `predict::mint` swipes:
+ *   ① PredictManager exists (one-time `predict::create_manager`)
+ *   ② Manager holds enough dUSDC to mint positions
+ *
+ * Both steps emit transactions through the sponsor-or-fallback path so
+ * players who only hold dUSDC can still onboard without SUI for gas.
+ */
 function DepositPanel({
   address,
-  balance,
+  walletBalance,
 }: {
   address: string
-  balance: bigint | undefined
+  walletBalance: bigint | undefined
 }) {
   const client = useSuiClient()
   const queryClient = useQueryClient()
   const { mutateAsync: signAndExec } = useFlickySign()
   const [copied, setCopied] = useState(false)
-  const [creating, setCreating] = useState(false)
+  const [busy, setBusy] = useState<"create" | "deposit" | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [depositAmount, setDepositAmount] = useState("1")
+  // Inline tx feedback. Auto-clears after 10s so the panel doesn't
+  // pile up old confirmations. Each new action overwrites previous.
+  const [toast, setToast] = useState<{
+    kind: "create" | "deposit"
+    digest: string
+    label: string
+  } | null>(null)
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 10_000)
+    return () => clearTimeout(t)
+  }, [toast])
 
   const managerQuery = useQuery({
     queryKey: ["predict-manager", address],
     queryFn: () => findPredictManager(client, address),
     refetchInterval: 12_000,
+  })
+  const managerBalanceQuery = useQuery({
+    queryKey: ["predict-manager-balance", managerQuery.data?.id],
+    queryFn: () =>
+      managerQuery.data
+        ? getManagerDusdcBalance(client, managerQuery.data.id)
+        : Promise.resolve(0n),
+    enabled: !!managerQuery.data,
+    refetchInterval: 10_000,
   })
 
   async function copy() {
@@ -788,82 +858,275 @@ function DepositPanel({
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
-      // clipboard not available; user can select manually
+      // clipboard unavailable; user can select manually
     }
   }
 
   async function createManager() {
-    setCreating(true)
+    setBusy("create")
     setErr(null)
+    setToast(null)
     try {
-      await signAndExec({ transaction: buildCreateManagerTx() })
-      queryClient.invalidateQueries({ queryKey: ["predict-manager", address] })
+      const res = await signAndExec({ transaction: buildCreateManagerTx() })
+      // Wait for indexing + pull objectChanges so we can pre-populate the
+      // query cache with the new manager id instead of waiting for the
+      // next 12s refetch tick. UI updates within ~1s of tx finality.
+      const full = await client.waitForTransaction({
+        digest: res.digest,
+        options: { showObjectChanges: true },
+      })
+      const newManagerId = extractManagerIdFromChanges(
+        full.objectChanges ?? [],
+      )
+      if (newManagerId) {
+        // Persist to localStorage so F5 / next session doesn't pay the
+        // event-scan cost and so the UI shows the manager id immediately
+        // before any RPC roundtrip completes.
+        writeManagerCache(address, newManagerId)
+        queryClient.setQueryData(["predict-manager", address], {
+          id: newManagerId,
+        })
+      } else {
+        // Fallback if the digest's objectChanges didn't surface — refetch
+        // forces an immediate event-scan rather than waiting for the
+        // polling interval.
+        await queryClient.refetchQueries({
+          queryKey: ["predict-manager", address],
+        })
+      }
+      setToast({
+        kind: "create",
+        digest: res.digest,
+        label: "PredictManager created",
+      })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
-      setCreating(false)
+      setBusy(null)
     }
   }
 
+  async function deposit() {
+    if (!managerQuery.data) return
+    const dec = Number(depositAmount)
+    if (!Number.isFinite(dec) || dec <= 0) {
+      setErr("enter a positive dUSDC amount")
+      return
+    }
+    const micro = BigInt(Math.floor(dec * 1_000_000))
+    if (walletBalance !== undefined && micro > walletBalance) {
+      setErr("not enough dUSDC in wallet")
+      return
+    }
+    setBusy("deposit")
+    setErr(null)
+    setToast(null)
+    try {
+      const tx = await buildDepositDusdcTx(
+        client,
+        address,
+        managerQuery.data.id,
+        micro,
+      )
+      const res = await signAndExec({ transaction: tx })
+      await client.waitForTransaction({ digest: res.digest })
+      // Force immediate refetch instead of waiting for the polling tick.
+      await Promise.all([
+        queryClient.refetchQueries({
+          queryKey: ["predict-manager-balance", managerQuery.data.id],
+        }),
+        queryClient.refetchQueries({
+          queryKey: ["dusdc-balance", address],
+        }),
+      ])
+      setToast({
+        kind: "deposit",
+        digest: res.digest,
+        label: `Deposited ${fmtDusdc(micro)}`,
+      })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const hasManager = !!managerQuery.data
+  const managerBalance = managerBalanceQuery.data ?? 0n
+  const hasManagerBalance = managerBalance > 0n
+
   return (
-    <div className="border-muted/60 bg-muted/20 space-y-2 rounded-md border-dashed border p-3 text-xs">
+    <div className="border-muted/60 bg-muted/20 space-y-3 rounded-md border border-dashed p-3 text-xs">
       <div className="flex items-center justify-between">
-        <span className="text-muted-foreground uppercase tracking-wide">
-          your dUSDC wallet
+        <span className="text-muted-foreground tracking-wide uppercase">
+          {hasManager ? "Predict wallet" : "Predict setup"}
         </span>
-        <span className="font-medium">
-          {balance !== undefined ? (
-            <strong className="text-foreground">{fmtDusdc(balance)}</strong>
+        <span className="text-muted-foreground text-[10px]">
+          {hasManager ? "ready for Staked duels" : "two one-time steps"}
+        </span>
+      </div>
+
+      {/* ─── Step ① PredictManager ─── */}
+      <ChecklistRow
+        done={hasManager}
+        index={1}
+        title="PredictManager"
+        detail={
+          hasManager ? (
+            <a
+              href={objectUrl(managerQuery.data!.id)}
+              target="_blank"
+              rel="noreferrer"
+              className="font-mono underline-offset-2 hover:underline"
+              title={managerQuery.data!.id}
+            >
+              {shortId(managerQuery.data!.id)} ↗
+            </a>
           ) : (
-            <span className="text-muted-foreground">…</span>
-          )}
-        </span>
-      </div>
-      <div className="flex items-center gap-2">
-        <code className="bg-background flex-1 truncate rounded border px-2 py-1 font-mono text-[10px]">
-          {address}
-        </code>
-        <Button size="sm" variant="outline" onClick={copy} className="h-7 px-2 text-xs">
-          {copied ? "copied!" : "copy"}
-        </Button>
-      </div>
-      <p className="text-muted-foreground">
-        send testnet dUSDC from any wallet → this address to fund staked
-        duels. there's no in-app faucet.
-      </p>
-      <div className="border-t border-dashed pt-2">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-muted-foreground">
-            PredictManager:{" "}
-            {managerQuery.data ? (
-              <span className="text-foreground font-mono">
-                {shortId(managerQuery.data.id)}
-              </span>
-            ) : managerQuery.isLoading ? (
-              "…"
-            ) : (
-              <span className="italic">not yet created</span>
-            )}
-          </span>
-          {!managerQuery.data && !managerQuery.isLoading && (
+            "one-time `predict::create_manager` — gasless via sponsor"
+          )
+        }
+        action={
+          !hasManager && (
             <Button
               size="sm"
-              variant="outline"
-              disabled={creating}
+              variant="default"
+              disabled={busy !== null}
               onClick={createManager}
               className="h-7 px-2 text-xs"
             >
-              create
+              {busy === "create" ? "creating…" : "Create"}
             </Button>
-          )}
+          )
+        }
+      />
+
+      {/* ─── Step ② Manager balance ─── */}
+      <ChecklistRow
+        done={hasManagerBalance}
+        index={2}
+        title="dUSDC in manager"
+        detail={
+          hasManager ? (
+            <span className="font-mono">{fmtDusdc(managerBalance)}</span>
+          ) : (
+            <span className="opacity-60">unlocked after step ①</span>
+          )
+        }
+        action={
+          hasManager && (
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                min="0.1"
+                step="0.1"
+                value={depositAmount}
+                onChange={(e) => setDepositAmount(e.target.value)}
+                disabled={busy !== null}
+                className="bg-background h-7 w-16 rounded border px-2 text-right font-mono text-xs"
+                aria-label="dUSDC amount to deposit"
+              />
+              <Button
+                size="sm"
+                variant={hasManagerBalance ? "outline" : "default"}
+                disabled={busy !== null || !hasManager}
+                onClick={deposit}
+                className="h-7 px-2 text-xs"
+              >
+                {busy === "deposit" ? "…" : "Deposit"}
+              </Button>
+            </div>
+          )
+        }
+      />
+
+      {toast && (
+        <div className="flex items-center justify-between gap-2 rounded border-l-2 border-emerald-500 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-600">
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden>✓</span>
+            <span>{toast.label}</span>
+          </span>
+          <a
+            href={txExplorerUrl(toast.digest)}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-[10px] underline-offset-2 hover:underline"
+            title={toast.digest}
+          >
+            {shortId(toast.digest)} ↗
+          </a>
+        </div>
+      )}
+
+      <div className="border-t border-dashed pt-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground">
+            wallet dUSDC:{" "}
+            <strong className="text-foreground font-mono">
+              {walletBalance !== undefined ? fmtDusdc(walletBalance) : "…"}
+            </strong>
+          </span>
+        </div>
+        <div className="mt-1 flex items-center gap-2">
+          <code className="bg-background flex-1 truncate rounded border px-2 py-1 font-mono text-[10px]">
+            {address}
+          </code>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={copy}
+            className="h-7 px-2 text-xs"
+          >
+            {copied ? "copied!" : "copy"}
+          </Button>
         </div>
         <p className="text-muted-foreground mt-1 text-[10px]">
-          required for `predict::mint` per swipe (real DeepBook Predict
-          positions). without it, dUSDC duels still escrow stake but skip
-          the mint bundle.
+          dUSDC has no testnet faucet — receive from another wallet that has
+          some. Default deposit ({Number(DEFAULT_DEPOSIT_DUSDC)} dUSDC) covers
+          ~{Number(DEFAULT_DEPOSIT_DUSDC) * 10} swipes.
         </p>
-        {err && <p className="text-red-500 text-[10px]">{err}</p>}
+        {err && (
+          <p className="text-red-500 mt-1 text-[10px] break-all">{err}</p>
+        )}
       </div>
+    </div>
+  )
+}
+
+function ChecklistRow({
+  done,
+  index,
+  title,
+  detail,
+  action,
+}: {
+  done: boolean
+  index: number
+  title: string
+  detail: React.ReactNode
+  action?: React.ReactNode
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <span
+          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
+            done
+              ? "bg-emerald-500/15 text-emerald-500"
+              : "bg-muted text-muted-foreground"
+          }`}
+          aria-hidden
+        >
+          {done ? "✓" : index}
+        </span>
+        <div className="min-w-0">
+          <div className="text-foreground font-medium">{title}</div>
+          <div className="text-muted-foreground truncate text-[10px]">
+            {detail}
+          </div>
+        </div>
+      </div>
+      {action}
     </div>
   )
 }
@@ -1104,6 +1367,32 @@ function JoinView({
   })
   const plaintextMissing = plaintextQuery.data?.available === false
 
+  // PredictManager gate for dUSDC duels — every staked swipe bundles
+  // `predict::mint` which requires the joiner's manager to exist + hold
+  // dUSDC. Block the join here so the player isn't trapped mid-duel
+  // unable to swipe.
+  const managerQuery = useQuery({
+    queryKey: ["predict-manager", address],
+    queryFn: () => findPredictManager(client, address),
+    enabled: isDusdc,
+    refetchInterval: 12_000,
+  })
+  const managerBalanceQuery = useQuery({
+    queryKey: ["predict-manager-balance", managerQuery.data?.id],
+    queryFn: () =>
+      managerQuery.data
+        ? getManagerDusdcBalance(client, managerQuery.data.id)
+        : Promise.resolve(0n),
+    enabled: isDusdc && !!managerQuery.data,
+    refetchInterval: 10_000,
+  })
+  const needsManager = isDusdc && !managerQuery.data && !managerQuery.isLoading
+  const needsDeposit =
+    isDusdc &&
+    !!managerQuery.data &&
+    (managerBalanceQuery.data ?? 0n) === 0n &&
+    !managerBalanceQuery.isLoading
+
   async function join() {
     setErr(null)
     try {
@@ -1124,19 +1413,42 @@ function JoinView({
   }
 
   const stake = fmtStake(duel.p0Stake, duel.stakeCoinType)
+  const stakedBlocked = needsManager || needsDeposit
+  const blockReason = plaintextMissing
+    ? "deck unrevealable"
+    : needsManager
+      ? "setup required"
+      : needsDeposit
+        ? "deposit dUSDC first"
+        : null
   return (
     <div className="space-y-3 py-4 text-center">
       <Badge variant="outline">open duel</Badge>
       <p className="text-muted-foreground text-sm">
         creator staked <strong>{stake}</strong>. match it to start swiping.
       </p>
+      {isDusdc && stakedBlocked && (
+        <div className="bg-amber-500/5 border-amber-500/30 text-amber-600 rounded border-l-2 p-2 text-left text-xs">
+          <strong>Staked-tier setup required</strong>
+          <div className="mt-1 text-[11px] opacity-90">
+            {needsManager
+              ? "You don't have a PredictManager yet — every staked swipe bundles `predict::mint` against it. Go back to the lobby and complete step ① of the Staked-tier setup."
+              : "Your PredictManager has 0 dUSDC. Deposit some via the lobby's Staked-tier setup so each swipe can mint a Predict position."}
+          </div>
+        </div>
+      )}
       <Button
         size="lg"
         onClick={join}
-        disabled={isPending || plaintextMissing || plaintextQuery.isLoading}
+        disabled={
+          isPending ||
+          plaintextMissing ||
+          plaintextQuery.isLoading ||
+          stakedBlocked
+        }
         className="w-full"
       >
-        {plaintextMissing ? "deck unrevealable" : `join · stake ${stake}`}
+        {blockReason ?? `join · stake ${stake}`}
       </Button>
       {plaintextMissing && (
         <p className="text-muted-foreground text-xs">
@@ -1187,10 +1499,12 @@ function SwipingView({
   const speed = speedMultiplier(elapsedMs)
   const [err, setErr] = useState<string | null>(null)
 
-  // For dUSDC duels, look up the player's PredictManager. When present we
-  // bundle `predict::mint` into each swipe PTB per PRD §Match-anatomy
-  // step 2 — atomic mint + record_swipe on the player's own manager.
-  // Without a manager, swipes still work but skip the mint bundle.
+  // For dUSDC duels, look up the player's PredictManager. Per PRD
+  // §Match-anatomy step 2 every staked swipe is an atomic PTB combining
+  // `predict::mint` + `duel::record_swipe`, so the manager (and its
+  // dUSDC balance) is a hard prerequisite — the Lobby / JoinView gates
+  // enforce that, and SwipingView refuses to swipe if either ever falls
+  // back to null (defence in depth).
   const isDusdc = duel.stakeCoinType === DEEPBOOK.dusdcType
   const managerQuery = useQuery({
     queryKey: ["predict-manager", address],
@@ -1198,9 +1512,21 @@ function SwipingView({
     enabled: isDusdc,
     staleTime: 30_000,
   })
+  const managerBalanceQuery = useQuery({
+    queryKey: ["predict-manager-balance", managerQuery.data?.id],
+    queryFn: () =>
+      managerQuery.data
+        ? getManagerDusdcBalance(client, managerQuery.data.id)
+        : Promise.resolve(0n),
+    enabled: isDusdc && !!managerQuery.data,
+    staleTime: 10_000,
+  })
   // Quantity to mint per swipe — small relative to the duel stake so the
   // manager doesn't drain across 5 cards. 10% of stake / 5 = 2% per card.
   const mintQuantity = (duel.p0Stake * 2n) / 100n
+  const managerReady =
+    !isDusdc ||
+    (!!managerQuery.data && (managerBalanceQuery.data ?? 0n) >= mintQuantity)
 
   // ── drag state ────────────────────────────────────────────────────────
   const cardRef = useRef<HTMLDivElement>(null)
@@ -1222,22 +1548,47 @@ function SwipingView({
     async (isUp: boolean) => {
       setErr(null)
       try {
-        const canBundleMint =
-          isDusdc && managerQuery.data && oracle && mintQuantity > 0n
-        const tx = canBundleMint
-          ? buildStakedSwipeTx({
+        let tx
+        if (isDusdc) {
+          // Hard requirement: dUSDC duel ⇒ manager + balance ⇒ bundled
+          // mint. The Lobby + JoinView gates make this the steady-state
+          // truth; this branch only fires if state drifted (e.g. manager
+          // withdrew all dUSDC mid-duel).
+          if (!managerQuery.data) {
+            throw new Error("PredictManager missing — return to lobby to create one")
+          }
+          if ((managerBalanceQuery.data ?? 0n) < mintQuantity) {
+            throw new Error(
+              `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC.`,
+            )
+          }
+          if (!oracle) {
+            throw new Error("Oracle not loaded")
+          }
+          tx = buildStakedSwipeTx({
             duelId,
             oracleSviId: card.oracleId,
-            managerId: managerQuery.data!.id,
-            oracleExpiry: oracle!.expiry,
+            managerId: managerQuery.data.id,
+            oracleExpiry: oracle.expiry,
             strike: card.strike,
             isUp,
             quantity: mintQuantity,
             cardIdx: myNextIdx,
           })
-          : buildSwipeTx(duelId, card.oracleId, myNextIdx, isUp, duel.stakeCoinType)
+        } else {
+          tx = buildSwipeTx(
+            duelId,
+            card.oracleId,
+            myNextIdx,
+            isUp,
+            duel.stakeCoinType,
+          )
+        }
         await signAndExec({ transaction: tx })
         queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+        queryClient.invalidateQueries({
+          queryKey: ["predict-manager-balance", managerQuery.data?.id],
+        })
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e))
         setDrag({ x: 0, active: false, flying: null })
@@ -1251,6 +1602,7 @@ function SwipingView({
       duel.stakeCoinType,
       isDusdc,
       managerQuery.data,
+      managerBalanceQuery.data,
       oracle,
       mintQuantity,
       signAndExec,
@@ -1259,7 +1611,7 @@ function SwipingView({
   )
 
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
-    if (isPending || drag.flying) return
+    if (isPending || drag.flying || !managerReady) return
     cardWidth.current = cardRef.current?.offsetWidth ?? 320
     dragStartX.current = e.clientX
     setDrag({ x: 0, active: true, flying: null })
@@ -1315,8 +1667,11 @@ function SwipingView({
       <div className="flex items-center justify-between text-xs">
         <span className="text-muted-foreground">
           card <strong className="text-foreground">{myNextIdx + 1}</strong>/5
-          {isDusdc && managerQuery.data && (
-            <span className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-500">
+          {isDusdc && managerReady && (
+            <span
+              className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-500"
+              title={`mints ${fmtDusdc(mintQuantity)} per swipe into your PredictManager`}
+            >
               + predict mint
             </span>
           )}
@@ -1417,7 +1772,7 @@ function SwipingView({
         <Button
           variant="outline"
           size="lg"
-          disabled={isPending || !!drag.flying}
+          disabled={isPending || !!drag.flying || !managerReady}
           onClick={() => {
             setDrag({ x: -200, active: false, flying: "down" })
             swipe(false)
@@ -1433,7 +1788,7 @@ function SwipingView({
         </Button>
         <Button
           size="lg"
-          disabled={isPending || !!drag.flying}
+          disabled={isPending || !!drag.flying || !managerReady}
           onClick={() => {
             setDrag({ x: 200, active: false, flying: "up" })
             swipe(true)
@@ -1448,6 +1803,14 @@ function SwipingView({
           </div>
         </Button>
       </div>
+
+      {isDusdc && !managerReady && (
+        <p className="rounded border-l-2 border-amber-500 bg-amber-500/5 p-2 text-xs text-amber-600">
+          {managerQuery.data
+            ? `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC via the lobby setup.`
+            : "PredictManager not found. Return to the lobby and complete Staked-tier setup."}
+        </p>
+      )}
 
       <p className="text-muted-foreground text-center text-xs">
         decide fast: 0–5s = 1.5× · 5–20s = 1.0× · 20–60s = 0.75×

@@ -40,26 +40,111 @@ export const DEEPBOOK = {
     "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC",
 } as const
 
-const PREDICT_MANAGER_TYPE = `${DEEPBOOK.package}::predict_manager::PredictManager`
-
 // === Discovery ===
 
 /**
- * Find the PredictManager owned by `address`. DeepBook's `create_manager`
- * transfers the new manager to the caller, so each player has at most one.
+ * localStorage namespace for cached PredictManager ids.
+ * Manager ids are permanent per address (DeepBook never deletes them),
+ * so this cache is effectively long-lived. Invalidation only happens
+ * if the cached object can't be fetched anymore — see `findPredictManager`.
+ */
+const MANAGER_CACHE_KEY = "flicky.predictManager.v1"
+
+function readManagerCache(address: string): string | null {
+  try {
+    const raw = localStorage.getItem(MANAGER_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Record<string, string>
+    return parsed[address] ?? null
+  } catch {
+    return null
+  }
+}
+
+export function writeManagerCache(address: string, managerId: string): void {
+  try {
+    const raw = localStorage.getItem(MANAGER_CACHE_KEY)
+    const parsed = raw
+      ? (JSON.parse(raw) as Record<string, string>)
+      : {}
+    parsed[address] = managerId
+    localStorage.setItem(MANAGER_CACHE_KEY, JSON.stringify(parsed))
+  } catch {
+    // localStorage unavailable / quota exceeded — degrades to event query.
+  }
+}
+
+function clearManagerCache(address: string): void {
+  try {
+    const raw = localStorage.getItem(MANAGER_CACHE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as Record<string, string>
+    delete parsed[address]
+    localStorage.setItem(MANAGER_CACHE_KEY, JSON.stringify(parsed))
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Find the PredictManager logically owned by `address`.
+ *
+ * DeepBook publishes `PredictManager` as a **shared** Sui object with an
+ * internal `owner: address` field, not an `AddressOwner`-style object.
+ * `getOwnedObjects` therefore never returns it. The reliable discovery
+ * path is to walk `predict_manager::PredictManagerCreated` events (which
+ * carry `{ manager_id, owner }`) and pick the one whose `owner` matches
+ * us — but event scans require multiple RPC roundtrips.
+ *
+ * Cache layer: manager ids are permanent per address, so we cache them
+ * in localStorage and short-circuit subsequent lookups. Cache is
+ * validated lazily — we trust the id unless a subsequent `getObject`
+ * fails, at which point the swipe path will surface a clear error and
+ * the caller can invalidate via `writeManagerCache` again.
  */
 export async function findPredictManager(
   client: SuiClient,
   address: string,
 ): Promise<{ id: string } | null> {
-  const owned = await client.getOwnedObjects({
-    owner: address,
-    filter: { StructType: PREDICT_MANAGER_TYPE },
-    options: { showContent: true },
-  })
-  const first = owned.data[0]
-  if (!first || !first.data) return null
-  return { id: normalizeSuiObjectId(first.data.objectId) }
+  const cached = readManagerCache(address)
+  if (cached) return { id: cached }
+
+  // Newest first — if a user accidentally has two events for some reason
+  // (shouldn't happen, but be defensive), prefer the most recent.
+  let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
+  // Walk up to 5 pages (≈ 250 events) before giving up. Plenty for
+  // hackathon testnet; we'd swap to an indexer for production scale.
+  for (let page = 0; page < 5; page++) {
+    const evts = await client.queryEvents({
+      query: {
+        MoveEventType: `${DEEPBOOK.package}::predict_manager::PredictManagerCreated`,
+      },
+      limit: 50,
+      order: "descending",
+      cursor,
+    })
+    for (const e of evts.data) {
+      const p = e.parsedJson as { manager_id: string; owner: string }
+      if (p.owner === address) {
+        const id = normalizeSuiObjectId(p.manager_id)
+        writeManagerCache(address, id)
+        return { id }
+      }
+    }
+    if (!evts.hasNextPage) break
+    cursor = evts.nextCursor
+  }
+  return null
+}
+
+/**
+ * Drop the cached manager id for `address`. Call this when an operation
+ * against the cached id fails in a way that suggests the id is stale
+ * (e.g. the manager was deleted, or the user moved to a different
+ * wallet that happens to share an address by coincidence).
+ */
+export function invalidateManagerCache(address: string): void {
+  clearManagerCache(address)
 }
 
 /** Return the player's spendable dUSDC balance in their wallet. */

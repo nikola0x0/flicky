@@ -51,7 +51,6 @@ function requireEnv(name: string): string {
 const DEEPBOOK_PREDICT_PACKAGE = requireEnv("DEEPBOOK_PREDICT_PACKAGE_ID")
 const DEEPBOOK_PREDICT_OBJECT = requireEnv("DEEPBOOK_PREDICT_OBJECT_ID")
 const DUSDC_TYPE = requireEnv("DUSDC_COIN_TYPE")
-const PREDICT_MANAGER_TYPE = `${DEEPBOOK_PREDICT_PACKAGE}::predict_manager::PredictManager`
 
 interface DeployedJson {
   packageId: string | null
@@ -200,15 +199,30 @@ async function findManagerFor(
   client: SuiJsonRpcClient,
   owner: string,
 ): Promise<string | null> {
+  // PredictManager is a SHARED object with `owner` as an internal field —
+  // can't use getOwnedObjects. Walk PredictManagerCreated events instead
+  // and match the owner field. Mirrors apps/web/src/lib/deepbook.ts.
   try {
-    const owned = await client.getOwnedObjects({
-      owner,
-      filter: { StructType: PREDICT_MANAGER_TYPE },
-      options: { showContent: false },
-    })
-    const first = owned.data[0]
-    if (!first?.data) return null
-    return normalizeSuiObjectId(first.data.objectId)
+    let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
+    for (let page = 0; page < 5; page++) {
+      const evts = await client.queryEvents({
+        query: {
+          MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::predict_manager::PredictManagerCreated`,
+        },
+        limit: 50,
+        order: "descending",
+        cursor,
+      })
+      for (const e of evts.data) {
+        const p = e.parsedJson as { manager_id: string; owner: string }
+        if (p.owner === owner) {
+          return normalizeSuiObjectId(p.manager_id)
+        }
+      }
+      if (!evts.hasNextPage) break
+      cursor = evts.nextCursor
+    }
+    return null
   } catch {
     return null
   }
