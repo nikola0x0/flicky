@@ -1,0 +1,16 @@
+[package]
+name = "flicky"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Flicky Labs <lequocuyit@gmail.com>"]
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+deepbook_predict = { local = "./deepbook_predict_min" }
+
+[addresses]
+flicky = "0x0"
+
+[dev-dependencies]
+
+[dev-addresses]

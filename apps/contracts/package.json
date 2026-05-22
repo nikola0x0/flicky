@@ -1,0 +1,27 @@
+{
+  "name": "@flicky/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Flicky Move package (Sui testnet) + TypeScript deploy/upgrade/codegen scripts.",
+  "scripts": {
+    "test": "sui move test --gas-limit 100000000000",
+    "build": "sui move build",
+    "publish": "bun run scripts/publish.ts",
+    "upgrade": "bun run scripts/upgrade.ts",
+    "codegen": "sui-ts-codegen generate",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'noop — add eslint later'"
+  },
+  "dependencies": {
+    "@mysten/bcs": "^2",
+    "@mysten/codegen": "latest",
+    "@mysten/sui": "^2",
+    "dotenv": "^17"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/node": "^25",
+    "typescript": "^6"
+  }
+}

@@ -1,10 +1,38 @@
-import { useEffect, useState, type ReactNode } from "react"
+/**
+ * Flicky game UI — phased state machine driven by on-chain duel state.
+ *
+ *   Lobby ─→ WaitingForOpponent ─→ Swiping ─→ Lockup ─→ Settling ─→ Result
+ *           (creator side)         (5 cards,            (call settle
+ *                                   per-card timer)      + finalize)
+ *
+ *   Lobby ─→ Joining ─→ Swiping ─→ Lockup ─→ Settling ─→ Result
+ *           (challenger side)
+ *
+ * Every phase reads from `fetchDuel(client, duelId)` polled every 3 s. The
+ * derived phase + per-player view comes from `d.status`, `myNextCardIdx`,
+ * `settledCount`, and the oracle's `settlementPrice`.
+ *
+ * This is a Phase 2 MVP UI — single-asset (BTC), single-stake-coin (SUI),
+ * no zkLogin, no sponsored gas, no matchmaking. Real PRD multiplayer
+ * loop is Phase 3.
+ */
 import {
-  ConnectButton,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react"
+import {
+  useConnectWallet,
   useCurrentAccount,
+  useDisconnectWallet,
   useSuiClient,
-  useSignAndExecuteTransaction,
+  useWallets,
 } from "@mysten/dapp-kit"
+import { useFlickySign } from "@/lib/use-flicky-sign"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@workspace/ui/components/button"
 import {
@@ -16,57 +44,80 @@ import {
 } from "@workspace/ui/components/card"
 import { Badge } from "@workspace/ui/components/badge"
 import { Separator } from "@workspace/ui/components/separator"
-import { Input } from "@workspace/ui/components/input"
-import { Label } from "@workspace/ui/components/label"
+
+import { CONFIG } from "@/lib/config"
 import {
-  ASSETS,
-  CONFIG,
-  ORACLE_SOURCES,
-  sourceLabel,
-  type AssetSymbol,
-  type OracleSource,
-} from "@/lib/config"
-import {
-  buildCreateDuelDeepbookTx,
+  buildCreateDuelDusdcTx,
   buildCreateDuelTx,
-  buildDefaultStrikes,
+  buildJoinDuelDusdcTx,
   buildJoinDuelTx,
-  buildSettleAndFinalizeDeepbookTx,
+  buildRevealDeckTx,
   buildSettleAndFinalizeTx,
-  buildSwipeDeepbookTx,
   buildSwipeTx,
-  deepbookStrikes,
-  discoverActiveFlickyOracles,
-  fetchDeepbookOracle,
+  computeDeckHash,
   fetchDuel,
-  fetchOracleSpot,
-  findLatestDeepbookOracle,
-  impliedProbabilityUp,
-  isDeepbookOracle,
+  fetchOracleSvi,
+  findLatestOracleSvi,
   listDuelIds,
+  oracleStrikes,
+  type DeckCard,
   type DuelState,
+  type OracleSviInfo,
 } from "@/lib/flicky"
 import {
+  DEEPBOOK,
   buildCreateManagerTx,
   buildDepositDusdcTx,
   buildStakedSwipeTx,
+  extractManagerIdFromChanges,
   findPredictManager,
-  fmtDusdc,
   getManagerDusdcBalance,
   getWalletDusdcBalance,
+  writeManagerCache,
 } from "@/lib/deepbook"
 
-const EXPLORER = "https://suiscan.xyz/testnet"
-const obj = (id: string) => `${EXPLORER}/object/${id}`
-const txUrl = (digest: string) => `${EXPLORER}/tx/${digest}`
+// Deckmaster HTTP endpoint. Defaults to the local server during dev.
+const DECKMASTER_BASE_URL =
+  import.meta.env.VITE_DECKMASTER_URL ?? "http://localhost:3001"
 
-function ExplorerLink({
-  href,
-  children,
-}: {
-  href: string
-  children: ReactNode
-}) {
+// ─── stake tier presets ─────────────────────────────────────────────────────
+
+type Tier = "free" | "staked"
+
+interface StakeTier {
+  label: string
+  blurb: string
+  amount: bigint
+  coinType: string
+}
+
+const FREE_TIERS: StakeTier[] = [
+  { label: "Practice", blurb: "0.01 SUI", amount: 10_000_000n, coinType: CONFIG.stakeType },
+  { label: "Standard", blurb: "0.05 SUI", amount: 50_000_000n, coinType: CONFIG.stakeType },
+  { label: "High Roller", blurb: "0.10 SUI", amount: 100_000_000n, coinType: CONFIG.stakeType },
+]
+
+// PRD §Stake tiers (staked mode): 1 / 5 / 10 dUSDC.
+const STAKED_TIERS: StakeTier[] = [
+  { label: "Practice", blurb: "1 dUSDC", amount: 1_000_000n, coinType: DEEPBOOK.dusdcType },
+  { label: "Standard", blurb: "5 dUSDC", amount: 5_000_000n, coinType: DEEPBOOK.dusdcType },
+  { label: "High Roller", blurb: "10 dUSDC", amount: 10_000_000n, coinType: DEEPBOOK.dusdcType },
+]
+
+// Swipe-phase pacing
+const SWIPE_PHASE_MS = 60_000
+const SPEED_FAST_MAX_MS = 5_000
+const SPEED_NORMAL_MAX_MS = 20_000
+
+const EXPLORER = "https://suiscan.xyz/testnet"
+/** Wallet-style explorer page: shows owned objects + tx history. */
+const addressUrl = (id: string) => `${EXPLORER}/address/${id}`
+/** Object-style page anchored on tx-blocks tab — gives a duel/oracle/
+ *  package a useful default landing showing all transactions touching it. */
+const objectUrl = (id: string) => `${EXPLORER}/object/${id}/tx-blocks`
+const txExplorerUrl = (digest: string) => `${EXPLORER}/tx/${digest}`
+
+function ExplorerLink({ href, children }: { href: string; children: ReactNode }) {
   return (
     <a
       href={href}
@@ -80,86 +131,380 @@ function ExplorerLink({
 }
 
 function fmtUsd(n9: bigint): string {
-  return `$${(Number(n9) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+  return `$${(Number(n9) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
 }
 
 function fmtSui(mist: bigint): string {
   return `${(Number(mist) / 1e9).toFixed(4)} SUI`
 }
 
-/** Format a raw stake amount using the duel's stake coin type for decimals. */
-function fmtStake(amount: bigint, stakeCoinType: string): string {
-  return stakeCoinType.endsWith("::dusdc::DUSDC")
-    ? fmtDusdc(amount)
-    : fmtSui(amount)
+function fmtDusdc(micro: bigint): string {
+  return `${(Number(micro) / 1e6).toFixed(2)} dUSDC`
 }
 
-function fmtPct(p9: bigint): string {
-  return `${(Number(p9) / 1e7).toFixed(1)}%`
+/** Pick the right formatter for whichever coin type the duel is staked in. */
+function fmtStake(amount: bigint, coinType: string): string {
+  return coinType === DEEPBOOK.dusdcType ? fmtDusdc(amount) : fmtSui(amount)
 }
 
-function fmtCountdown(expiryMs: bigint, now: number): string {
-  const remain = Math.max(0, Number(expiryMs) - now)
-  if (remain === 0) return "expired"
-  const totalSec = Math.floor(remain / 1000)
-  const min = Math.floor(totalSec / 60)
-  const sec = totalSec % 60
-  if (min >= 60) {
-    const hr = Math.floor(min / 60)
-    return `${hr}h ${min % 60}m`
+function shortId(id: string, len = 6): string {
+  return id.length > len * 2 + 2 ? `${id.slice(0, len)}…${id.slice(-len)}` : id
+}
+
+// ─── wallet button (custom-styled replacement for dapp-kit ConnectButton) ───
+
+/**
+ * Two states:
+ *   - disconnected → opens a modal listing available wallets
+ *   - connected → opens a dropdown with copy / explorer / disconnect
+ */
+function WalletButton() {
+  const account = useCurrentAccount()
+  const [modalOpen, setModalOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  if (!account) {
+    return (
+      <>
+        <Button
+          size="sm"
+          onClick={() => setModalOpen(true)}
+          className="h-9 px-4 text-sm font-medium tracking-[-0.005em]"
+        >
+          connect wallet
+        </Button>
+        {modalOpen && <WalletModal onClose={() => setModalOpen(false)} />}
+      </>
+    )
   }
-  return `${min}m ${sec.toString().padStart(2, "0")}s`
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setMenuOpen((v) => !v)}
+        className="border-hairline bg-surface-1 hover:bg-surface-2 flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium tracking-[-0.005em] transition"
+      >
+        <span className="bg-primary inline-block h-2 w-2 rounded-full" />
+        <span className="font-mono text-[12px]">{shortId(account.address, 4)}</span>
+        <span className="text-ink-subtle text-[10px]">▾</span>
+      </button>
+      {menuOpen && (
+        <WalletMenu address={account.address} onClose={() => setMenuOpen(false)} />
+      )}
+    </div>
+  )
 }
 
-function fmtScore(s: bigint): string {
-  return (Number(s) / 1e9).toFixed(3)
-}
+function WalletModal({ onClose }: { onClose: () => void }) {
+  const wallets = useWallets()
+  const { mutateAsync: connect, isPending, error } = useConnectWallet()
+  const [busyWallet, setBusyWallet] = useState<string | null>(null)
 
-function shortAddr(a: string): string {
-  if (a === "0x0000000000000000000000000000000000000000000000000000000000000000") {
-    return "—"
+  // Close on Escape.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose()
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  async function pick(name: string) {
+    const wallet = wallets.find((w) => w.name === name)
+    if (!wallet) return
+    setBusyWallet(name)
+    try {
+      await connect({ wallet })
+      onClose()
+    } catch {
+      // error surfaces below
+    } finally {
+      setBusyWallet(null)
+    }
   }
-  return `${a.slice(0, 6)}…${a.slice(-4)}`
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        onClick={(e) => e.stopPropagation()}
+        className="border-hairline bg-surface-1 w-full max-w-sm rounded-t-xl border p-5 shadow-2xl sm:rounded-xl"
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-base font-semibold tracking-[-0.01em]">
+            Connect wallet
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-ink-subtle hover:text-foreground text-xl leading-none"
+            aria-label="close"
+          >
+            ×
+          </button>
+        </div>
+        {wallets.length === 0 ? (
+          <p className="text-ink-subtle text-sm">
+            No Sui wallets detected. Install{" "}
+            <a
+              href="https://chromewebstore.google.com/detail/sui-wallet/opcgpfmipidbgpenhmajoajpbobppdil"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline decoration-dotted"
+            >
+              Sui Wallet
+            </a>{" "}
+            or{" "}
+            <a
+              href="https://suiet.app"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline decoration-dotted"
+            >
+              Suiet
+            </a>{" "}
+            and reload.
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {wallets.map((w) => (
+              <button
+                key={w.name}
+                onClick={() => pick(w.name)}
+                disabled={isPending}
+                className="border-hairline hover:bg-surface-2 group flex w-full items-center gap-3 rounded-md border bg-transparent px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {w.icon ? (
+                  <img
+                    src={w.icon}
+                    alt=""
+                    className="h-7 w-7 rounded-md object-cover"
+                  />
+                ) : (
+                  <div className="bg-surface-3 h-7 w-7 rounded-md" />
+                )}
+                <span className="flex-1 text-sm font-medium">{w.name}</span>
+                {busyWallet === w.name && (
+                  <span className="text-ink-subtle text-xs">connecting…</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+        {error && (
+          <p className="mt-3 rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+            {error.message}
+          </p>
+        )}
+        <p className="text-ink-tertiary mt-4 text-[10px]">
+          By connecting, you authorize this app to read your address. No
+          transactions are sent until you confirm them.
+        </p>
+      </div>
+    </div>
+  )
 }
 
-function useNow(intervalMs: number) {
+function WalletMenu({
+  address,
+  onClose,
+}: {
+  address: string
+  onClose: () => void
+}) {
+  const { mutateAsync: disconnect } = useDisconnectWallet()
+  const [copied, setCopied] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // Click outside / Escape to close.
+  useEffect(() => {
+    function onPointerDown(e: PointerEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose()
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose()
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [onClose])
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(address)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <div
+      ref={menuRef}
+      className="border-hairline bg-surface-1 absolute right-0 top-11 z-40 w-64 overflow-hidden rounded-lg border shadow-2xl"
+    >
+      <div className="border-hairline border-b px-3 py-2.5">
+        <div className="text-ink-subtle text-[10px] font-medium uppercase tracking-[0.06em]">
+          Connected
+        </div>
+        <code className="mt-1 block break-all font-mono text-[11px]">{address}</code>
+      </div>
+      <div className="p-1">
+        <MenuItem onClick={copy}>
+          <span>📋</span>
+          <span>{copied ? "copied!" : "copy address"}</span>
+        </MenuItem>
+        <a
+          href={addressUrl(address)}
+          target="_blank"
+          rel="noreferrer"
+          onClick={onClose}
+          className="hover:bg-surface-2 flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition"
+        >
+          <span>🔍</span>
+          <span>open in explorer</span>
+        </a>
+        <MenuItem
+          onClick={async () => {
+            await disconnect()
+            onClose()
+          }}
+          tone="danger"
+        >
+          <span>⏻</span>
+          <span>disconnect</span>
+        </MenuItem>
+      </div>
+    </div>
+  )
+}
+
+function MenuItem({
+  children,
+  onClick,
+  tone,
+}: {
+  children: ReactNode
+  onClick: () => void
+  tone?: "danger"
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`hover:bg-surface-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${tone === "danger" ? "text-red-400 hover:text-red-300" : ""
+        }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+/**
+ * Request a Deckmaster-generated deck from the server. Falls back to
+ * client-side generation (less robust — the keeper won't have plaintext
+ * for reveal, so reveal must come from this browser tab) if the server is
+ * unreachable.
+ */
+async function requestDeck(
+  oracleId: string,
+  reference: bigint,
+): Promise<{ cards: DeckCard[]; hash: Uint8Array }> {
+  try {
+    const res = await fetch(`${DECKMASTER_BASE_URL}/deckmaster/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        oracle_id: oracleId,
+        reference: reference.toString(),
+      }),
+    })
+    if (!res.ok) throw new Error(`deckmaster ${res.status}`)
+    const body = (await res.json()) as {
+      cards: Array<{ oracle_id: string; strike: string }>
+      hash: string
+    }
+    const cards: DeckCard[] = body.cards.map((c) => ({
+      oracleId: c.oracle_id,
+      strike: BigInt(c.strike),
+    }))
+    const hashHex = body.hash.replace(/^0x/, "")
+    const hash = new Uint8Array(
+      hashHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)),
+    )
+    return { cards, hash }
+  } catch {
+    // Fallback: generate locally. The keeper won't have plaintext, so
+    // reveal must run from this tab via buildRevealDeckTx (not implemented
+    // in the lobby UI — Phase 3.5).
+    const cards: DeckCard[] = oracleStrikes(reference).map((strike) => ({
+      oracleId,
+      strike,
+    }))
+    const hash = await computeDeckHash(cards)
+    return { cards, hash }
+  }
+}
+
+function speedMultiplier(ms: number): { label: string; mult: number; tone: "good" | "ok" | "warn" } {
+  if (ms <= SPEED_FAST_MAX_MS) return { label: "1.5×", mult: 1.5, tone: "good" }
+  if (ms <= SPEED_NORMAL_MAX_MS) return { label: "1.0×", mult: 1.0, tone: "ok" }
+  return { label: "0.75×", mult: 0.75, tone: "warn" }
+}
+
+// Used for the swipe-phase countdown — re-renders once per second.
+function useNow(intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), intervalMs)
-    return () => clearInterval(id)
+    const t = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(t)
   }, [intervalMs])
   return now
 }
 
-export function App() {
+// ─── top-level ──────────────────────────────────────────────────────────────
+
+export default function App() {
   const account = useCurrentAccount()
-  const [activeDuelId, setActiveDuelId] = useState<string | null>(null)
+  const [selectedDuel, setSelectedDuel] = useState<string | null>(null)
 
   return (
-    <div className="min-h-svh bg-background text-foreground">
-      <header className="border-b">
-        <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-4">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight">Flicky</h1>
-            <p className="text-xs text-muted-foreground">
-              Tinder-style PvP prediction duels on Sui testnet
-            </p>
-          </div>
-          <ConnectButton />
+    <div className="bg-background min-h-screen">
+      <header className="mx-auto flex max-w-3xl items-center justify-between p-4 sm:p-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-[-0.03em]">
+            <span className="text-primary">flicky</span>
+          </h1>
+          <p className="text-ink-subtle text-xs tracking-[-0.005em]">
+            swipe BTC binaries · PvP on Sui testnet
+          </p>
         </div>
+        <WalletButton />
       </header>
-      <main className="mx-auto max-w-3xl px-6 py-6">
-        {!account ? (
-          <ConnectPrompt />
-        ) : activeDuelId ? (
-          <DuelView
-            duelId={activeDuelId}
-            onBack={() => setActiveDuelId(null)}
-            address={account.address}
-          />
+
+      <main className="mx-auto max-w-3xl space-y-4 px-4 pb-12 sm:px-6">
+        <OracleStrip />
+        {account ? (
+          selectedDuel ? (
+            <DuelView
+              duelId={selectedDuel}
+              address={account.address}
+              onBack={() => setSelectedDuel(null)}
+            />
+          ) : (
+            <Lobby address={account.address} onEnterDuel={setSelectedDuel} />
+          )
         ) : (
-          <Lobby address={account.address} onOpenDuel={setActiveDuelId} />
+          <ConnectPrompt />
         )}
+
+        <Footer />
       </main>
     </div>
   )
@@ -167,529 +512,670 @@ export function App() {
 
 function ConnectPrompt() {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Connect a Sui wallet</CardTitle>
-        <CardDescription>
-          You&apos;ll need testnet SUI to stake. Get some from{" "}
-          <a
-            className="underline"
-            href="https://discord.gg/sui"
-            target="_blank"
-            rel="noreferrer"
-          >
-            the Sui Discord faucet
-          </a>
-          .
-        </CardDescription>
-      </CardHeader>
+    <Card className="border-dashed">
+      <CardContent className="text-muted-foreground py-12 text-center text-sm">
+        Connect a Sui testnet wallet to play.
+      </CardContent>
     </Card>
   )
 }
 
-function Lobby({
-  address,
-  onOpenDuel,
-}: {
-  address: string
-  onOpenDuel: (id: string) => void
-}) {
+function Footer() {
+  return (
+    <p className="text-muted-foreground pt-4 text-center text-xs">
+      package <code>{shortId(CONFIG.packageId)}</code>{" "}
+      <ExplorerLink href={objectUrl(CONFIG.packageId)}>flicky on chain</ExplorerLink>
+    </p>
+  )
+}
+
+// ─── oracle strip (always visible) ──────────────────────────────────────────
+
+function useOracle() {
   const client = useSuiClient()
-  const qc = useQueryClient()
-  const { mutateAsync: signAndExecute, isPending: creating } =
-    useSignAndExecuteTransaction()
-
-  const [selectedSource, setSelectedSource] = useState<OracleSource>("DEEPBOOK_BTC")
-  const [stakeCurrency, setStakeCurrency] = useState<"SUI" | "DUSDC">("SUI")
-  const [stakeAmountInput, setStakeAmountInput] = useState<string>("0.01")
-
-  // PredictManager state (needed when stakeCurrency = "DUSDC")
-  const managerQ = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
-    refetchInterval: 10_000,
+  const oracleIdQuery = useQuery({
+    queryKey: ["oracle-id"],
+    queryFn: () => findLatestOracleSvi(client),
+    staleTime: 60_000,
   })
-  const managerBalanceQ = useQuery({
-    queryKey: ["manager-balance", managerQ.data?.id],
-    queryFn: () => getManagerDusdcBalance(client, managerQ.data!.id),
-    enabled: !!managerQ.data,
-    refetchInterval: 10_000,
-  })
-
-  const flickyOraclesQ = useQuery({
-    queryKey: ["oracles-active", CONFIG.packageId],
-    queryFn: async () => {
-      // Dynamic discovery: query OracleCreated events for the latest ACTIVE
-      // oracle per asset. Rotation-keeper daemon creates new oracles on its
-      // own schedule, so we never have to update config.ts when one rotates.
-      const found = await discoverActiveFlickyOracles(client)
-      const result: Record<
-        AssetSymbol,
-        { id: string; spot: bigint; expiry: bigint; isSettled: boolean } | null
-      > = { BTC: null, ETH: null, SOL: null, SUI: null }
-      for (const asset of ASSETS) {
-        const o = found[asset]
-        if (!o) continue
-        result[asset] = {
-          id: o.id,
-          spot: o.spot,
-          expiry: o.expiry,
-          isSettled: o.isSettled,
-        }
-      }
-      return result
-    },
-    refetchInterval: 10_000,
-  })
-
-  const deepbookOracleQ = useQuery({
-    queryKey: ["deepbook-oracle"],
-    queryFn: async () => {
-      const id = await findLatestDeepbookOracle(client)
-      return await fetchDeepbookOracle(client, id)
-    },
-    refetchInterval: 30_000,
-  })
-
-  const duelsQ = useQuery({
-    queryKey: ["duels", CONFIG.packageId],
-    queryFn: async () => {
-      const ids = await listDuelIds(client, 20)
-      const states = await Promise.all(
-        ids.map(async (id) => {
-          try {
-            return await fetchDuel(client, id)
-          } catch {
-            return null
-          }
-        }),
-      )
-      return states.filter((d): d is DuelState => d !== null)
-    },
+  const oracleQuery = useQuery({
+    queryKey: ["oracle", oracleIdQuery.data],
+    queryFn: () => fetchOracleSvi(client, oracleIdQuery.data!),
+    enabled: !!oracleIdQuery.data,
     refetchInterval: 5_000,
   })
+  return { oracleId: oracleIdQuery.data, oracle: oracleQuery.data }
+}
 
-  // Stake amount in token base units. SUI is 9-decimal (mist), dUSDC is
-  // 6-decimal. The Move type system (`Duel<T>`) doesn't care about decimals;
-  // we just need to convert the UI string correctly per currency.
-  const stakeDecimals = stakeCurrency === "SUI" ? 9 : 6
-  const stakeAmount = (() => {
-    const n = Number(stakeAmountInput)
-    if (!isFinite(n) || n <= 0) return CONFIG.defaultStakeMist
-    return BigInt(Math.round(n * 10 ** stakeDecimals))
-  })()
-  const minStake = stakeCurrency === "SUI" ? CONFIG.minStakeMist : 1_000n
-  const stakeValid = stakeAmount >= minStake
-  // dUSDC needs an existing PredictManager + enough balance in it
-  const dusdcReady =
-    stakeCurrency === "SUI" ||
-    (!!managerQ.data && (managerBalanceQ.data ?? 0n) >= stakeAmount)
-  const DUSDC_TYPE =
-    "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC"
-  const stakeCoinType = stakeCurrency === "SUI" ? CONFIG.stakeType : DUSDC_TYPE
-  const managerSource =
-    stakeCurrency === "DUSDC" && managerQ.data
-      ? {
-          managerId: managerQ.data.id,
-          predictPackage: CONFIG.deepbookPredictPackageId,
-        }
-      : null
-
-  const now = useNow(1_000)
-
-  // Selected source must be ACTIVE (not settled, not past expiry) for a
-  // fair duel. Mirrors the on-chain `EOracleNotLive` guard at swipe time.
-  const selectedOk = (() => {
-    if (selectedSource === "DEEPBOOK_BTC") {
-      const db = deepbookOracleQ.data
-      if (!db) return false
-      return db.isActive && db.settlementPrice === null && Number(db.expiry) > now
-    }
-    const o = flickyOraclesQ.data?.[selectedSource]
-    if (!o) return false
-    return !o.isSettled && Number(o.expiry) > now
-  })()
-
-  async function handleCreate() {
-    if (!stakeValid || !selectedOk || !dusdcReady) return
-    let tx
-    if (selectedSource === "DEEPBOOK_BTC") {
-      const db = deepbookOracleQ.data
-      if (!db) return
-      const ref = db.settlementPrice ?? db.forward
-      const strikes = deepbookStrikes(ref)
-      tx = buildCreateDuelDeepbookTx(
-        db.id,
-        strikes,
-        stakeAmount,
-        stakeCoinType,
-        managerSource,
-      )
-    } else {
-      const oracleData = flickyOraclesQ.data?.[selectedSource]
-      if (!oracleData) return
-      const strikes = await buildDefaultStrikes(client, oracleData.id)
-      tx = buildCreateDuelTx(
-        oracleData.id,
-        strikes,
-        stakeAmount,
-        stakeCoinType,
-        managerSource,
-      )
-    }
-    const res = await signAndExecute({ transaction: tx })
-    await client.waitForTransaction({ digest: res.digest })
-    qc.invalidateQueries({ queryKey: ["duels"] })
-  }
-
-  async function handleJoin(duel: DuelState) {
-    // For dUSDC duels the joiner also needs a PredictManager with balance.
-    // We always use whatever the duel was created with (encoded in
-    // stakeCoinType). The manager source kicks in only when the duel is
-    // dUSDC AND the joiner has a manager.
-    const isDusdcDuel = duel.stakeCoinType.endsWith("::dusdc::DUSDC")
-    const joinSource =
-      isDusdcDuel && managerQ.data
-        ? {
-            managerId: managerQ.data.id,
-            predictPackage: CONFIG.deepbookPredictPackageId,
-          }
-        : null
-    const tx = buildJoinDuelTx(
-      duel.id,
-      duel.p0Stake,
-      duel.stakeCoinType,
-      joinSource,
-    )
-    const res = await signAndExecute({ transaction: tx })
-    await client.waitForTransaction({ digest: res.digest })
-    qc.invalidateQueries({ queryKey: ["duels"] })
-    onOpenDuel(duel.id)
-  }
-
-  const duels = duelsQ.data ?? []
-  const myDuels = duels.filter(
-    (d) => d.creator === address || d.challenger === address,
-  )
-  const openDuels = duels.filter(
-    (d) => d.status === "PENDING" && d.creator !== address,
-  )
+function OracleStrip() {
+  const { oracleId, oracle } = useOracle()
+  const now = useNow(5_000)
 
   return (
-    <div className="flex flex-col gap-6">
+    <Card className="bg-surface-1 border-hairline">
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4 text-sm">
+        <div className="flex items-baseline gap-2">
+          <span className="text-ink-subtle text-[11px] font-medium uppercase tracking-[0.06em]">
+            BTC
+          </span>
+          {oracle ? (
+            <>
+              <span className="text-xl font-semibold tabular-nums">
+                {fmtUsd(oracle.spot)}
+              </span>
+              <span className="text-muted-foreground text-xs">
+                fwd {fmtUsd(oracle.forward)}
+              </span>
+            </>
+          ) : (
+            <span className="text-muted-foreground text-xs">connecting…</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 text-xs">
+          {oracle && (
+            <Badge variant={oracle.isActive ? "default" : "secondary"}>
+              {oracle.settlementPrice !== null
+                ? `settled ${fmtUsd(oracle.settlementPrice)}`
+                : oracle.isActive
+                  ? expiresIn(oracle, now)
+                  : "inactive"}
+            </Badge>
+          )}
+          {oracleId && (
+            <ExplorerLink href={objectUrl(oracleId)}>{shortId(oracleId)}</ExplorerLink>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function expiresIn(o: OracleSviInfo, now: number): string {
+  const ms = Number(o.expiry) - now
+  if (ms <= 0) return "expired"
+  const min = Math.floor(ms / 60_000)
+  const sec = Math.floor((ms % 60_000) / 1000)
+  return `${min}m${sec.toString().padStart(2, "0")}s left`
+}
+
+// ─── lobby ──────────────────────────────────────────────────────────────────
+
+function Lobby({
+  address,
+  onEnterDuel,
+}: {
+  address: string
+  onEnterDuel: (id: string) => void
+}) {
+  const client = useSuiClient()
+  const queryClient = useQueryClient()
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
+  const { oracleId, oracle } = useOracle()
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [tier, setTier] = useState<Tier>("free")
+
+  const duelsQuery = useQuery({
+    queryKey: ["duels"],
+    queryFn: () => listDuelIds(client, 10),
+    refetchInterval: 6_000,
+  })
+
+  // Probe the player's dUSDC wallet balance + PredictManager state up
+  // front, regardless of which tier is currently selected. The Predict
+  // setup checklist is surfaced as a persistent panel in the Lobby so
+  // the player can fund ahead of switching to Staked — discovery should
+  // not be gated behind a tier toggle.
+  const dusdcQuery = useQuery({
+    queryKey: ["dusdc-balance", address],
+    queryFn: () => getWalletDusdcBalance(client, address),
+    refetchInterval: 8_000,
+  })
+  const managerQuery = useQuery({
+    queryKey: ["predict-manager", address],
+    queryFn: () => findPredictManager(client, address),
+    refetchInterval: 12_000,
+  })
+  const managerBalanceQuery = useQuery({
+    queryKey: ["predict-manager-balance", managerQuery.data?.id],
+    queryFn: () =>
+      managerQuery.data
+        ? getManagerDusdcBalance(client, managerQuery.data.id)
+        : Promise.resolve(0n),
+    enabled: !!managerQuery.data,
+    refetchInterval: 10_000,
+  })
+  const stakedReady =
+    !!managerQuery.data && (managerBalanceQuery.data ?? 0n) > 0n
+
+  async function createDuel(stake: StakeTier) {
+    if (!oracleId || !oracle) return
+    setBusy(true)
+    setErr(null)
+    try {
+      const ref = oracle.settlementPrice ?? oracle.forward
+      const deck = await requestDeck(oracleId, ref)
+
+      const tx =
+        stake.coinType === DEEPBOOK.dusdcType
+          ? await buildCreateDuelDusdcTx(
+            client,
+            address,
+            deck.hash,
+            stake.amount,
+            stake.coinType,
+          )
+          : buildCreateDuelTx(deck.hash, stake.amount, stake.coinType)
+
+      const res = await signAndExec({ transaction: tx })
+      const full = await client.waitForTransaction({
+        digest: res.digest,
+        options: { showObjectChanges: true },
+      })
+      const created = full.objectChanges?.find(
+        (c) => c.type === "created" && c.objectType.includes("::duel::Duel<"),
+      )
+      queryClient.invalidateQueries({ queryKey: ["duels"] })
+      if (created?.type === "created") onEnterDuel(created.objectId)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const tiers = tier === "free" ? FREE_TIERS : STAKED_TIERS
+
+  return (
+    <>
       <Card>
         <CardHeader>
-          <CardTitle>Oracles (testnet)</CardTitle>
+          <CardTitle>Pick your stake</CardTitle>
           <CardDescription>
-            BTC available via both DeepBook&apos;s real on-chain oracle and Flicky&apos;s
-            extension. ETH/SOL/SUI via Flicky only — DeepBook doesn&apos;t yet
-            support them.
+            you stake · opponent matches · winner takes the pot
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-            {(() => {
-              const db = deepbookOracleQ.data
-              const dbActive =
-                !!db &&
-                db.isActive &&
-                db.settlementPrice === null &&
-                Number(db.expiry) > now
+        <CardContent className="space-y-3">
+          {/* Tier toggle */}
+          <div className="bg-muted inline-flex rounded-md p-0.5 text-xs">
+            <button
+              onClick={() => setTier("free")}
+              className={`rounded px-3 py-1 transition ${tier === "free" ? "bg-background shadow-sm" : "text-muted-foreground"
+                }`}
+            >
+              Free · SUI
+            </button>
+            <button
+              onClick={() => setTier("staked")}
+              className={`rounded px-3 py-1 transition ${tier === "staked" ? "bg-background shadow-sm" : "text-muted-foreground"
+                }`}
+            >
+              Staked · dUSDC
+            </button>
+          </div>
+
+          <DepositPanel address={address} walletBalance={dusdcQuery.data} />
+
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+            {tiers.map((t) => {
+              const insufficientWallet =
+                tier === "staked" &&
+                dusdcQuery.data !== undefined &&
+                dusdcQuery.data < t.amount
+              const blocked =
+                tier === "staked" && (!stakedReady || insufficientWallet)
+              const reason = !stakedReady
+                ? "complete setup above"
+                : insufficientWallet
+                  ? `need ${fmtStake(t.amount, t.coinType)}`
+                  : null
               return (
-                <div
-                  className={
-                    "rounded border p-3 " +
-                    (dbActive
-                      ? "border-2 border-primary/40 bg-primary/5"
-                      : "border-dashed border-muted-foreground/30 opacity-60")
-                  }
+                <button
+                  key={t.label}
+                  disabled={isPending || busy || !oracle || blocked}
+                  onClick={() => createDuel(t)}
+                  title={reason ?? undefined}
+                  className="border-input bg-background hover:border-primary hover:bg-primary/5 group flex flex-col rounded-lg border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-50 sm:p-4"
                 >
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium">BTC</span>
-                    <Badge className="text-[10px]">DeepBook</Badge>
-                  </div>
-                  <div className="mt-1 font-mono text-sm">
-                    {db ? fmtUsd(db.settlementPrice ?? db.forward) : "—"}
-                  </div>
-                  <div className="mt-0.5 text-[10px] text-muted-foreground">
-                    {!db
-                      ? "loading…"
-                      : db.settlementPrice !== null
-                        ? "settled — unfair, hidden"
-                        : !db.isActive
-                          ? "inactive"
-                          : Number(db.expiry) <= now
-                            ? "expired"
-                            : `expires in ${fmtCountdown(db.expiry, now)}`}
-                  </div>
-                </div>
-              )
-            })()}
-            {ASSETS.map((asset) => {
-              const o = flickyOraclesQ.data?.[asset]
-              const active = !!o && !o.isSettled && Number(o.expiry) > now
-              return (
-                <div
-                  key={asset}
-                  className={
-                    "rounded border p-3 " +
-                    (active ? "" : "border-dashed border-muted-foreground/30 opacity-60")
-                  }
-                >
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium">{asset}</span>
-                    <Badge variant="secondary" className="text-[10px]">
-                      Flicky
-                    </Badge>
-                  </div>
-                  <div className="mt-1 font-mono text-sm">
-                    {o ? fmtUsd(o.spot) : "—"}
-                  </div>
-                  <div className="mt-0.5 text-[10px] text-muted-foreground">
-                    {!o
-                      ? "loading…"
-                      : o.isSettled
-                        ? "settled"
-                        : Number(o.expiry) <= now
-                          ? "expired — needs settle"
-                          : `expires in ${fmtCountdown(o.expiry, now)}`}
-                  </div>
-                </div>
+                  <span className="text-muted-foreground text-xs tracking-wide uppercase">
+                    {t.label}
+                  </span>
+                  <span className="mt-1 text-base font-semibold sm:text-lg">
+                    {t.blurb}
+                  </span>
+                  <span className="text-muted-foreground mt-2 text-xs">
+                    {reason ? (
+                      <span className="text-amber-500">{reason}</span>
+                    ) : (
+                      <>pot {fmtStake(t.amount * 2n, t.coinType)}</>
+                    )}
+                  </span>
+                </button>
               )
             })}
           </div>
-        </CardContent>
-      </Card>
-
-      <PredictAccount address={address} />
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Create a duel</CardTitle>
-          <CardDescription>
-            Pick the oracle to predict against and your stake (per side). Deck
-            = 5 strikes spaced around spot.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="source" className="text-xs">
-                Oracle
-              </Label>
-              <select
-                id="source"
-                value={selectedSource}
-                onChange={(e) => setSelectedSource(e.target.value as OracleSource)}
-                className="h-9 rounded-md border bg-background px-3 text-sm"
-              >
-                {ORACLE_SOURCES.map((s) => {
-                  const sourceActive =
-                    s === "DEEPBOOK_BTC"
-                      ? (() => {
-                          const db = deepbookOracleQ.data
-                          return (
-                            !!db &&
-                            db.isActive &&
-                            db.settlementPrice === null &&
-                            Number(db.expiry) > now
-                          )
-                        })()
-                      : (() => {
-                          const o = flickyOraclesQ.data?.[s]
-                          return !!o && !o.isSettled && Number(o.expiry) > now
-                        })()
-                  return (
-                    <option key={s} value={s} disabled={!sourceActive}>
-                      {sourceLabel(s)}
-                      {sourceActive ? "" : " (inactive)"}
-                    </option>
-                  )
-                })}
-              </select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="currency" className="text-xs">
-                Currency
-              </Label>
-              <select
-                id="currency"
-                value={stakeCurrency}
-                onChange={(e) =>
-                  setStakeCurrency(e.target.value as "SUI" | "DUSDC")
-                }
-                className="h-9 rounded-md border bg-background px-3 text-sm"
-              >
-                <option value="SUI">SUI (gas wallet)</option>
-                <option value="DUSDC">dUSDC (via PredictManager)</option>
-              </select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="stake" className="text-xs">
-                Stake ({stakeCurrency === "SUI" ? "SUI" : "dUSDC"})
-              </Label>
-              <Input
-                id="stake"
-                type="number"
-                value={stakeAmountInput}
-                onChange={(e) => setStakeAmountInput(e.target.value)}
-                min={stakeCurrency === "SUI" ? "0.001" : "0.001"}
-                step="0.001"
-                className="h-9 w-32"
-              />
-            </div>
-            <Button
-              onClick={handleCreate}
-              disabled={creating || !stakeValid || !selectedOk || !dusdcReady}
-            >
-              {creating ? "creating…" : "Create duel"}
-            </Button>
-            {!selectedOk && (
-              <p className="text-xs text-muted-foreground">
-                Selected oracle isn&apos;t ACTIVE — pick another or refresh.
-              </p>
-            )}
-            {stakeCurrency === "DUSDC" && !managerQ.data && (
-              <p className="text-xs text-rose-500">
-                dUSDC stake needs a PredictManager. Set one up in the DeepBook
-                Predict card above.
-              </p>
-            )}
-            {stakeCurrency === "DUSDC" &&
-              managerQ.data &&
-              (managerBalanceQ.data ?? 0n) < stakeAmount && (
-                <p className="text-xs text-rose-500">
-                  PredictManager has {fmtDusdc(managerBalanceQ.data ?? 0n)} —
-                  needs {fmtDusdc(stakeAmount)}.
-                </p>
-              )}
-          </div>
-          {!stakeValid && (
-            <p className="mt-2 text-xs text-rose-500">
-              Stake must be at least{" "}
-              {stakeCurrency === "SUI"
-                ? fmtSui(CONFIG.minStakeMist)
-                : fmtDusdc(1_000n)}
-              .
+          {err && (
+            <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+              {err}
             </p>
           )}
+          <p className="text-muted-foreground text-xs">
+            your wallet:{" "}
+            <ExplorerLink href={addressUrl(address)}>{shortId(address)}</ExplorerLink>
+          </p>
         </CardContent>
       </Card>
 
-      <div>
-        <h2 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
-          Your duels
-        </h2>
-      </div>
-      <div className="flex flex-col gap-2">
-        {myDuels.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No duels yet. Create one to start.
-          </p>
-        )}
-        {myDuels.map((d) => (
-          <DuelRow
-            key={d.id}
-            duel={d}
-            address={address}
-            onOpen={() => onOpenDuel(d.id)}
-          />
-        ))}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Recent duels</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {duelsQuery.isLoading && (
+            <p className="text-muted-foreground text-sm">loading…</p>
+          )}
+          {duelsQuery.data?.length === 0 && (
+            <p className="text-muted-foreground text-sm">no duels yet. be the first.</p>
+          )}
+          {duelsQuery.data?.map((id) => (
+            <DuelSummary
+              key={id}
+              duelId={id}
+              address={address}
+              onOpen={() => onEnterDuel(id)}
+            />
+          ))}
+        </CardContent>
+      </Card>
+    </>
+  )
+}
+
+/**
+ * PRD §Funding the wallet: inline panel that shows the player's address +
+ * dUSDC wallet balance + copy button + "send dUSDC from any wallet" hint.
+ * No on-ramp, no faucet — same as PRD ("Deposit screen as the only money-in
+ * path"). Without zkLogin we use the connected wallet's address; with
+ * zkLogin (Phase 3.x) this becomes the zkLogin-derived address.
+ */
+/** Default first-time deposit nudge — 1 dUSDC covers ~10 swipes at 2%/card stake. */
+const DEFAULT_DEPOSIT_DUSDC = 1n
+
+/**
+ * Staked-tier onboarding checklist. Surfaces the two prerequisites for
+ * real `predict::mint` swipes:
+ *   ① PredictManager exists (one-time `predict::create_manager`)
+ *   ② Manager holds enough dUSDC to mint positions
+ *
+ * Both steps emit transactions through the sponsor-or-fallback path so
+ * players who only hold dUSDC can still onboard without SUI for gas.
+ */
+function DepositPanel({
+  address,
+  walletBalance,
+}: {
+  address: string
+  walletBalance: bigint | undefined
+}) {
+  const client = useSuiClient()
+  const queryClient = useQueryClient()
+  const { mutateAsync: signAndExec } = useFlickySign()
+  const [copied, setCopied] = useState(false)
+  const [busy, setBusy] = useState<"create" | "deposit" | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [depositAmount, setDepositAmount] = useState("1")
+  // Inline tx feedback. Auto-clears after 10s so the panel doesn't
+  // pile up old confirmations. Each new action overwrites previous.
+  const [toast, setToast] = useState<{
+    kind: "create" | "deposit"
+    digest: string
+    label: string
+  } | null>(null)
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 10_000)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  const managerQuery = useQuery({
+    queryKey: ["predict-manager", address],
+    queryFn: () => findPredictManager(client, address),
+    refetchInterval: 12_000,
+  })
+  const managerBalanceQuery = useQuery({
+    queryKey: ["predict-manager-balance", managerQuery.data?.id],
+    queryFn: () =>
+      managerQuery.data
+        ? getManagerDusdcBalance(client, managerQuery.data.id)
+        : Promise.resolve(0n),
+    enabled: !!managerQuery.data,
+    refetchInterval: 10_000,
+  })
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(address)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // clipboard unavailable; user can select manually
+    }
+  }
+
+  async function createManager() {
+    setBusy("create")
+    setErr(null)
+    setToast(null)
+    try {
+      const res = await signAndExec({ transaction: buildCreateManagerTx() })
+      // Wait for indexing + pull objectChanges so we can pre-populate the
+      // query cache with the new manager id instead of waiting for the
+      // next 12s refetch tick. UI updates within ~1s of tx finality.
+      const full = await client.waitForTransaction({
+        digest: res.digest,
+        options: { showObjectChanges: true },
+      })
+      const newManagerId = extractManagerIdFromChanges(
+        full.objectChanges ?? [],
+      )
+      if (newManagerId) {
+        // Persist to localStorage so F5 / next session doesn't pay the
+        // event-scan cost and so the UI shows the manager id immediately
+        // before any RPC roundtrip completes.
+        writeManagerCache(address, newManagerId)
+        queryClient.setQueryData(["predict-manager", address], {
+          id: newManagerId,
+        })
+      } else {
+        // Fallback if the digest's objectChanges didn't surface — refetch
+        // forces an immediate event-scan rather than waiting for the
+        // polling interval.
+        await queryClient.refetchQueries({
+          queryKey: ["predict-manager", address],
+        })
+      }
+      setToast({
+        kind: "create",
+        digest: res.digest,
+        label: "PredictManager created",
+      })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function deposit() {
+    if (!managerQuery.data) return
+    const dec = Number(depositAmount)
+    if (!Number.isFinite(dec) || dec <= 0) {
+      setErr("enter a positive dUSDC amount")
+      return
+    }
+    const micro = BigInt(Math.floor(dec * 1_000_000))
+    if (walletBalance !== undefined && micro > walletBalance) {
+      setErr("not enough dUSDC in wallet")
+      return
+    }
+    setBusy("deposit")
+    setErr(null)
+    setToast(null)
+    try {
+      const tx = await buildDepositDusdcTx(
+        client,
+        address,
+        managerQuery.data.id,
+        micro,
+      )
+      const res = await signAndExec({ transaction: tx })
+      await client.waitForTransaction({ digest: res.digest })
+      // Force immediate refetch instead of waiting for the polling tick.
+      await Promise.all([
+        queryClient.refetchQueries({
+          queryKey: ["predict-manager-balance", managerQuery.data.id],
+        }),
+        queryClient.refetchQueries({
+          queryKey: ["dusdc-balance", address],
+        }),
+      ])
+      setToast({
+        kind: "deposit",
+        digest: res.digest,
+        label: `Deposited ${fmtDusdc(micro)}`,
+      })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const hasManager = !!managerQuery.data
+  const managerBalance = managerBalanceQuery.data ?? 0n
+  const hasManagerBalance = managerBalance > 0n
+
+  return (
+    <div className="border-muted/60 bg-muted/20 space-y-3 rounded-md border border-dashed p-3 text-xs">
+      <div className="flex items-center justify-between">
+        <span className="text-muted-foreground tracking-wide uppercase">
+          {hasManager ? "Predict wallet" : "Predict setup"}
+        </span>
+        <span className="text-muted-foreground text-[10px]">
+          {hasManager ? "ready for Staked duels" : "two one-time steps"}
+        </span>
       </div>
 
-      <Separator />
-
-      <h2 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
-        Open lobby
-      </h2>
-      <div className="flex flex-col gap-2">
-        {openDuels.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No open duels waiting for a challenger.
-          </p>
-        )}
-        {openDuels.map((d) => {
-          const isDusdc = d.stakeCoinType.endsWith("::dusdc::DUSDC")
-          const joinReady =
-            !isDusdc ||
-            (!!managerQ.data && (managerBalanceQ.data ?? 0n) >= d.p0Stake)
-          return (
-            <Card key={d.id}>
-              <CardContent className="flex items-center justify-between gap-2 py-4">
-                <div className="text-sm">
-                  <div className="font-mono text-xs text-muted-foreground">
-                    {d.id.slice(0, 10)}…
-                  </div>
-                  <div>
-                    Created by{" "}
-                    <span className="font-mono">{shortAddr(d.creator)}</span>
-                  </div>
-                  <div className="text-muted-foreground">
-                    Stake: {fmtStake(d.p0Stake, d.stakeCoinType)}
-                  </div>
-                  {isDusdc && !joinReady && (
-                    <div className="text-amber-600 text-xs">
-                      {!managerQ.data
-                        ? "Needs a PredictManager with dUSDC to join."
-                        : `Manager has ${fmtDusdc(managerBalanceQ.data ?? 0n)}; needs ${fmtDusdc(d.p0Stake)}.`}
-                    </div>
-                  )}
-                </div>
-                <Button
-                  onClick={() => handleJoin(d)}
-                  disabled={creating || !joinReady}
-                >
-                  Join ({fmtStake(d.p0Stake, d.stakeCoinType)})
-                </Button>
-              </CardContent>
-            </Card>
+      {/* ─── Step ① PredictManager ─── */}
+      <ChecklistRow
+        done={hasManager}
+        index={1}
+        title="PredictManager"
+        detail={
+          hasManager ? (
+            <a
+              href={objectUrl(managerQuery.data!.id)}
+              target="_blank"
+              rel="noreferrer"
+              className="font-mono underline-offset-2 hover:underline"
+              title={managerQuery.data!.id}
+            >
+              {shortId(managerQuery.data!.id)} ↗
+            </a>
+          ) : (
+            "one-time `predict::create_manager` — gasless via sponsor"
           )
-        })}
+        }
+        action={
+          !hasManager && (
+            <Button
+              size="sm"
+              variant="default"
+              disabled={busy !== null}
+              onClick={createManager}
+              className="h-7 px-2 text-xs"
+            >
+              {busy === "create" ? "creating…" : "Create"}
+            </Button>
+          )
+        }
+      />
+
+      {/* ─── Step ② Manager balance ─── */}
+      <ChecklistRow
+        done={hasManagerBalance}
+        index={2}
+        title="dUSDC in manager"
+        detail={
+          hasManager ? (
+            <span className="font-mono">{fmtDusdc(managerBalance)}</span>
+          ) : (
+            <span className="opacity-60">unlocked after step ①</span>
+          )
+        }
+        action={
+          hasManager && (
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                min="0.1"
+                step="0.1"
+                value={depositAmount}
+                onChange={(e) => setDepositAmount(e.target.value)}
+                disabled={busy !== null}
+                className="bg-background h-7 w-16 rounded border px-2 text-right font-mono text-xs"
+                aria-label="dUSDC amount to deposit"
+              />
+              <Button
+                size="sm"
+                variant={hasManagerBalance ? "outline" : "default"}
+                disabled={busy !== null || !hasManager}
+                onClick={deposit}
+                className="h-7 px-2 text-xs"
+              >
+                {busy === "deposit" ? "…" : "Deposit"}
+              </Button>
+            </div>
+          )
+        }
+      />
+
+      {toast && (
+        <div className="flex items-center justify-between gap-2 rounded border-l-2 border-emerald-500 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-600">
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden>✓</span>
+            <span>{toast.label}</span>
+          </span>
+          <a
+            href={txExplorerUrl(toast.digest)}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-[10px] underline-offset-2 hover:underline"
+            title={toast.digest}
+          >
+            {shortId(toast.digest)} ↗
+          </a>
+        </div>
+      )}
+
+      <div className="border-t border-dashed pt-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground">
+            wallet dUSDC:{" "}
+            <strong className="text-foreground font-mono">
+              {walletBalance !== undefined ? fmtDusdc(walletBalance) : "…"}
+            </strong>
+          </span>
+        </div>
+        <div className="mt-1 flex items-center gap-2">
+          <code className="bg-background flex-1 truncate rounded border px-2 py-1 font-mono text-[10px]">
+            {address}
+          </code>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={copy}
+            className="h-7 px-2 text-xs"
+          >
+            {copied ? "copied!" : "copy"}
+          </Button>
+        </div>
+        <p className="text-muted-foreground mt-1 text-[10px]">
+          dUSDC has no testnet faucet — receive from another wallet that has
+          some. Default deposit ({Number(DEFAULT_DEPOSIT_DUSDC)} dUSDC) covers
+          ~{Number(DEFAULT_DEPOSIT_DUSDC) * 10} swipes.
+        </p>
+        {err && (
+          <p className="text-red-500 mt-1 text-[10px] break-all">{err}</p>
+        )}
       </div>
     </div>
   )
 }
 
-function DuelRow({
-  duel,
+function ChecklistRow({
+  done,
+  index,
+  title,
+  detail,
+  action,
+}: {
+  done: boolean
+  index: number
+  title: string
+  detail: React.ReactNode
+  action?: React.ReactNode
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <span
+          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
+            done
+              ? "bg-emerald-500/15 text-emerald-500"
+              : "bg-muted text-muted-foreground"
+          }`}
+          aria-hidden
+        >
+          {done ? "✓" : index}
+        </span>
+        <div className="min-w-0">
+          <div className="text-foreground font-medium">{title}</div>
+          <div className="text-muted-foreground truncate text-[10px]">
+            {detail}
+          </div>
+        </div>
+      </div>
+      {action}
+    </div>
+  )
+}
+
+function DuelSummary({
+  duelId,
   address,
   onOpen,
 }: {
-  duel: DuelState
+  duelId: string
   address: string
   onOpen: () => void
 }) {
-  const role = duel.creator === address ? "creator" : "challenger"
-  const statusVariant: "default" | "secondary" | "outline" =
-    duel.status === "ACTIVE" ? "default" : duel.status === "COMPLETE" ? "outline" : "secondary"
+  const client = useSuiClient()
+  const { data: d } = useQuery({
+    queryKey: ["duel", duelId],
+    queryFn: () => fetchDuel(client, duelId),
+    refetchInterval: 5_000,
+  })
+  if (!d) return null
+
+  const mine = d.creator === address || d.challenger === address
+  const statusColor: Record<typeof d.status, "default" | "secondary" | "outline"> = {
+    PENDING: "outline",
+    ACTIVE: "default",
+    COMPLETE: "secondary",
+  }
   return (
-    <Card>
-      <CardContent className="flex items-center justify-between gap-2 py-4">
-        <div className="text-sm">
-          <div className="font-mono text-xs text-muted-foreground">
-            {duel.id.slice(0, 10)}…
-          </div>
-          <div className="flex items-center gap-2">
-            <Badge variant={statusVariant}>{duel.status}</Badge>
-            <span className="text-muted-foreground">you are {role}</span>
-          </div>
-          {duel.status === "PENDING" && (
-            <div className="text-muted-foreground">waiting for challenger…</div>
-          )}
-          {duel.status === "ACTIVE" && (
-            <div className="text-muted-foreground">
-              swiped {role === "creator" ? Number(duel.p0NextCardIdx) : Number(duel.p1NextCardIdx)}/5 ·
-              opponent {role === "creator" ? Number(duel.p1NextCardIdx) : Number(duel.p0NextCardIdx)}/5
-            </div>
-          )}
+    <button
+      onClick={onOpen}
+      className="hover:bg-muted/50 flex w-full items-center justify-between rounded p-2 text-left transition"
+    >
+      <div className="text-sm">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-xs">{shortId(duelId)}</span>
+          <Badge variant={statusColor[d.status]}>{d.status}</Badge>
+          {mine && <Badge variant="outline">yours</Badge>}
         </div>
-        <Button variant="outline" onClick={onOpen}>
-          Open
-        </Button>
-      </CardContent>
-    </Card>
+        <div className="text-muted-foreground text-xs">
+          pot {fmtStake(d.p0Stake + d.p1Stake, d.stakeCoinType)} · settled{" "}
+          {d.settledCount.toString()}/5
+        </div>
+      </div>
+      <span className="text-muted-foreground text-xs">→</span>
+    </button>
   )
 }
+
+// ─── duel view (phase dispatcher) ───────────────────────────────────────────
 
 function DuelView({
   duelId,
@@ -701,673 +1187,987 @@ function DuelView({
   onBack: () => void
 }) {
   const client = useSuiClient()
-  const qc = useQueryClient()
-  const { mutateAsync: signAndExecute, isPending: txPending } =
-    useSignAndExecuteTransaction()
-
-  const duelQ = useQuery({
+  const { oracle } = useOracle()
+  const duelQuery = useQuery({
     queryKey: ["duel", duelId],
     queryFn: () => fetchDuel(client, duelId),
-    refetchInterval: 3_000,
+    refetchInterval: 2_000,
   })
-
-  const duel = duelQ.data
-  const role: "p0" | "p1" | "spectator" = duel
-    ? duel.creator === address
-      ? "p0"
-      : duel.challenger === address
-        ? "p1"
-        : "spectator"
-    : "spectator"
-
-  const oracleId = duel?.cards[0]?.oracleId ?? ""
-  const isDeepbook = oracleId !== "" && isDeepbookOracle(oracleId)
-
-  const flickyOracleQ = useQuery({
-    queryKey: ["oracle", oracleId],
-    queryFn: () => fetchOracleSpot(client, oracleId),
-    refetchInterval: 5_000,
-    enabled: !!duel && oracleId !== "" && !isDeepbook,
-  })
-  const deepbookOracleQ = useQuery({
-    queryKey: ["deepbook-oracle", oracleId],
-    queryFn: () => fetchDeepbookOracle(client, oracleId),
-    refetchInterval: 5_000,
-    enabled: !!duel && oracleId !== "" && isDeepbook,
-  })
-
-  // Unified oracle state for the active-match UI.
-  const oracleView = isDeepbook
-    ? deepbookOracleQ.data
-      ? {
-          spot:
-            deepbookOracleQ.data.settlementPrice ?? deepbookOracleQ.data.forward,
-          expiry: deepbookOracleQ.data.expiry,
-          isSettled: deepbookOracleQ.data.settlementPrice !== null,
-        }
-      : null
-    : (flickyOracleQ.data ?? null)
-
-  const myNext = duel
-    ? role === "p0"
-      ? Number(duel.p0NextCardIdx)
-      : Number(duel.p1NextCardIdx)
-    : 0
-  const currentCard = duel && myNext < 5 ? duel.cards[myNext] : null
-
-  // DeepBook oracles don't expose implied_probability_up publicly; skip pUp
-  // fetch for them and let the UI show "—".
-  const pUpQ = useQuery({
-    queryKey: ["pup", oracleId, currentCard?.strike.toString()],
-    queryFn: () => impliedProbabilityUp(client, oracleId, currentCard!.strike),
-    enabled: !!currentCard && duel?.status === "ACTIVE" && !isDeepbook,
-    refetchInterval: 5_000,
-  })
-
-  // For DeepBook duels, check if the player has a PredictManager. If they
-  // do, we upgrade swipes to "staked" mode that ALSO mints a real Predict
-  // position. Without a manager, fall back to record-swipe-only.
-  const managerQ = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
-    enabled: isDeepbook && duel?.status === "ACTIVE",
-  })
-
-  async function handleSwipe(isUp: boolean) {
-    if (!duel || !currentCard) return
-    let tx
-    if (isDeepbook && managerQ.data && deepbookOracleQ.data) {
-      // Staked-tier swipe: atomic predict::mint + record_swipe_deepbook.
-      // Quantity is in dUSDC micro-units (6 decimals). 10_000 = 0.01 dUSDC
-      // notional payout if correct.
-      const STAKED_QUANTITY = 10_000n
-      tx = buildStakedSwipeTx({
-        flickyPackageId: CONFIG.packageId,
-        duelId,
-        oracleSviId: oracleId,
-        managerId: managerQ.data.id,
-        oracleExpiry: deepbookOracleQ.data.expiry,
-        strike: currentCard.strike,
-        isUp,
-        quantity: STAKED_QUANTITY,
-        cardIdx: myNext,
-        stakeType: CONFIG.stakeType,
-      })
-    } else if (isDeepbook) {
-      tx = buildSwipeDeepbookTx(duelId, oracleId, myNext, isUp, duel.stakeCoinType)
-    } else {
-      tx = buildSwipeTx(duelId, oracleId, myNext, isUp, duel.stakeCoinType)
-    }
-    const res = await signAndExecute({ transaction: tx })
-    await client.waitForTransaction({ digest: res.digest })
-    qc.invalidateQueries({ queryKey: ["duel", duelId] })
-  }
-
-  async function handleFinalize() {
-    if (!duel) return
-    const tx = isDeepbook
-      ? buildSettleAndFinalizeDeepbookTx(duelId, oracleId, duel.stakeCoinType)
-      : buildSettleAndFinalizeTx(duelId, oracleId, duel.stakeCoinType)
-    const res = await signAndExecute({ transaction: tx })
-    await client.waitForTransaction({ digest: res.digest })
-    qc.invalidateQueries({ queryKey: ["duel", duelId] })
-  }
-
-  const now = useNow(2_000)
-  const expired = oracleView ? Number(oracleView.expiry) <= now : false
+  const d = duelQuery.data
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <Button variant="ghost" onClick={onBack}>
-          ← Back to lobby
-        </Button>
-        <div className="flex items-center gap-2">
-          {duel && <Badge>{duel.status}</Badge>}
-          {isDeepbook && <Badge variant="secondary">DeepBook</Badge>}
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={onBack}
+            className="text-muted-foreground hover:text-foreground text-sm"
+          >
+            ← lobby
+          </button>
+          <ExplorerLink href={objectUrl(duelId)}>{shortId(duelId)}</ExplorerLink>
         </div>
-      </div>
-      {duel && (
-        <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-          Verify on Sui Explorer:{" "}
-          <ExplorerLink href={obj(duelId)}>duel object</ExplorerLink>
-          <ExplorerLink href={obj(oracleId)}>
-            oracle ({isDeepbook ? "DeepBook OracleSVI" : "FlickyOracle"})
-          </ExplorerLink>
-        </div>
-      )}
-
-      {!duel ? (
-        <p className="text-sm text-muted-foreground">loading duel…</p>
-      ) : duel.status === "PENDING" ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Waiting for challenger</CardTitle>
-            <CardDescription>
-              Share the duel ID with a friend to have them join:
-              <code className="ml-1 font-mono text-xs">{duelId}</code>
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm">
-              Pot will be {fmtStake(duel.p0Stake * 2n, duel.stakeCoinType)}{" "}
-              once joined.
-            </p>
-          </CardContent>
-        </Card>
-      ) : duel.status === "COMPLETE" ? (
-        <ResultView duel={duel} address={address} />
-      ) : (
-        <ActiveMatch
-          duel={duel}
-          role={role}
-          oracleSpot={oracleView?.spot ?? null}
-          oracleSettled={oracleView?.isSettled ?? false}
-          oracleExpired={expired}
-          oracleExpiryMs={oracleView?.expiry ?? null}
-          isDeepbook={isDeepbook}
-          currentCard={currentCard}
-          pUp={pUpQ.data}
-          onSwipe={handleSwipe}
-          onFinalize={handleFinalize}
-          busy={txPending}
-        />
-      )}
-    </div>
+      </CardHeader>
+      <CardContent>
+        {!d ? (
+          <p className="text-muted-foreground py-12 text-center text-sm">loading…</p>
+        ) : (
+          <PhaseDispatcher duel={d} address={address} duelId={duelId} oracle={oracle} />
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
-function ActiveMatch({
+function PhaseDispatcher({
   duel,
-  role,
-  oracleSpot,
-  oracleSettled,
-  oracleExpired,
-  oracleExpiryMs,
-  isDeepbook,
-  currentCard,
-  pUp,
-  onSwipe,
-  onFinalize,
-  busy,
+  address,
+  duelId,
+  oracle,
 }: {
   duel: DuelState
-  role: "p0" | "p1" | "spectator"
-  oracleSpot: bigint | null
-  oracleSettled: boolean
-  oracleExpired: boolean
-  oracleExpiryMs: bigint | null
-  isDeepbook: boolean
-  currentCard: { oracleId: string; strike: bigint } | null
-  pUp: bigint | undefined
-  onSwipe: (isUp: boolean) => void
-  onFinalize: () => void
-  busy: boolean
+  address: string
+  duelId: string
+  oracle: OracleSviInfo | undefined
 }) {
-  const now = useNow(1_000)
-  const myProgress = role === "p0" ? Number(duel.p0NextCardIdx) : Number(duel.p1NextCardIdx)
-  const oppProgress = role === "p0" ? Number(duel.p1NextCardIdx) : Number(duel.p0NextCardIdx)
-  const myScore = role === "p0" ? duel.p0Score : duel.p1Score
-  const oppScore = role === "p0" ? duel.p1Score : duel.p0Score
-  const bothDone = myProgress === 5 && oppProgress === 5
-  // Swipes only valid while oracle is still live. Mirrors EOracleNotLive guard.
-  const liveForSwipe = !oracleSettled && !oracleExpired
+  const isCreator = duel.creator === address
+  const isChallenger = duel.challenger === address
+  const isPlayer = isCreator || isChallenger
+  const myNextIdx = isCreator ? Number(duel.p0NextCardIdx) : Number(duel.p1NextCardIdx)
+  const opponentNextIdx = isCreator
+    ? Number(duel.p1NextCardIdx)
+    : Number(duel.p0NextCardIdx)
+  const allSwiped = myNextIdx === 5 && opponentNextIdx === 5
 
+  if (duel.status === "COMPLETE") {
+    return <ResultView duel={duel} address={address} />
+  }
+  if (duel.status === "PENDING") {
+    if (isCreator) return <WaitingForOpponentView duel={duel} duelId={duelId} />
+    return <JoinView duel={duel} duelId={duelId} address={address} />
+  }
+  // ACTIVE
+  if (!isPlayer) {
+    return <SpectatorView duel={duel} />
+  }
+  // Between join_duel and reveal_deck the duel is ACTIVE but `cards` is
+  // empty. Don't route into SwipingView yet — it would dereference
+  // duel.cards[0] and crash. Show a transient reveal-pending state.
+  if (duel.cards.length === 0) {
+    return (
+      <RevealingView
+        duelId={duelId}
+        deckHashHex={duel.deckHashHex}
+        stakeCoinType={duel.stakeCoinType}
+      />
+    )
+  }
+  if (myNextIdx < 5) {
+    return (
+      <SwipingView
+        duel={duel}
+        duelId={duelId}
+        oracle={oracle}
+        myNextIdx={myNextIdx}
+        isCreator={isCreator}
+        address={address}
+      />
+    )
+  }
+  if (!allSwiped) {
+    return <LockupView myNextIdx={myNextIdx} opponentNextIdx={opponentNextIdx} />
+  }
+  if (oracle && oracle.settlementPrice === null) {
+    return <LockupView myNextIdx={myNextIdx} opponentNextIdx={opponentNextIdx} />
+  }
+  return <SettlingView duel={duel} duelId={duelId} />
+}
+
+// ─── phases ─────────────────────────────────────────────────────────────────
+
+function WaitingForOpponentView({
+  duel,
+  duelId,
+}: {
+  duel: DuelState
+  duelId: string
+}) {
+  const now = useNow(1000)
+  // PENDING duels have started_at_ms == 0 (set only on join_duel). Track
+  // elapsed from when this view mounted — close enough for a spinner.
+  const [mountedAt] = useState(() => Date.now())
+  const elapsed = Math.max(0, Math.floor((now - mountedAt) / 1000))
+  const showShareEscape = elapsed > 30
   return (
-    <div className="flex flex-col gap-4">
-      <Card>
-        <CardContent className="grid grid-cols-2 gap-4 py-4 text-sm">
-          <div>
-            <div className="text-xs text-muted-foreground">You ({role})</div>
-            <div className="font-mono">{myProgress}/5 swiped</div>
-            <div className="text-muted-foreground">score: {fmtScore(myScore)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-muted-foreground">Opponent</div>
-            <div className="font-mono">{oppProgress}/5 swiped</div>
-            <div className="text-muted-foreground">score: {fmtScore(oppScore)}</div>
-          </div>
-        </CardContent>
-      </Card>
+    <div className="space-y-4 py-8 text-center">
+      <div className="flex justify-center">
+        <span className="border-primary inline-block h-12 w-12 animate-spin rounded-full border-4 border-t-transparent" />
+      </div>
+      <div className="space-y-1">
+        <div className="text-lg font-semibold">matching…</div>
+        <div className="text-muted-foreground text-xs">{elapsed}s elapsed</div>
+      </div>
+      <p className="text-muted-foreground text-sm">
+        you staked{" "}
+        <strong className="text-foreground">
+          {fmtStake(duel.p0Stake, duel.stakeCoinType)}
+        </strong>
+        .{" "}
+        {duel.stakeCoinType === DEEPBOOK.dusdcType
+          ? "no bot fill on staked tier — waiting for a human."
+          : "bot auto-fills after ~5s if no human joins."}
+      </p>
+      {showShareEscape && (
+        <div className="space-y-1 pt-3">
+          <p className="text-muted-foreground text-xs">
+            still no opponent. share manually:
+          </p>
+          <code className="bg-muted block break-all rounded p-2 text-xs">{duelId}</code>
+        </div>
+      )}
+      <p className="text-muted-foreground pt-2 text-xs">
+        pot when full {fmtStake(duel.p0Stake * 2n, duel.stakeCoinType)}
+      </p>
+    </div>
+  )
+}
 
-      {currentCard ? (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-baseline justify-between">
-              <span className="flex items-center gap-2">
-                Card {myProgress + 1} / 5
-                {isDeepbook && <Badge>DeepBook</Badge>}
-              </span>
-              <span className="font-mono text-base text-muted-foreground">
-                {oracleSpot !== null ? fmtUsd(oracleSpot) : "—"} spot
-              </span>
-            </CardTitle>
-            {oracleExpiryMs !== null && (
-              <div className="text-xs text-muted-foreground">
-                {liveForSwipe
-                  ? `Swipe window closes in ${fmtCountdown(oracleExpiryMs, now)}`
-                  : "Oracle expired — waiting for settle"}
-              </div>
-            )}
-            <CardDescription>
-              At expiry, will price settle above{" "}
-              <span className="font-mono font-medium text-foreground">
-                {fmtUsd(currentCard.strike)}
-              </span>
-              ?
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-4">
-            {pUp !== undefined ? (
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded border border-emerald-500/30 bg-emerald-500/10 p-2">
-                  <div className="text-muted-foreground">YES (UP)</div>
-                  <div className="font-mono font-medium">{fmtPct(pUp)}</div>
-                </div>
-                <div className="rounded border border-rose-500/30 bg-rose-500/10 p-2">
-                  <div className="text-muted-foreground">NO (DOWN)</div>
-                  <div className="font-mono font-medium">
-                    {fmtPct(1_000_000_000n - pUp)}
-                  </div>
-                </div>
-              </div>
-            ) : isDeepbook ? (
-              <p className="text-xs text-muted-foreground">
-                p(UP) computed on-chain at swipe time (DeepBook&apos;s SVI
-                readers aren&apos;t public for client-side preview).
-              </p>
-            ) : null}
-            {!liveForSwipe && (
-              <p className="text-xs text-rose-500">
-                Oracle is no longer ACTIVE — swipes will be rejected on-chain.
-                Wait for settle + finalize.
-              </p>
-            )}
-            <div className="flex gap-2">
-              <Button
-                onClick={() => onSwipe(false)}
-                disabled={busy || role === "spectator" || !liveForSwipe}
-                variant="outline"
-                className="flex-1 border-rose-500/50 hover:bg-rose-500/10"
-              >
-                NO (DOWN)
-              </Button>
-              <Button
-                onClick={() => onSwipe(true)}
-                disabled={busy || role === "spectator" || !liveForSwipe}
-                className="flex-1 bg-emerald-600 hover:bg-emerald-700"
-              >
-                YES (UP)
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle>You&apos;ve swiped all 5 cards</CardTitle>
-            <CardDescription>
-              {oppProgress < 5
-                ? "Waiting for the opponent to finish swiping…"
-                : !oracleExpired
-                  ? `Waiting for oracle to expire…`
-                  : !oracleSettled
-                    ? "Waiting for the keeper to settle the oracle…"
-                    : "Oracle settled. Ready to finalize."}
-            </CardDescription>
-          </CardHeader>
-          {bothDone && oracleSettled && (
-            <CardContent>
-              <Button onClick={onFinalize} disabled={busy}>
-                Settle cards + finalize
-              </Button>
-            </CardContent>
-          )}
-        </Card>
+function JoinView({
+  duel,
+  duelId,
+  address,
+}: {
+  duel: DuelState
+  duelId: string
+  address: string
+}) {
+  const client = useSuiClient()
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
+  const queryClient = useQueryClient()
+  const [err, setErr] = useState<string | null>(null)
+  const isDusdc = duel.stakeCoinType === DEEPBOOK.dusdcType
+
+  // Probe the deckmaster service for plaintext keyed by the deck hash.
+  // If the service has lost the plaintext (server restart with old in-mem
+  // store, or a duel created against a different deckmaster) no one can
+  // reveal post-join and the duel is bricked — refuse to join in that
+  // case so stake doesn't get locked into a dead duel.
+  const plaintextQuery = useQuery({
+    queryKey: ["deckmaster-reveal", duel.deckHashHex],
+    queryFn: async () => {
+      const res = await fetch(
+        `${DECKMASTER_BASE_URL}/deckmaster/reveal?hash=${encodeURIComponent(duel.deckHashHex)}`,
+      )
+      if (res.status === 404) return { available: false as const }
+      if (!res.ok) throw new Error(`reveal lookup failed: ${res.status}`)
+      return { available: true as const }
+    },
+    retry: false,
+    staleTime: 10_000,
+  })
+  const plaintextMissing = plaintextQuery.data?.available === false
+
+  // PredictManager gate for dUSDC duels — every staked swipe bundles
+  // `predict::mint` which requires the joiner's manager to exist + hold
+  // dUSDC. Block the join here so the player isn't trapped mid-duel
+  // unable to swipe.
+  const managerQuery = useQuery({
+    queryKey: ["predict-manager", address],
+    queryFn: () => findPredictManager(client, address),
+    enabled: isDusdc,
+    refetchInterval: 12_000,
+  })
+  const managerBalanceQuery = useQuery({
+    queryKey: ["predict-manager-balance", managerQuery.data?.id],
+    queryFn: () =>
+      managerQuery.data
+        ? getManagerDusdcBalance(client, managerQuery.data.id)
+        : Promise.resolve(0n),
+    enabled: isDusdc && !!managerQuery.data,
+    refetchInterval: 10_000,
+  })
+  const needsManager = isDusdc && !managerQuery.data && !managerQuery.isLoading
+  const needsDeposit =
+    isDusdc &&
+    !!managerQuery.data &&
+    (managerBalanceQuery.data ?? 0n) === 0n &&
+    !managerBalanceQuery.isLoading
+
+  async function join() {
+    setErr(null)
+    try {
+      const tx = isDusdc
+        ? await buildJoinDuelDusdcTx(
+          client,
+          address,
+          duelId,
+          duel.p0Stake,
+          duel.stakeCoinType,
+        )
+        : buildJoinDuelTx(duelId, duel.p0Stake, duel.stakeCoinType)
+      await signAndExec({ transaction: tx })
+      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const stake = fmtStake(duel.p0Stake, duel.stakeCoinType)
+  const stakedBlocked = needsManager || needsDeposit
+  const blockReason = plaintextMissing
+    ? "deck unrevealable"
+    : needsManager
+      ? "setup required"
+      : needsDeposit
+        ? "deposit dUSDC first"
+        : null
+  return (
+    <div className="space-y-3 py-4 text-center">
+      <Badge variant="outline">open duel</Badge>
+      <p className="text-muted-foreground text-sm">
+        creator staked <strong>{stake}</strong>. match it to start swiping.
+      </p>
+      {isDusdc && stakedBlocked && (
+        <div className="bg-amber-500/5 border-amber-500/30 text-amber-600 rounded border-l-2 p-2 text-left text-xs">
+          <strong>Staked-tier setup required</strong>
+          <div className="mt-1 text-[11px] opacity-90">
+            {needsManager
+              ? "You don't have a PredictManager yet — every staked swipe bundles `predict::mint` against it. Go back to the lobby and complete step ① of the Staked-tier setup."
+              : "Your PredictManager has 0 dUSDC. Deposit some via the lobby's Staked-tier setup so each swipe can mint a Predict position."}
+          </div>
+        </div>
+      )}
+      <Button
+        size="lg"
+        onClick={join}
+        disabled={
+          isPending ||
+          plaintextMissing ||
+          plaintextQuery.isLoading ||
+          stakedBlocked
+        }
+        className="w-full"
+      >
+        {blockReason ?? `join · stake ${stake}`}
+      </Button>
+      {plaintextMissing && (
+        <p className="text-muted-foreground text-xs">
+          deckmaster lost this duel's plaintext (server restart). ask the
+          creator to re-create the duel.
+        </p>
+      )}
+      {err && (
+        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-left text-xs text-red-500">
+          {err}
+        </p>
       )}
     </div>
   )
 }
 
-function ResultView({ duel, address }: { duel: DuelState; address: string }) {
+// Threshold (px) past which a drag commits a swipe. Computed from card width
+// at drag start so it stays proportional across screen sizes.
+const DRAG_COMMIT_FRACTION = 0.3
+// Max rotation applied to the card during drag, in degrees per cardWidth/2 px.
+const DRAG_MAX_ROTATE_DEG = 18
+
+function SwipingView({
+  duel,
+  duelId,
+  oracle,
+  myNextIdx,
+  isCreator,
+  address,
+}: {
+  duel: DuelState
+  duelId: string
+  oracle: OracleSviInfo | undefined
+  myNextIdx: number
+  isCreator: boolean
+  address: string
+}) {
   const client = useSuiClient()
-  const youWon =
-    (duel.p0Score > duel.p1Score && duel.creator === address) ||
-    (duel.p1Score > duel.p0Score && duel.challenger === address)
-  const tied = duel.p0Score === duel.p1Score
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
+  const queryClient = useQueryClient()
+  const now = useNow(250)
+  const card = duel.cards[myNextIdx]
+  const baselineMs = Number(
+    isCreator ? duel.p0LastSwipeOrStartMs : duel.p1LastSwipeOrStartMs,
+  )
+  const elapsedMs = Math.max(0, now - baselineMs)
+  const timerMs = Math.max(0, SWIPE_PHASE_MS - elapsedMs)
+  const speed = speedMultiplier(elapsedMs)
+  const [err, setErr] = useState<string | null>(null)
 
-  // After finalize the stakes on the Duel object are zero. Pull the
-  // DuelFinalized + per-card CardSettled events so the result view can show
-  // accurate payouts and link to each on-chain tx for verification.
-  const eventsQ = useQuery({
-    queryKey: ["duel-events", duel.id],
-    queryFn: async () => {
-      const [finalized, settledCards, swiped] = await Promise.all([
-        client.queryEvents({
-          query: { MoveEventType: `${CONFIG.packageId}::duel::DuelFinalized` },
-          limit: 50,
-          order: "descending",
-        }),
-        client.queryEvents({
-          query: { MoveEventType: `${CONFIG.packageId}::duel::CardSettled` },
-          limit: 50,
-          order: "descending",
-        }),
-        client.queryEvents({
-          query: { MoveEventType: `${CONFIG.packageId}::duel::SwipeRecorded` },
-          limit: 100,
-          order: "descending",
-        }),
-      ])
-      const finalEv = finalized.data.find(
-        (e) => (e.parsedJson as { duel_id?: string })?.duel_id === duel.id,
-      )
-      const finalParsed = finalEv?.parsedJson as
-        | {
-            payout_to_p0: string
-            payout_to_p1: string
-            winner: string
-            p0_score: string
-            p1_score: string
+  // For dUSDC duels, look up the player's PredictManager. Per PRD
+  // §Match-anatomy step 2 every staked swipe is an atomic PTB combining
+  // `predict::mint` + `duel::record_swipe`, so the manager (and its
+  // dUSDC balance) is a hard prerequisite — the Lobby / JoinView gates
+  // enforce that, and SwipingView refuses to swipe if either ever falls
+  // back to null (defence in depth).
+  const isDusdc = duel.stakeCoinType === DEEPBOOK.dusdcType
+  const managerQuery = useQuery({
+    queryKey: ["predict-manager", address],
+    queryFn: () => findPredictManager(client, address),
+    enabled: isDusdc,
+    staleTime: 30_000,
+  })
+  const managerBalanceQuery = useQuery({
+    queryKey: ["predict-manager-balance", managerQuery.data?.id],
+    queryFn: () =>
+      managerQuery.data
+        ? getManagerDusdcBalance(client, managerQuery.data.id)
+        : Promise.resolve(0n),
+    enabled: isDusdc && !!managerQuery.data,
+    staleTime: 10_000,
+  })
+  // Quantity to mint per swipe — small relative to the duel stake so the
+  // manager doesn't drain across 5 cards. 10% of stake / 5 = 2% per card.
+  const mintQuantity = (duel.p0Stake * 2n) / 100n
+  const managerReady =
+    !isDusdc ||
+    (!!managerQuery.data && (managerBalanceQuery.data ?? 0n) >= mintQuantity)
+
+  // ── drag state ────────────────────────────────────────────────────────
+  const cardRef = useRef<HTMLDivElement>(null)
+  const dragStartX = useRef(0)
+  const cardWidth = useRef(0)
+  const [drag, setDrag] = useState<{
+    x: number
+    active: boolean
+    flying: null | "up" | "down"
+  }>({ x: 0, active: false, flying: null })
+
+  // Reset drag whenever we move to a new card (myNextIdx changes).
+  useEffect(() => {
+    setDrag({ x: 0, active: false, flying: null })
+    setErr(null)
+  }, [myNextIdx])
+
+  const swipe = useCallback(
+    async (isUp: boolean) => {
+      setErr(null)
+      try {
+        let tx
+        if (isDusdc) {
+          // Hard requirement: dUSDC duel ⇒ manager + balance ⇒ bundled
+          // mint. The Lobby + JoinView gates make this the steady-state
+          // truth; this branch only fires if state drifted (e.g. manager
+          // withdrew all dUSDC mid-duel).
+          if (!managerQuery.data) {
+            throw new Error("PredictManager missing — return to lobby to create one")
           }
-        | undefined
-
-      const settleByCard = new Map<
-        number,
-        {
-          digest: string
-          settlement: bigint
-          p0Score: bigint
-          p1Score: bigint
+          if ((managerBalanceQuery.data ?? 0n) < mintQuantity) {
+            throw new Error(
+              `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC.`,
+            )
+          }
+          if (!oracle) {
+            throw new Error("Oracle not loaded")
+          }
+          tx = buildStakedSwipeTx({
+            duelId,
+            oracleSviId: card.oracleId,
+            managerId: managerQuery.data.id,
+            oracleExpiry: oracle.expiry,
+            strike: card.strike,
+            isUp,
+            quantity: mintQuantity,
+            cardIdx: myNextIdx,
+          })
+        } else {
+          tx = buildSwipeTx(
+            duelId,
+            card.oracleId,
+            myNextIdx,
+            isUp,
+            duel.stakeCoinType,
+          )
         }
-      >()
-      for (const e of settledCards.data) {
-        const p = e.parsedJson as {
-          duel_id: string
-          card_idx: string
-          settlement_price: string
-          p0_card_score: string
-          p1_card_score: string
-        }
-        if (p.duel_id !== duel.id) continue
-        settleByCard.set(Number(p.card_idx), {
-          digest: e.id.txDigest,
-          settlement: BigInt(p.settlement_price),
-          p0Score: BigInt(p.p0_card_score),
-          p1Score: BigInt(p.p1_card_score),
+        await signAndExec({ transaction: tx })
+        queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+        queryClient.invalidateQueries({
+          queryKey: ["predict-manager-balance", managerQuery.data?.id],
         })
-      }
-
-      const swipesByCard = new Map<
-        string,
-        { digest: string; player: string }
-      >()
-      for (const e of swiped.data) {
-        const p = e.parsedJson as {
-          duel_id: string
-          card_idx: string
-          player: string
-        }
-        if (p.duel_id !== duel.id) continue
-        swipesByCard.set(`${p.card_idx}:${p.player}`, {
-          digest: e.id.txDigest,
-          player: p.player,
-        })
-      }
-
-      return {
-        finalize: finalEv
-          ? {
-              digest: finalEv.id.txDigest,
-              payoutP0: BigInt(finalParsed!.payout_to_p0),
-              payoutP1: BigInt(finalParsed!.payout_to_p1),
-              winner: finalParsed!.winner,
-            }
-          : null,
-        settleByCard,
-        swipesByCard,
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e))
+        setDrag({ x: 0, active: false, flying: null })
       }
     },
-  })
-  const finalizeQ = { data: eventsQ.data?.finalize ?? null }
+    [
+      duelId,
+      card.oracleId,
+      card.strike,
+      myNextIdx,
+      duel.stakeCoinType,
+      isDusdc,
+      managerQuery.data,
+      managerBalanceQuery.data,
+      oracle,
+      mintQuantity,
+      signAndExec,
+      queryClient,
+    ],
+  )
+
+  function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (isPending || drag.flying || !managerReady) return
+    cardWidth.current = cardRef.current?.offsetWidth ?? 320
+    dragStartX.current = e.clientX
+    setDrag({ x: 0, active: true, flying: null })
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  function onPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!drag.active) return
+    setDrag((d) => ({ ...d, x: e.clientX - dragStartX.current }))
+  }
+  function onPointerUp() {
+    if (!drag.active) return
+    const w = cardWidth.current || 320
+    const threshold = w * DRAG_COMMIT_FRACTION
+    if (drag.x > threshold) {
+      setDrag({ x: drag.x, active: false, flying: "up" })
+      swipe(true)
+    } else if (drag.x < -threshold) {
+      setDrag({ x: drag.x, active: false, flying: "down" })
+      swipe(false)
+    } else {
+      setDrag({ x: 0, active: false, flying: null })
+    }
+  }
+
+  // Visual transform during drag/flying.
+  const flyOff =
+    drag.flying === "up"
+      ? `translateX(150%) rotate(${DRAG_MAX_ROTATE_DEG + 6}deg)`
+      : drag.flying === "down"
+        ? `translateX(-150%) rotate(${-(DRAG_MAX_ROTATE_DEG + 6)}deg)`
+        : null
+  const w = cardWidth.current || 320
+  const rotate = (drag.x / (w / 2)) * DRAG_MAX_ROTATE_DEG
+  const transform =
+    flyOff ?? (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
+
+  const overlayProgress = Math.min(1, Math.abs(drag.x) / (w * DRAG_COMMIT_FRACTION))
+  const upOverlay = drag.x > 0 ? overlayProgress : 0
+  const downOverlay = drag.x < 0 ? overlayProgress : 0
+
+  const timerSec = Math.ceil(timerMs / 1000)
+  const timerPct = (timerMs / SWIPE_PHASE_MS) * 100
+  const speedColor =
+    speed.tone === "good"
+      ? "text-emerald-500"
+      : speed.tone === "warn"
+        ? "text-amber-500"
+        : "text-muted-foreground"
 
   return (
-    <div className="flex flex-col gap-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            {tied ? "Tie — stakes refunded" : youWon ? "You won!" : "You lost"}
-          </CardTitle>
-          {finalizeQ.data && (
-            <CardDescription>
-              Payouts: creator{" "}
-              {fmtStake(finalizeQ.data.payoutP0, duel.stakeCoinType)} ·
-              challenger{" "}
-              {fmtStake(finalizeQ.data.payoutP1, duel.stakeCoinType)}
-            </CardDescription>
+    <div className="space-y-4">
+      {/* phase header */}
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-muted-foreground">
+          card <strong className="text-foreground">{myNextIdx + 1}</strong>/5
+          {isDusdc && managerReady && (
+            <span
+              className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-500"
+              title={`mints ${fmtDusdc(mintQuantity)} per swipe into your PredictManager`}
+            >
+              + predict mint
+            </span>
           )}
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <div className="text-xs text-muted-foreground">
-                {shortAddr(duel.creator)} (creator)
-              </div>
-              <div className="font-mono font-medium">
-                {fmtScore(duel.p0Score)}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-muted-foreground">
-                {shortAddr(duel.challenger)} (challenger)
-              </div>
-              <div className="font-mono font-medium">
-                {fmtScore(duel.p1Score)}
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+        </span>
+        <span className={speedColor}>
+          {speed.label} {speed.tone === "good" && "⚡"}
+        </span>
+        <span
+          className="font-mono text-sm tabular-nums"
+          title="decide window for this card — resets after each swipe"
+        >
+          {timerSec}s
+        </span>
+      </div>
+      <div className="bg-muted h-1.5 overflow-hidden rounded-full">
+        <div
+          className="bg-primary h-full transition-all duration-300"
+          style={{ width: `${timerPct}%` }}
+        />
+      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Per-card breakdown</CardTitle>
-          <CardDescription>
-            Each row links to its on-chain `CardSettled` event tx so you can
-            verify the settlement price + per-card score directly on Sui
-            Explorer.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-1 font-mono text-xs">
-          <div className="grid grid-cols-7 gap-2 text-muted-foreground">
-            <div>#</div>
-            <div>strike</div>
-            <div>settle</div>
-            <div>creator</div>
-            <div className="text-right">score</div>
-            <div>challenger</div>
-            <div className="text-right">score</div>
-          </div>
-          {duel.cards.map((c, i) => {
-            const settle = duel.cardSettlements[i]
-            const p0 = duel.p0Swipes[i]
-            const p1 = duel.p1Swipes[i]
-            const settleEv = eventsQ.data?.settleByCard.get(i)
-            return (
-              <div key={i} className="grid grid-cols-7 gap-2">
-                <div>
-                  {settleEv ? (
-                    <ExplorerLink href={txUrl(settleEv.digest)}>{i}</ExplorerLink>
-                  ) : (
-                    i
-                  )}
-                </div>
-                <div>{fmtUsd(c.strike)}</div>
-                <div>{settle !== null ? fmtUsd(settle) : "—"}</div>
-                <div>{p0 ? (p0.isUp ? "UP " : "DOWN") : "—"}</div>
-                <div className="text-right">
-                  {settleEv ? fmtScore(settleEv.p0Score) : "—"}
-                </div>
-                <div>{p1 ? (p1.isUp ? "UP " : "DOWN") : "—"}</div>
-                <div className="text-right">
-                  {settleEv ? fmtScore(settleEv.p1Score) : "—"}
-                </div>
-              </div>
-            )
-          })}
-        </CardContent>
-      </Card>
+      {/* card container — touch-action: none disables browser scroll while dragging */}
+      <div className="relative select-none" style={{ touchAction: "none" }}>
+        <div
+          ref={cardRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          className={`bg-surface-1 border-hairline relative cursor-grab overflow-hidden rounded-xl border p-6 shadow-[0_1px_0_0_var(--surface-3)_inset,0_24px_64px_-32px_rgba(0,0,0,0.6)] active:cursor-grabbing ${drag.active ? "" : "transition-transform duration-300 ease-out"
+            } ${drag.flying ? "pointer-events-none" : ""}`}
+          style={{ transform, willChange: "transform" }}
+        >
+          {/* swipe-direction overlays — fade in with drag distance */}
+          <div
+            className="pointer-events-none absolute inset-0 rounded-xl bg-emerald-500/20"
+            style={{ opacity: upOverlay }}
+          />
+          <div
+            className="pointer-events-none absolute inset-0 rounded-xl bg-red-500/20"
+            style={{ opacity: downOverlay }}
+          />
+          {/* Direction badge that appears on whichever side is committing */}
+          {drag.x > 20 && (
+            <div className="absolute right-4 top-4 rotate-12 rounded border-2 border-emerald-500 px-2 py-0.5 text-lg font-black uppercase text-emerald-500">
+              ↑ UP
+            </div>
+          )}
+          {drag.x < -20 && (
+            <div className="absolute left-4 top-4 -rotate-12 rounded border-2 border-red-500 px-2 py-0.5 text-lg font-black uppercase text-red-500">
+              ↓ DOWN
+            </div>
+          )}
 
-      {finalizeQ.data && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">On-chain verification</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-1 text-xs">
-            <div>
-              Finalize tx:{" "}
-              <ExplorerLink href={txUrl(finalizeQ.data.digest)}>
-                {finalizeQ.data.digest.slice(0, 10)}…
-              </ExplorerLink>
-              {" — "}
-              winner address{" "}
-              {finalizeQ.data.winner ===
-              "0x0000000000000000000000000000000000000000000000000000000000000000" ? (
-                <span className="text-muted-foreground">(tie)</span>
-              ) : (
-                <ExplorerLink href={obj(finalizeQ.data.winner)}>
-                  {shortAddr(finalizeQ.data.winner)}
-                </ExplorerLink>
-              )}
+          <div className="text-ink-subtle text-[11px] font-medium uppercase tracking-[0.06em]">
+            BTC at expiry
+          </div>
+          <div className="mt-3 text-5xl font-semibold tabular-nums tracking-[-0.04em] sm:text-6xl">
+            {fmtUsd(card.strike)}
+          </div>
+          <div className="text-muted-foreground mt-2 text-sm tracking-[-0.01em]">
+            will BTC settle{" "}
+            <strong className="text-foreground font-semibold">above</strong> this strike?
+          </div>
+          {oracle && (
+            <div className="text-muted-foreground mt-4 flex justify-between border-t pt-3 text-xs">
+              <span>
+                now <strong className="text-foreground">{fmtUsd(oracle.spot)}</strong>
+              </span>
+              <span>
+                fwd <strong className="text-foreground">{fmtUsd(oracle.forward)}</strong>
+              </span>
+              <span>
+                {oracle.spot > card.strike ? (
+                  <span className="text-emerald-500">
+                    ↑ {fmtUsd(oracle.spot - card.strike)} above
+                  </span>
+                ) : (
+                  <span className="text-red-500">
+                    ↓ {fmtUsd(card.strike - oracle.spot)} below
+                  </span>
+                )}
+              </span>
             </div>
-            <div className="text-muted-foreground">
-              Duel object: <ExplorerLink href={obj(duel.id)}>{duel.id.slice(0, 10)}…</ExplorerLink>
-              {" · "}
-              Each card&apos;s strike & player swipe are signed individually
-              on-chain — click the # column above to see the per-card settle tx.
-            </div>
-          </CardContent>
-        </Card>
+          )}
+        </div>
+
+        {/* hint shown only on card 1 before any drag */}
+        {myNextIdx === 0 && drag.x === 0 && !drag.flying && (
+          <p className="text-muted-foreground mt-3 text-center text-xs">
+            ← swipe DOWN · swipe UP →
+          </p>
+        )}
+      </div>
+
+      {/* button fallback (a11y + non-touch) */}
+      <div className="grid grid-cols-2 gap-3">
+        <Button
+          variant="outline"
+          size="lg"
+          disabled={isPending || !!drag.flying || !managerReady}
+          onClick={() => {
+            setDrag({ x: -200, active: false, flying: "down" })
+            swipe(false)
+          }}
+          className="h-16 text-base"
+        >
+          <div className="flex flex-col">
+            <span>↓ DOWN</span>
+            <span className="text-muted-foreground text-xs font-normal">
+              ≤ {fmtUsd(card.strike)}
+            </span>
+          </div>
+        </Button>
+        <Button
+          size="lg"
+          disabled={isPending || !!drag.flying || !managerReady}
+          onClick={() => {
+            setDrag({ x: 200, active: false, flying: "up" })
+            swipe(true)
+          }}
+          className="h-16 text-base"
+        >
+          <div className="flex flex-col">
+            <span>↑ UP</span>
+            <span className="text-primary-foreground/80 text-xs font-normal">
+              &gt; {fmtUsd(card.strike)}
+            </span>
+          </div>
+        </Button>
+      </div>
+
+      {isDusdc && !managerReady && (
+        <p className="rounded border-l-2 border-amber-500 bg-amber-500/5 p-2 text-xs text-amber-600">
+          {managerQuery.data
+            ? `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC via the lobby setup.`
+            : "PredictManager not found. Return to the lobby and complete Staked-tier setup."}
+        </p>
+      )}
+
+      <p className="text-muted-foreground text-center text-xs">
+        decide fast: 0–5s = 1.5× · 5–20s = 1.0× · 20–60s = 0.75×
+      </p>
+
+      {err && (
+        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+          {err}
+        </p>
       )}
     </div>
   )
 }
 
 /**
- * DeepBook Predict setup status. Shows whether the connected wallet has a
- * `PredictManager` and how much dUSDC is in the wallet. The staked-tier
- * swipe PTB (predict::mint + record_swipe_deepbook) needs both before it
- * can succeed on-chain.
+ * Status is ACTIVE but deck hasn't been revealed yet — keeper races to
+ * call `reveal_deck` once it sees DuelJoined. Usually clears in 5–15 s.
+ * If it sticks (keeper down / unfunded), this view exposes a manual
+ * reveal: any address can call `reveal_deck` since the contract verifies
+ * sha2_256(bcs(cards)) == duel.deck_hash. We pull the plaintext from
+ * the deckmaster service by hash, then sign reveal from the current tab.
  */
-function PredictAccount({ address }: { address: string }) {
-  const client = useSuiClient()
-  const qc = useQueryClient()
-  const { mutateAsync: signAndExecute, isPending } = useSignAndExecuteTransaction()
+function RevealingView({
+  duelId,
+  deckHashHex,
+  stakeCoinType,
+}: {
+  duelId: string
+  deckHashHex: string
+  stakeCoinType: string
+}) {
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
+  const queryClient = useQueryClient()
+  const [err, setErr] = useState<string | null>(null)
 
-  const managerQ = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
-    refetchInterval: 10_000,
-  })
-  const walletQ = useQuery({
-    queryKey: ["dusdc-balance", address],
-    queryFn: () => getWalletDusdcBalance(client, address),
-    refetchInterval: 10_000,
-  })
-  const managerBalanceQ = useQuery({
-    queryKey: ["manager-balance", managerQ.data?.id],
-    queryFn: () => getManagerDusdcBalance(client, managerQ.data!.id),
-    enabled: !!managerQ.data,
-    refetchInterval: 10_000,
+  const plaintextQuery = useQuery<DeckCard[] | null>({
+    queryKey: ["deckmaster-reveal", deckHashHex],
+    queryFn: async () => {
+      const res = await fetch(
+        `${DECKMASTER_BASE_URL}/deckmaster/reveal?hash=${encodeURIComponent(deckHashHex)}`,
+      )
+      if (res.status === 404) return null
+      if (!res.ok) throw new Error(`reveal lookup failed: ${res.status}`)
+      const body = (await res.json()) as {
+        cards: Array<{ oracle_id: string; strike: string }>
+      }
+      return body.cards.map((c) => ({
+        oracleId: c.oracle_id,
+        strike: BigInt(c.strike),
+      }))
+    },
+    // Keep polling — keeper may still land first, in which case the
+    // duel object update will route us out of this view automatically.
+    refetchInterval: 4_000,
+    retry: false,
   })
 
-  async function handleCreate() {
-    const res = await signAndExecute({ transaction: buildCreateManagerTx() })
-    await client.waitForTransaction({ digest: res.digest })
-    qc.invalidateQueries({ queryKey: ["predict-manager", address] })
+  const cards = plaintextQuery.data ?? null
+
+  async function manualReveal() {
+    if (!cards) return
+    setErr(null)
+    try {
+      const tx = buildRevealDeckTx(duelId, cards, stakeCoinType)
+      await signAndExec({ transaction: tx })
+      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
   }
 
-  async function handleDeposit() {
-    const mgr = managerQ.data
-    if (!mgr) return
-    const all = walletQ.data ?? 0n
-    if (all === 0n) return
-    const tx = await buildDepositDusdcTx(client, address, mgr.id, all)
-    const res = await signAndExecute({ transaction: tx })
-    await client.waitForTransaction({ digest: res.digest })
-    qc.invalidateQueries({ queryKey: ["dusdc-balance", address] })
-    qc.invalidateQueries({ queryKey: ["manager-balance"] })
-  }
-
-  const hasManager = !!managerQ.data
-  const wallet = walletQ.data ?? 0n
-  const inManager = managerBalanceQ.data ?? 0n
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          DeepBook Predict
-          <Badge variant={hasManager ? "default" : "secondary"} className="text-[10px]">
-            {hasManager ? "READY" : "SETUP NEEDED"}
-          </Badge>
-        </CardTitle>
-        <CardDescription>
-          One-time setup so staked-tier swipes can co-mint real DeepBook
-          Predict positions alongside the in-game duel record.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        <div className="grid grid-cols-2 gap-3 text-xs">
-          <div className="rounded border p-2">
-            <div className="text-muted-foreground">PredictManager</div>
-            <div className="font-mono">
-              {managerQ.isLoading
-                ? "loading…"
-                : hasManager
-                  ? (
-                      <ExplorerLink href={obj(managerQ.data!.id)}>
-                        {managerQ.data!.id.slice(0, 10)}…
-                      </ExplorerLink>
-                    )
-                  : "—"}
-            </div>
-          </div>
-          <div className="rounded border p-2">
-            <div className="text-muted-foreground">Wallet dUSDC</div>
-            <div className="font-mono">{fmtDusdc(wallet)}</div>
-          </div>
-          <div className="rounded border p-2 col-span-2">
-            <div className="text-muted-foreground">In PredictManager</div>
-            <div className="font-mono">
-              {hasManager ? fmtDusdc(inManager) : "—"}{" "}
-              <span className="text-[10px] text-muted-foreground">
-                (used as duel stake when currency = dUSDC)
-              </span>
-            </div>
-          </div>
+    <div className="space-y-4 py-8 text-center">
+      <div className="flex justify-center">
+        <span className="border-primary inline-block h-10 w-10 animate-spin rounded-full border-4 border-t-transparent" />
+      </div>
+      <p className="text-lg font-semibold tracking-[-0.01em]">revealing deck…</p>
+      <p className="text-muted-foreground text-sm">
+        the keeper pushes the plaintext on-chain once the challenger joins.
+        usually clears within a few seconds.
+      </p>
+      {cards && (
+        <div className="space-y-2 pt-2">
+          <p className="text-muted-foreground text-xs">
+            keeper looks slow — you can reveal manually.
+          </p>
+          <Button onClick={manualReveal} disabled={isPending} size="sm">
+            {isPending ? "revealing…" : "reveal now"}
+          </Button>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {!hasManager ? (
-            <Button onClick={handleCreate} disabled={isPending}>
-              {isPending ? "creating…" : "Setup PredictManager"}
-            </Button>
-          ) : (
-            <Button
-              onClick={handleDeposit}
-              disabled={isPending || wallet === 0n}
-              variant="outline"
-            >
-              {isPending ? "depositing…" : `Deposit ${fmtDusdc(wallet)} into manager`}
-            </Button>
+      )}
+      {err && (
+        <p className="text-destructive text-xs break-all" role="alert">
+          {err}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function LockupView({
+  myNextIdx,
+  opponentNextIdx,
+}: {
+  myNextIdx: number
+  opponentNextIdx: number
+}) {
+  const allSwiped = myNextIdx === 5 && opponentNextIdx === 5
+  return (
+    <div className="space-y-4 py-6 text-center">
+      <Badge variant="outline">lockup phase</Badge>
+      <p className="text-2xl">🔒</p>
+      <p className="text-lg">
+        {allSwiped
+          ? "watching the oracle tick toward settlement…"
+          : "waiting for opponent to finish swiping…"}
+      </p>
+      <p className="text-muted-foreground text-sm">
+        swipes are locked. the deck settles when BTC's oracle resolves.
+      </p>
+      <div className="text-muted-foreground flex justify-center gap-6 pt-2 text-xs">
+        <span>
+          you <strong className="text-foreground">{myNextIdx}</strong>/5
+        </span>
+        <span>
+          opponent <strong className="text-foreground">{opponentNextIdx}</strong>/5
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
+  const { mutateAsync: signAndExec, isPending } = useFlickySign()
+  const queryClient = useQueryClient()
+  const [err, setErr] = useState<string | null>(null)
+  const [digest, setDigest] = useState<string | null>(null)
+
+  async function settle() {
+    setErr(null)
+    try {
+      const tx = buildSettleAndFinalizeTx(duelId, duel.cards, duel.stakeCoinType)
+      const res = await signAndExec({ transaction: tx })
+      setDigest(res.digest)
+      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <div className="space-y-4 py-6 text-center">
+      <Badge variant="default">oracle settled</Badge>
+      <p className="text-lg">paying out…</p>
+      <p className="text-muted-foreground text-sm">
+        the keeper auto-closes settled duels — payouts appear within ~10s.
+      </p>
+      <details className="text-muted-foreground mx-auto max-w-sm text-left text-xs">
+        <summary className="cursor-pointer text-center underline-offset-2 hover:underline">
+          impatient? settle manually
+        </summary>
+        <div className="mt-3 space-y-2">
+          <Button size="sm" onClick={settle} disabled={isPending} className="w-full">
+            settle + finalize
+          </Button>
+          {digest && (
+            <p>
+              tx <ExplorerLink href={txExplorerUrl(digest)}>{shortId(digest)}</ExplorerLink>
+            </p>
+          )}
+          {err && (
+            <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-red-500">
+              {err}
+            </p>
           )}
         </div>
-        {hasManager && wallet === 0n && (
-          <p className="text-xs text-muted-foreground">
-            No dUSDC in wallet. Testnet dUSDC has no public faucet; you need
-            an existing source to top up before staked swipes work.
-          </p>
-        )}
-      </CardContent>
-    </Card>
+      </details>
+    </div>
+  )
+}
+
+function ResultView({ duel, address }: { duel: DuelState; address: string }) {
+  const isCreator = duel.creator === address
+  const myScore = isCreator ? duel.p0Score : duel.p1Score
+  const oppScore = isCreator ? duel.p1Score : duel.p0Score
+  const tie = duel.p0Score === duel.p1Score
+  const won = !tie && myScore > oppScore
+  const lost = !tie && myScore < oppScore
+
+  const total = duel.p0Stake + duel.p1Stake
+  const myPayout = won ? total : tie ? (isCreator ? duel.p0Stake : duel.p1Stake) : 0n
+
+  const banner = won
+    ? { emoji: "🏆", text: "you won", tone: "text-emerald-500" }
+    : lost
+      ? { emoji: "💀", text: "you lost", tone: "text-red-500" }
+      : { emoji: "🤝", text: "tie", tone: "text-amber-500" }
+
+  // Per-card outcome — needs the strike + settlement + your swipe
+  const myCards = useMemo(() => {
+    const swipes = isCreator ? duel.p0Swipes : duel.p1Swipes
+    return duel.cards.map((c, i) => {
+      const swipe = swipes[i]
+      const settle = duel.cardSettlements[i]
+      const actualUp = settle !== null && settle > c.strike
+      const correct = swipe !== null && actualUp === swipe.isUp
+      return { card: c, swipe, settle, actualUp, correct }
+    })
+  }, [duel, isCreator])
+
+  // Share-card: snapshot of the captureRef'd div as a PNG download.
+  const captureRef = useRef<HTMLDivElement>(null)
+  const [sharing, setSharing] = useState(false)
+  async function shareCard() {
+    if (!captureRef.current) return
+    setSharing(true)
+    try {
+      const { toPng } = await import("html-to-image")
+      const dataUrl = await toPng(captureRef.current, {
+        pixelRatio: 2,
+        backgroundColor: getComputedStyle(document.body).backgroundColor || "#000",
+        cacheBust: true,
+      })
+      const a = document.createElement("a")
+      a.href = dataUrl
+      a.download = `flicky-${won ? "won" : tie ? "tie" : "lost"}-${duel.id.slice(2, 10)}.png`
+      a.click()
+    } catch (e) {
+      console.error("share-card", e)
+    } finally {
+      setSharing(false)
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <div ref={captureRef} className="bg-card space-y-5 rounded-lg p-2">
+        <div className="space-y-2 py-6 text-center">
+          <div className="text-6xl">{banner.emoji}</div>
+          <div className={`text-3xl font-semibold uppercase tracking-[-0.02em] ${banner.tone}`}>
+            {banner.text}
+          </div>
+          {myPayout > 0n && (
+            <div className="text-muted-foreground text-sm">
+              payout{" "}
+              <strong className="text-foreground">
+                {fmtStake(myPayout, duel.stakeCoinType)}
+              </strong>
+            </div>
+          )}
+        </div>
+
+        <Separator />
+
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div className="bg-muted/40 rounded p-3">
+            <div className="text-muted-foreground text-xs">your score</div>
+            <div className="text-2xl font-semibold tabular-nums">
+              {(Number(myScore) / 1e9).toFixed(2)}
+            </div>
+          </div>
+          <div className="bg-muted/40 rounded p-3">
+            <div className="text-muted-foreground text-xs">opponent</div>
+            <div className="text-2xl font-semibold tabular-nums">
+              {(Number(oppScore) / 1e9).toFixed(2)}
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-muted-foreground mb-2 text-xs uppercase tracking-wide">
+            cards
+          </h3>
+          <div className="space-y-1.5">
+            {myCards.map((m, i) => (
+              <div
+                key={i}
+                className="bg-muted/30 flex items-center justify-between rounded p-2 text-sm"
+              >
+                <div>
+                  <span className="text-muted-foreground">card {i + 1} · </span>
+                  <span className="tabular-nums">{fmtUsd(m.card.strike)}</span>
+                </div>
+                <div className="flex items-center gap-3 text-xs">
+                  {m.swipe ? (
+                    <span className="text-muted-foreground">
+                      you {m.swipe.isUp ? "↑" : "↓"}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground italic">no swipe</span>
+                  )}
+                  <span>
+                    settled{" "}
+                    <strong>
+                      {m.settle !== null ? (m.actualUp ? "↑" : "↓") : "—"}
+                    </strong>
+                  </span>
+                  <Badge
+                    variant={
+                      !m.swipe ? "outline" : m.correct ? "default" : "secondary"
+                    }
+                    className={
+                      !m.swipe
+                        ? "text-ink-subtle"
+                        : m.correct
+                          ? "bg-emerald-500/20 text-emerald-500"
+                          : "bg-red-500/15 text-red-400"
+                    }
+                  >
+                    {!m.swipe ? "—" : m.correct ? "✓" : "✗"}
+                  </Badge>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={sharing}
+        onClick={shareCard}
+        className="w-full"
+      >
+        {sharing ? "rendering…" : "↓ share-card (PNG)"}
+      </Button>
+    </div>
+  )
+}
+
+function SpectatorView({ duel }: { duel: DuelState }) {
+  return (
+    <div className="space-y-3 py-4 text-center">
+      <Badge variant="secondary">spectating</Badge>
+      <p className="text-muted-foreground text-sm">
+        you're not a player in this duel. pot{" "}
+        {fmtStake(duel.p0Stake + duel.p1Stake, duel.stakeCoinType)}.
+      </p>
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="bg-muted/40 rounded p-3">
+          <div className="text-muted-foreground text-xs">creator</div>
+          <div className="font-semibold">
+            {(Number(duel.p0Score) / 1e9).toFixed(2)}
+          </div>
+        </div>
+        <div className="bg-muted/40 rounded p-3">
+          <div className="text-muted-foreground text-xs">challenger</div>
+          <div className="font-semibold">
+            {(Number(duel.p1Score) / 1e9).toFixed(2)}
+          </div>
+        </div>
+      </div>
+      <p className="text-muted-foreground text-xs">
+        swipes {Number(duel.p0NextCardIdx)}/5 · {Number(duel.p1NextCardIdx)}/5 · settled{" "}
+        {duel.settledCount.toString()}/5
+      </p>
+    </div>
   )
 }

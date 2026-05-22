@@ -1,35 +1,35 @@
 /**
- * Read + write helpers for flicky::oracle and flicky::duel. Mirrors the
- * server-side lib in shape but uses dapp-kit's signing surface.
+ * Web-side helpers for the flicky duel flow. Thin wrappers around generated
+ * codegen bindings + JSON parsers for shared-object reads.
+ *
+ * Every duel references a DeepBook `OracleSVI` directly — there's no
+ * FlickyOracle path anymore. Staked swipes (predict::mint + record_swipe in
+ * one PTB) live in `./deepbook.ts`.
  */
 import { Transaction } from "@mysten/sui/transactions"
-import type { SuiClient, SuiObjectResponse } from "@mysten/sui/client"
-import { SUI_CLOCK_OBJECT_ID, normalizeSuiObjectId } from "@mysten/sui/utils"
+import type { SuiJsonRpcClient, SuiObjectResponse } from "@mysten/sui/jsonRpc"
 import { bcs } from "@mysten/sui/bcs"
+import { normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
+
+type SuiClient = SuiJsonRpcClient
+
+import * as duelGen from "@/sui/gen/flicky/duel"
 import { CONFIG } from "./config"
 
 const { packageId, deepbookPredictPackageId } = CONFIG
 
-/** Set of oracle IDs whose cards must use the DeepBook variant PTBs. */
-const DEEPBOOK_ORACLE_IDS = new Set<string>([CONFIG.fallbackDeepbookOracleId])
+// === Types ===
 
-/** Treat any oracle id matching a known DeepBook OracleSVI as DeepBook-backed. */
-export function isDeepbookOracle(oracleId: string): boolean {
-  return DEEPBOOK_ORACLE_IDS.has(normalizeSuiObjectId(oracleId))
-}
+// Sub-shapes of DuelState. Kept as named internal aliases for readability;
+// reachable externally via the structural shape of `DuelState` itself.
+type DuelStatus = "PENDING" | "ACTIVE" | "COMPLETE"
 
-export function registerDeepbookOracle(id: string): void {
-  DEEPBOOK_ORACLE_IDS.add(normalizeSuiObjectId(id))
-}
-
-export type DuelStatus = "PENDING" | "ACTIVE" | "COMPLETE"
-
-export interface DuelCard {
+interface DuelCard {
   oracleId: string
   strike: bigint
 }
 
-export interface DuelSwipe {
+interface DuelSwipe {
   isUp: boolean
   pSwiped: bigint
   decideTimeMs: bigint
@@ -42,6 +42,10 @@ export interface DuelState {
   status: DuelStatus
   creator: string
   challenger: string
+  /** sha2-256 commitment over the deck, "0x"-prefixed lowercase hex.
+   *  Used to fetch plaintext from `/deckmaster/reveal?hash=…` for the
+   *  client-side reveal fallback. */
+  deckHashHex: string
   cards: DuelCard[]
   p0Stake: bigint
   p1Stake: bigint
@@ -51,6 +55,10 @@ export interface DuelState {
   p1NextCardIdx: bigint
   settledCount: bigint
   startedAtMs: bigint
+  /** Baseline for the NEXT swipe's decide-time clock — last swipe time
+   *  for that player, or `startedAtMs` if no swipes yet. */
+  p0LastSwipeOrStartMs: bigint
+  p1LastSwipeOrStartMs: bigint
   p0Swipes: (DuelSwipe | null)[]
   p1Swipes: (DuelSwipe | null)[]
   cardSettlements: (bigint | null)[]
@@ -62,198 +70,245 @@ const STATUS_MAP: Record<string, DuelStatus> = {
   "3": "COMPLETE",
 }
 
+// === Deck commit-reveal helpers ===
+
+export interface DeckCard {
+  oracleId: string
+  strike: bigint
+}
+
+/**
+ * BCS schema matching the on-chain `flicky::duel::Card` layout
+ * (`oracle_id: ID, strike: u64`). The vector serialization + sha2-256
+ * here must reproduce what `bcs::to_bytes(&cards)` + `hash::sha2_256`
+ * produce in Move — see `apps/contracts/sources/duel.move::reveal_deck`.
+ */
+const CardBcs = bcs.struct("Card", {
+  oracle_id: bcs.Address,
+  strike: bcs.u64(),
+})
+const DeckBcs = bcs.vector(CardBcs)
+
+function serializeDeck(cards: DeckCard[]): Uint8Array {
+  return DeckBcs.serialize(
+    cards.map((c) => ({
+      oracle_id: normalizeSuiAddress(c.oracleId),
+      strike: c.strike.toString(),
+    })),
+  ).toBytes()
+}
+
+/** SHA-256 of the BCS-encoded deck. Used as `deck_hash` in create_duel. */
+export async function computeDeckHash(cards: DeckCard[]): Promise<Uint8Array> {
+  const bytes = serializeDeck(cards)
+  // Wrap into a fresh ArrayBuffer so TS doesn't complain about the
+  // SharedArrayBuffer-vs-ArrayBuffer type widening on Uint8Array.
+  const buf = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(buf).set(bytes)
+  const digest = await crypto.subtle.digest("SHA-256", buf)
+  return new Uint8Array(digest)
+}
+
 // === PTB builders ===
 //
-// Coin source: each builder either pulls the stake from the gas wallet
-// (`tx.gas`) for SUI duels, or from a player's PredictManager via
-// `predict_manager::withdraw<T>` for dUSDC duels. When `managerSource` is
-// provided we always use the manager path; the manager is owner-gated, so
-// the PTB must be signed by the manager owner.
+// The free-tier flow uses gas-paid SUI as stake. The staked-tier flow uses
+// dUSDC from a PredictManager and additionally bundles a `predict::mint`
+// call per swipe — see `./deepbook.ts` for that.
 
-interface ManagerSource {
-  /** PredictManager owned by the caller. */
-  managerId: string
-  /** DeepBook Predict package — owner of `predict_manager::withdraw`. */
-  predictPackage: string
-}
-
-function takeStakeCoin(
-  tx: Transaction,
-  amount: bigint,
-  stakeCoinType: string,
-  source: ManagerSource | null,
-) {
-  if (source) {
-    return tx.moveCall({
-      target: `${source.predictPackage}::predict_manager::withdraw`,
-      typeArguments: [stakeCoinType],
-      arguments: [tx.object(source.managerId), tx.pure.u64(amount)],
-    })
-  }
-  const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(amount)])
-  return coin
-}
-
+/**
+ * Create a duel by committing the deck's sha2-256 hash. The plaintext
+ * stays off-chain until `buildRevealDeckTx` runs after the challenger
+ * joins. Anti-front-run guarantee.
+ */
 export function buildCreateDuelTx(
-  oracleId: string,
-  strikes: bigint[],
+  deckHash: Uint8Array,
   stakeAmount: bigint,
-  stakeCoinType: string,
-  source: ManagerSource | null = null,
+  stakeCoinType: string = CONFIG.stakeType,
 ): Transaction {
-  if (strikes.length !== 5) throw new Error("must be 5 strikes")
+  if (deckHash.length !== 32) throw new Error("deck hash must be 32 bytes (sha-256)")
+
   const tx = new Transaction()
-  const stake = takeStakeCoin(tx, stakeAmount, stakeCoinType, source)
-  const cards = strikes.map((strike) =>
-    tx.moveCall({
-      target: `${packageId}::duel::new_card`,
-      arguments: [tx.object(oracleId), tx.pure.u64(strike)],
+  const [stake] = tx.splitCoins(tx.gas, [tx.pure.u64(stakeAmount)])
+
+  tx.add(
+    duelGen.createDuel({
+      package: packageId,
+      arguments: [stake, tx.pure.vector("u8", Array.from(deckHash))],
+      typeArguments: [stakeCoinType],
     }),
   )
-  tx.moveCall({
-    target: `${packageId}::duel::create_duel`,
-    typeArguments: [stakeCoinType],
-    arguments: [
-      stake,
-      tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cards }),
-    ],
-  })
   return tx
 }
 
-export function buildJoinDuelTx(
+/**
+ * Reveal the previously-committed deck. Permissionless — any address can
+ * call. Contract verifies sha2_256(bcs(cards)) == duel.deck_hash.
+ */
+export function buildRevealDeckTx(
+  duelId: string,
+  cards: DeckCard[],
+  stakeCoinType: string = CONFIG.stakeType,
+): Transaction {
+  if (cards.length !== 5) throw new Error("must reveal exactly 5 cards")
+  const tx = new Transaction()
+
+  const cardArgs = cards.map((c) =>
+    tx.add(
+      duelGen.newCard({
+        package: packageId,
+        arguments: [c.oracleId, c.strike],
+      }),
+    ),
+  )
+  tx.add(
+    duelGen.revealDeck({
+      package: packageId,
+      arguments: [
+        duelId,
+        tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cardArgs }),
+      ],
+      typeArguments: [stakeCoinType],
+    }),
+  )
+  return tx
+}
+
+/**
+ * Source `amount` of `coinType` from the owner's coin objects: merge them
+ * all into the first coin then split off `amount`. Used for create / join
+ * paths when the stake isn't SUI (we can't `splitCoins(tx.gas)` for a
+ * non-gas coin).
+ */
+async function takeCoinFromOwner(
+  client: SuiClient,
+  tx: Transaction,
+  owner: string,
+  coinType: string,
+  amount: bigint,
+) {
+  const coins = await client.getCoins({ owner, coinType })
+  if (coins.data.length === 0) {
+    throw new Error(`no ${coinType} coins in wallet ${owner}`)
+  }
+  const [primary, ...rest] = coins.data.map((c) => tx.object(c.coinObjectId))
+  if (rest.length > 0) tx.mergeCoins(primary, rest)
+  const [taken] = tx.splitCoins(primary, [tx.pure.u64(amount)])
+  return taken
+}
+
+/**
+ * Staked-tier create: same as `buildCreateDuelTx` but the stake is
+ * sourced from the owner's `stakeCoinType` coin objects (e.g. dUSDC)
+ * instead of split off `tx.gas`. PRD §Staked tier.
+ */
+export async function buildCreateDuelDusdcTx(
+  client: SuiClient,
+  owner: string,
+  deckHash: Uint8Array,
+  stakeAmount: bigint,
+  stakeCoinType: string,
+): Promise<Transaction> {
+  if (deckHash.length !== 32) throw new Error("deck hash must be 32 bytes (sha-256)")
+  const tx = new Transaction()
+  const stake = await takeCoinFromOwner(client, tx, owner, stakeCoinType, stakeAmount)
+  tx.add(
+    duelGen.createDuel({
+      package: packageId,
+      arguments: [stake, tx.pure.vector("u8", Array.from(deckHash))],
+      typeArguments: [stakeCoinType],
+    }),
+  )
+  return tx
+}
+
+/** Staked-tier join — same difference as buildCreateDuelDusdcTx. */
+export async function buildJoinDuelDusdcTx(
+  client: SuiClient,
+  owner: string,
   duelId: string,
   stakeAmount: bigint,
   stakeCoinType: string,
-  source: ManagerSource | null = null,
-): Transaction {
+): Promise<Transaction> {
   const tx = new Transaction()
-  const stake = takeStakeCoin(tx, stakeAmount, stakeCoinType, source)
-  tx.moveCall({
-    target: `${packageId}::duel::join_duel`,
-    typeArguments: [stakeCoinType],
-    arguments: [tx.object(duelId), stake, tx.object(SUI_CLOCK_OBJECT_ID)],
-  })
+  const stake = await takeCoinFromOwner(client, tx, owner, stakeCoinType, stakeAmount)
+  tx.add(
+    duelGen.joinDuel({
+      package: packageId,
+      arguments: [duelId, stake],
+      typeArguments: [stakeCoinType],
+    }),
+  )
   return tx
 }
 
+/** Challenger joins an existing PENDING duel, matching the creator's stake. */
+export function buildJoinDuelTx(
+  duelId: string,
+  stakeAmount: bigint,
+  stakeCoinType: string = CONFIG.stakeType,
+): Transaction {
+  const tx = new Transaction()
+  const [stake] = tx.splitCoins(tx.gas, [tx.pure.u64(stakeAmount)])
+
+  tx.add(
+    duelGen.joinDuel({
+      package: packageId,
+      // Clock arg is auto-injected by codegen.
+      arguments: [duelId, stake],
+      typeArguments: [stakeCoinType],
+    }),
+  )
+  return tx
+}
+
+/** Record a single swipe on the next card in the player's sequence. */
 export function buildSwipeTx(
   duelId: string,
   oracleId: string,
   cardIdx: number,
   isUp: boolean,
-  stakeCoinType: string,
+  stakeCoinType: string = CONFIG.stakeType,
 ): Transaction {
   const tx = new Transaction()
-  tx.moveCall({
-    target: `${packageId}::duel::record_swipe`,
-    typeArguments: [stakeCoinType],
-    arguments: [
-      tx.object(duelId),
-      tx.object(oracleId),
-      tx.pure.u64(BigInt(cardIdx)),
-      tx.pure.bool(isUp),
-      tx.object(SUI_CLOCK_OBJECT_ID),
-    ],
-  })
-  return tx
-}
-
-export function buildSettleAndFinalizeTx(
-  duelId: string,
-  oracleId: string,
-  stakeCoinType: string,
-): Transaction {
-  const tx = new Transaction()
-  for (let i = 0; i < 5; i++) {
-    tx.moveCall({
-      target: `${packageId}::duel::settle_card`,
+  tx.add(
+    duelGen.recordSwipe({
+      package: packageId,
+      arguments: [duelId, oracleId, cardIdx, isUp],
       typeArguments: [stakeCoinType],
-      arguments: [tx.object(duelId), tx.object(oracleId), tx.pure.u64(BigInt(i))],
-    })
-  }
-  tx.moveCall({
-    target: `${packageId}::duel::finalize`,
-    typeArguments: [stakeCoinType],
-    arguments: [tx.object(duelId)],
-  })
-  return tx
-}
-
-// === DeepBook-backed variants ===
-//
-// Same lifecycle (create → swipe × 5 → settle → finalize) but each Move call
-// targets the *_deepbook entrypoint, which reads spot/forward/settlement_price
-// from DeepBook's real on-chain `OracleSVI`. The strikes still live on the
-// Card; flicky::duel doesn't care which oracle implementation backs them.
-
-export function buildCreateDuelDeepbookTx(
-  oracleId: string,
-  strikes: bigint[],
-  stakeAmount: bigint,
-  stakeCoinType: string,
-  source: ManagerSource | null = null,
-): Transaction {
-  if (strikes.length !== 5) throw new Error("must be 5 strikes")
-  const tx = new Transaction()
-  const stake = takeStakeCoin(tx, stakeAmount, stakeCoinType, source)
-  const cards = strikes.map((strike) =>
-    tx.moveCall({
-      target: `${packageId}::duel::new_card_deepbook`,
-      arguments: [tx.object(oracleId), tx.pure.u64(strike)],
     }),
   )
-  tx.moveCall({
-    target: `${packageId}::duel::create_duel`,
-    typeArguments: [stakeCoinType],
-    arguments: [
-      stake,
-      tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cards }),
-    ],
-  })
   return tx
 }
 
-export function buildSwipeDeepbookTx(
+/**
+ * Settle all 5 cards + finalize payout in a single PTB. Pass the deck's
+ * cards array (not just one oracleId) so each `settle_card` reads the
+ * settlement price from its own card's oracle — decks may span multiple
+ * oracles even though today's Deckmaster picks one.
+ */
+export function buildSettleAndFinalizeTx(
   duelId: string,
-  oracleId: string,
-  cardIdx: number,
-  isUp: boolean,
-  stakeCoinType: string,
+  cards: DuelCard[],
+  stakeCoinType: string = CONFIG.stakeType,
 ): Transaction {
-  const tx = new Transaction()
-  tx.moveCall({
-    target: `${packageId}::duel::record_swipe_deepbook`,
-    typeArguments: [stakeCoinType],
-    arguments: [
-      tx.object(duelId),
-      tx.object(oracleId),
-      tx.pure.u64(BigInt(cardIdx)),
-      tx.pure.bool(isUp),
-      tx.object(SUI_CLOCK_OBJECT_ID),
-    ],
-  })
-  return tx
-}
-
-export function buildSettleAndFinalizeDeepbookTx(
-  duelId: string,
-  oracleId: string,
-  stakeCoinType: string,
-): Transaction {
+  if (cards.length !== 5) throw new Error("expected 5 cards to settle")
   const tx = new Transaction()
   for (let i = 0; i < 5; i++) {
-    tx.moveCall({
-      target: `${packageId}::duel::settle_card_deepbook`,
-      typeArguments: [stakeCoinType],
-      arguments: [tx.object(duelId), tx.object(oracleId), tx.pure.u64(BigInt(i))],
-    })
+    tx.add(
+      duelGen.settleCard({
+        package: packageId,
+        arguments: [duelId, cards[i].oracleId, i],
+        typeArguments: [stakeCoinType],
+      }),
+    )
   }
-  tx.moveCall({
-    target: `${packageId}::duel::finalize`,
-    typeArguments: [stakeCoinType],
-    arguments: [tx.object(duelId)],
-  })
+  tx.add(
+    duelGen.finalize({
+      package: packageId,
+      arguments: [duelId],
+      typeArguments: [stakeCoinType],
+    }),
+  )
   return tx
 }
 
@@ -267,6 +322,7 @@ interface MoveFieldWrapper<T> {
 interface RawDuelFields {
   id: { id: string }
   status: string | number
+  deck_hash: number[] | string
   cards: Array<MoveFieldWrapper<{ oracle_id: string; strike: string }>>
   creator: string
   challenger: string
@@ -318,13 +374,22 @@ export function parseDuel(obj: SuiObjectResponse): DuelState {
   // Extract the duel's stake coin type from the object type string.
   // e.g. "0xpkg::duel::Duel<0x2::sui::SUI>"  →  "0x2::sui::SUI"
   const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
-  const stakeCoinType = typeMatch?.[1] ?? "0x2::sui::SUI"
+  const stakeCoinType = typeMatch?.[1] ?? CONFIG.stakeType
+  // Sui RPC returns vector<u8> either as number[] or a hex string.
+  const deckHashHex =
+    typeof fields.deck_hash === "string"
+      ? fields.deck_hash.toLowerCase().startsWith("0x")
+        ? fields.deck_hash.toLowerCase()
+        : "0x" + fields.deck_hash.toLowerCase()
+      : "0x" +
+        fields.deck_hash.map((b) => b.toString(16).padStart(2, "0")).join("")
   return {
     id: normalizeSuiObjectId(fields.id.id),
     stakeCoinType,
     status: STATUS_MAP[String(fields.status)] ?? "PENDING",
     creator: fields.creator,
     challenger: fields.challenger,
+    deckHashHex,
     cards,
     p0Stake: balanceValue(fields.p0_stake),
     p1Stake: balanceValue(fields.p1_stake),
@@ -334,6 +399,8 @@ export function parseDuel(obj: SuiObjectResponse): DuelState {
     p1NextCardIdx: BigInt(fields.p1_next_card_idx),
     settledCount: BigInt(fields.settled_count),
     startedAtMs: BigInt(fields.started_at_ms),
+    p0LastSwipeOrStartMs: BigInt(fields.p0_last_swipe_or_start_ms),
+    p1LastSwipeOrStartMs: BigInt(fields.p1_last_swipe_or_start_ms),
     p0Swipes: fields.p0_swipes.map(parseSwipe),
     p1Swipes: fields.p1_swipes.map(parseSwipe),
     cardSettlements: fields.card_settlements.map((s) =>
@@ -357,7 +424,10 @@ export async function fetchDuel(
  * Discover all duels by querying DuelCreated events. Filters for the
  * configured package + stake type and returns most-recent-first.
  */
-export async function listDuelIds(client: SuiClient, limit = 50): Promise<string[]> {
+export async function listDuelIds(
+  client: SuiClient,
+  limit = 50,
+): Promise<string[]> {
   const events = await client.queryEvents({
     query: { MoveEventType: `${packageId}::duel::DuelCreated` },
     limit,
@@ -369,71 +439,31 @@ export async function listDuelIds(client: SuiClient, limit = 50): Promise<string
   })
 }
 
-export async function impliedProbabilityUp(
-  client: SuiClient,
-  oracleId: string,
-  strike: bigint,
-): Promise<bigint> {
-  const tx = new Transaction()
-  tx.moveCall({
-    target: `${packageId}::oracle::implied_probability_up`,
-    arguments: [
-      tx.object(oracleId),
-      tx.pure.u64(strike),
-      tx.object(SUI_CLOCK_OBJECT_ID),
-    ],
-  })
-  const res = await client.devInspectTransactionBlock({
-    sender: "0x0000000000000000000000000000000000000000000000000000000000000000",
-    transactionBlock: tx,
-  })
-  const ret = res.results?.[0]?.returnValues?.[0]
-  if (!ret) throw new Error("no return value")
-  return BigInt(bcs.U64.parse(Uint8Array.from(ret[0])))
-}
+// === DeepBook OracleSVI reads + discovery ===
 
-export async function fetchOracleSpot(
-  client: SuiClient,
-  oracleId: string,
-): Promise<{ spot: bigint; expiry: bigint; isSettled: boolean }> {
-  const obj = await client.getObject({
-    id: oracleId,
-    options: { showContent: true },
-  })
-  if (obj.data?.content?.dataType !== "moveObject") {
-    throw new Error("oracle not a Move object")
-  }
-  const fields = obj.data.content.fields as Record<string, unknown>
-  const price = (fields.price as { fields: { spot: string } }).fields
-  return {
-    spot: BigInt(price.spot),
-    expiry: BigInt(String(fields.expiry)),
-    isSettled: fields.settlement !== null,
-  }
-}
-
-/**
- * Read state for a DeepBook `OracleSVI` (`deepbook_predict::oracle`). The
- * field layout differs from FlickyOracle: `prices` is a flat struct and
- * `settlement_price` is an `Option<u64>` at the top level.
- */
-export async function fetchDeepbookOracle(
-  client: SuiClient,
-  oracleId: string,
-): Promise<{
+export interface OracleSviInfo {
   id: string
   spot: bigint
   forward: bigint
   expiry: bigint
   isActive: boolean
   settlementPrice: bigint | null
-}> {
+}
+
+/**
+ * Read state for a DeepBook `OracleSVI` — flat `prices` struct +
+ * `settlement_price: Option<u64>` at the top level.
+ */
+export async function fetchOracleSvi(
+  client: SuiClient,
+  oracleId: string,
+): Promise<OracleSviInfo> {
   const obj = await client.getObject({
     id: oracleId,
     options: { showContent: true },
   })
   if (obj.data?.content?.dataType !== "moveObject") {
-    throw new Error("DeepBook oracle not found")
+    throw new Error("OracleSVI not found")
   }
   const f = obj.data.content.fields as {
     prices: { fields: { spot: string; forward: string } }
@@ -459,143 +489,110 @@ export async function fetchDeepbookOracle(
 }
 
 /**
- * Find the most recent BTC `OracleSVI` published by DeepBook on testnet.
- * Returns the configured fallback if event query fails. Registers the
- * resolved id with `isDeepbookOracle()` so swipe dispatch routes correctly.
+ * Minimum expiry headroom we require when picking an oracle, in ms.
+ * Must cover the full swipe phase (up to 60 s) plus a margin for join
+ * latency and clock drift, otherwise `record_swipe` would abort with
+ * `EOracleNotLive`.
  */
-export async function findLatestDeepbookOracle(client: SuiClient): Promise<string> {
+const ORACLE_MIN_HEADROOM_MS = 90_000n
+
+/**
+ * Pick the BTC `OracleSVI` with the **shortest viable expiry** from
+ * DeepBook's live pool.
+ *
+ * Why shortest, not newest:
+ *
+ * DeepBook testnet runs a rolling pool of multiple oracles at once with
+ * expiries spread across quarter-hour boundaries (`:15, :30, :45, :00`)
+ * AND longer-dated tiers (~1–5 h out). DeepBook publishes the long-dated
+ * oracles *after* the near-dated ones, so "newest by OracleCreated event"
+ * is biased toward the longest-dated oracle in the pool. A duel pinned
+ * to that one only settles when DeepBook's settlement_price for that far
+ * expiry is published — could be 4 h+ later.
+ *
+ * For PvP flow we want duels to settle ASAP after swipes lock, so prefer
+ * the closest expiry that still has enough headroom for the swipe phase.
+ * `ORACLE_MIN_HEADROOM_MS` is the floor.
+ *
+ * Candidate selection:
+ *   1. Read the 30 most recent `registry::OracleCreated` events.
+ *   2. Multi-get the oracle objects in batch.
+ *   3. Keep ones that are ACTIVE + priced (spot/forward > 0) + not
+ *      settled + `expiry - now >= ORACLE_MIN_HEADROOM_MS`.
+ *   4. Return the one with the SMALLEST `expiry`.
+ *   5. Fall back to `CONFIG.fallbackOracleSviId` if none qualify.
+ *
+ * See `docs/oracle-selection.md` for the full rationale, live testnet
+ * observations, and tuning guide.
+ */
+export async function findLatestOracleSvi(
+  client: SuiClient,
+  asset = "BTC",
+): Promise<string> {
   try {
     const evts = await client.queryEvents({
       query: {
         MoveEventType: `${deepbookPredictPackageId}::registry::OracleCreated`,
       },
-      limit: 5,
+      limit: 30,
       order: "descending",
     })
+    const candidates: string[] = []
     for (const e of evts.data) {
       const p = e.parsedJson as { oracle_id: string; underlying_asset: string }
-      if (p.underlying_asset === "BTC") {
-        const id = normalizeSuiObjectId(p.oracle_id)
-        registerDeepbookOracle(id)
-        return id
+      if (p.underlying_asset === asset) {
+        candidates.push(normalizeSuiObjectId(p.oracle_id))
       }
+    }
+    if (candidates.length > 0) {
+      const top = candidates.slice(0, 10)
+      const objs = await client.multiGetObjects({
+        ids: top,
+        options: { showContent: true },
+      })
+      const nowMs = BigInt(Date.now())
+      let best: { id: string; expiry: bigint } | null = null
+      for (let i = 0; i < objs.length; i++) {
+        const obj = objs[i]
+        if (obj.data?.content?.dataType !== "moveObject") continue
+        const f = obj.data.content.fields as {
+          active?: boolean
+          expiry?: string
+          prices?: { fields?: { spot?: string; forward?: string } }
+          settlement_price?: unknown
+        }
+        const settled =
+          (typeof f.settlement_price === "string" && f.settlement_price !== "0") ||
+          (typeof f.settlement_price === "object" &&
+            f.settlement_price !== null &&
+            // Some Sui RPC variants wrap Option in { fields: { vec: [...] } }
+            ((f.settlement_price as { fields?: { vec?: string[] } }).fields?.vec
+              ?.length ?? 0) > 0)
+        const spot = BigInt(f.prices?.fields?.spot ?? "0")
+        const forward = BigInt(f.prices?.fields?.forward ?? "0")
+        const expiry = BigInt(f.expiry ?? "0")
+        if (settled || !f.active || spot === 0n || forward === 0n) continue
+        if (expiry - nowMs < ORACLE_MIN_HEADROOM_MS) continue
+        if (best === null || expiry < best.expiry) {
+          best = { id: top[i], expiry }
+        }
+      }
+      if (best) return best.id
     }
   } catch {
     // fall through
   }
-  return CONFIG.fallbackDeepbookOracleId
+  return CONFIG.fallbackOracleSviId
 }
 
 /**
- * Strike-grid for a DeepBook oracle. DeepBook's `OracleSVI` doesn't expose a
- * tick grid via public fns, so we derive 5 strikes around the last known
- * reference price (settlement when settled, otherwise forward).
+ * Strike-grid for an OracleSVI without reading DeepBook's `oracle_config`:
+ * derive 5 strikes around the last known reference price (settlement when
+ * settled, otherwise forward) at the percentages in `pcts`.
  */
-export function deepbookStrikes(ref: bigint): bigint[] {
-  const pcts = [95n, 98n, 100n, 102n, 105n]
+export function oracleStrikes(
+  ref: bigint,
+  pcts: readonly bigint[] = [95n, 98n, 100n, 102n, 105n] as const,
+): bigint[] {
   return pcts.map((pct) => (ref * pct) / 100n)
-}
-
-/**
- * Per-asset oracle state used by the lobby. Latest ACTIVE oracle per asset
- * is what new duels should reference.
- */
-export interface FlickyOracleInfo {
-  id: string
-  asset: string
-  expiry: bigint
-  isSettled: boolean
-  spot: bigint
-}
-
-/**
- * Discover the freshest (most-TTL-remaining) ACTIVE FlickyOracle per asset
- * by reading `OracleCreated` events from the flicky package, then resolving
- * each candidate's current state.
- *
- * Replaces hardcoded `CONFIG.oracles[asset]`: the rotation-keeper daemon
- * creates new oracles on its own schedule, and the lobby should always pick
- * up the latest one without a config update.
- */
-export async function discoverActiveFlickyOracles(
-  client: SuiClient,
-): Promise<Record<string, FlickyOracleInfo | null>> {
-  const out: Record<string, FlickyOracleInfo | null> = {
-    BTC: null,
-    ETH: null,
-    SOL: null,
-    SUI: null,
-  }
-  const evts = await client.queryEvents({
-    query: { MoveEventType: `${CONFIG.packageId}::oracle::OracleCreated` },
-    limit: 50,
-    order: "descending",
-  })
-  // Group event candidates per asset, then resolve state for each. We only
-  // need the freshest unsettled, unexpired oracle per asset; everything
-  // older is read by existing duels via their pinned card.oracleId.
-  const candidates: Array<{ id: string; asset: string; expiry: number }> = []
-  const now = Date.now()
-  const seenAssets = new Set<string>()
-  for (const e of evts.data) {
-    const p = e.parsedJson as { oracle_id: string; asset: string; expiry: string }
-    if (!(p.asset in out)) continue
-    const expiry = Number(p.expiry)
-    if (expiry <= now) continue
-    // Take only the first (freshest) per asset for now; we'll verify state
-    // below and fall back to the next if the first turns out settled.
-    if (seenAssets.has(p.asset)) continue
-    seenAssets.add(p.asset)
-    candidates.push({ id: normalizeSuiObjectId(p.oracle_id), asset: p.asset, expiry })
-  }
-  if (candidates.length === 0) return out
-
-  const objs = await client.multiGetObjects({
-    ids: candidates.map((c) => c.id),
-    options: { showContent: true },
-  })
-  for (let i = 0; i < candidates.length; i++) {
-    const obj = objs[i]
-    if (obj.data?.content?.dataType !== "moveObject") continue
-    const f = obj.data.content.fields as {
-      settlement: unknown
-      price: { fields: { spot: string } }
-    }
-    if (f.settlement !== null) continue
-    out[candidates[i].asset] = {
-      id: candidates[i].id,
-      asset: candidates[i].asset,
-      expiry: BigInt(candidates[i].expiry),
-      isSettled: false,
-      spot: BigInt(f.price.fields.spot),
-    }
-  }
-  return out
-}
-
-// === Strike-grid helpers ===
-
-/**
- * Build 5 strikes spaced around spot at percentile targets, snapped to the
- * oracle's tick grid.
- */
-export async function buildDefaultStrikes(
-  client: SuiClient,
-  oracleId: string,
-): Promise<bigint[]> {
-  const obj = await client.getObject({ id: oracleId, options: { showContent: true } })
-  if (obj.data?.content?.dataType !== "moveObject") {
-    throw new Error("oracle not a Move object")
-  }
-  const f = obj.data.content.fields as Record<string, unknown>
-  const minStrike = BigInt(String(f.min_strike))
-  const tickSize = BigInt(String(f.tick_size))
-  const spot = BigInt((f.price as { fields: { spot: string } }).fields.spot)
-
-  const pcts = [90n, 95n, 100n, 105n, 110n]
-  return pcts.map((pct) => {
-    const raw = (spot * pct) / 100n
-    const stepsFromMin = (raw - minStrike) / tickSize
-    return minStrike + stepsFromMin * tickSize
-  })
 }

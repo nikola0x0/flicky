@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "rootDir": ".",
+    "outDir": "dist",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "types": ["bun"]
+  },
+  "include": ["scripts/**/*", "sui-codegen.config.ts"],
+  "exclude": ["node_modules", "dist", "build", "deepbook_predict_min", "deepbook_min", "token_min"]
+}

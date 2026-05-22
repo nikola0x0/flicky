@@ -31,3 +31,13 @@ npm-debug.log*
 
 # Local scratch
 local/
+
+# Move build + codegen outputs
+apps/contracts/build/
+apps/contracts/package_summaries/
+
+# Server-side runtime state (deckmaster plaintext store etc.)
+apps/server/.data/
+
+# Local Claude Code state
+.claude/

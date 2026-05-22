@@ -1,0 +1,17 @@
+build/
+deepbook_predict_min/build/
+deepbook_min/build/
+token_min/build/
+
+traces/
+.trace
+.coverage*
+Pub.*.toml
+package_summaries/
+
+dist/
+
+.env
+.env.local
+.env.*
+!.env.example
