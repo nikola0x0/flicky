@@ -3,7 +3,8 @@
 A standalone React frontend playground for testing all DeepBook Predict functions on Sui testnet.
 
 > [!NOTE]
-> Read the complete [Playground Guide](file:///Users/alvin/Developer/sui-flow/flicky/temp/playground/PLAYGROUND_GUIDE.md) for a detailed walkthrough of all tabs, how to use them, and core concepts.
+> * **English**: Read the complete [Playground Guide](file:///Users/alvin/Developer/sui-flow/flicky/temp/playground/PLAYGROUND_GUIDE.md) for a detailed walkthrough of all tabs, how to use them, and core concepts.
+> * **Tiếng Việt**: Đọc hướng dẫn chi tiết [Ý Nghĩa Các Tính Năng](file:///Users/alvin/Developer/sui-flow/flicky/temp/playground/PLAYGROUND_FEATURES_GUIDE_VI.md) để hiểu sâu về cơ chế hoạt động on-chain của từng chức năng.
 
 ## Setup
 
