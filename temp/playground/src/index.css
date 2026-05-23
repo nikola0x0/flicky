@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+* {
+  @apply antialiased;
+}
+
+html,
+body {
+  @apply h-full;
+}
+
+#root {
+  @apply h-full;
+}
+
+code,
+pre {
+  @apply font-mono text-sm;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  @apply w-2 h-2;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-800;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-600 rounded hover:bg-gray-500;
+}
+
+/* Selection styling */
+::selection {
+  @apply bg-blue-600 text-white;
+}
