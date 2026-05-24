@@ -8,6 +8,18 @@ quickly instead of dragging out for hours.
 If you've ever stared at the lockup screen wondering why one duel
 settles in 6 minutes and another in 4 hours, this is the answer.
 
+> **⚠️ Superseded by the new PRD direction.** Everything below describes
+> the **as-built picker** — one oracle pinned per duel, shortest viable
+> expiry, ≥ 90 s headroom for a 60 s swipe phase. The locked PRD direction
+> (see `docs/prd.md`) replaces this with a **per-card oracle model**:
+>
+> - Each duel deck is **5 cards = 5 different oracles**, picked as the 5 nearest oracle resolutions strictly **>10 minutes out**.
+> - Cards in one deck can settle at **different times** because the oracles have different expiries. `duel::settle_duel` only runs once all 5 have resolved.
+> - The "single shortest viable" picker described below applies to the legacy single-oracle Duel; the new card-generation API in `apps/server` selects 5 oracles instead.
+> - The `ORACLE_MIN_HEADROOM_MS = 90_000` constant — sized for a 60 s swipe phase — is also legacy. The new spec gives the swipe phase **up to 10 minutes**, so the headroom floor and the 5-oracle selection floor merge into a single rule: each card's oracle expiry > `now + 10 min`.
+>
+> The DeepBook background sections (oracle pool, 2-tier 15-min cron, ~7–8 s settle latency, 1-in-6 10-min outliers, `settlement_price: Option<u64>` flip) all carry forward unchanged — they describe DeepBook's behavior, not Flicky's selection strategy.
+
 ---
 
 ## TL;DR

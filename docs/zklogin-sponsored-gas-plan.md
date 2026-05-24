@@ -1,19 +1,30 @@
 # zkLogin + Sponsored Gas — integration plan
 
 > Status: **not yet implemented**. This doc describes the wiring needed
-> to satisfy PRD §Identity, wallet, money flow ("zkLogin + sponsored gas
-> — load-bearing, not optional").
+> to satisfy PRD §Identity, wallet, money flow ("zkLogin via Enoki +
+> sponsored gas — load-bearing, not optional").
 
-Two PRD requirements are coupled:
+Three PRD requirements are coupled:
 
-1. **zkLogin** — player signs in with Google/Apple OAuth; the OIDC token
-   is exchanged for a zk proof that lets a derived Sui address sign txns
-   without an extension wallet.
-2. **Sponsored gas** — the player's wallet only ever holds dUSDC.
-   Every PTB they sign (create_duel, join_duel, swipe, etc.) is gas-paid
-   by a server-held sponsor wallet, so they never need SUI.
+1. **zkLogin via Enoki** — player signs in with Google/Apple OAuth; the
+   OIDC token is exchanged for a zk proof that lets a derived Sui address
+   sign txns without an extension wallet. **Enoki is the locked provider**
+   for MVP — no other zkLogin flow is in scope.
+2. **Sponsored Predict Manager bootstrap** — on first sign-in, Flicky
+   sponsors `predict::create_manager` for the player. They never sign
+   that tx themselves and never need SUI to enable staked play.
+3. **Sponsored gas, end-to-end** — every player-signed PTB is gas-paid
+   by a server-held sponsor wallet. Scope includes: `create_duel`,
+   `join_duel`, the per-swipe `predict::mint + duel::record_swipe`,
+   `duel::settle_duel`, `predict::redeem_permissionless`, and the
+   `swap::sui_to_dusdc` / `swap::dusdc_to_sui` PTBs backing the
+   in-app SUI ↔ dUSDC (1:10) swap on the Deposit screen.
 
-Both are blocked on external setup the developer has to do once.
+The player's zkLogin wallet therefore only ever needs to hold **dUSDC
+for staking + Predict premium**, plus optionally SUI if they choose to
+fund via the in-app swap rather than depositing dUSDC directly.
+
+All three are blocked on external setup the developer has to do once.
 
 ## What's missing
 

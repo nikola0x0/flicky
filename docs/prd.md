@@ -1,161 +1,119 @@
 # Flicky — Game Spec
 
 > **This doc is the source of truth for Flicky's game design.** When the spec and any other doc disagree, this wins. Changes are tracked in the companion **Flicky — Decisions (ADR Log)**.
-> 
-> 
+>
 > Repo (implementation): [https://github.com/nikola0x0/flicky](https://github.com/nikola0x0/flicky)
-> 
 
 ---
 
 ## One-liner
 
-Swipe YES/NO on a shared deck of binary predictions. Face off against another player. On-chain escrow pays the winner. Real DeepBook Predict markets under a Tinder-style UI.
+Swipe YES/NO on 5 binary cards. Face off against another player. The Duel escrow pays the winner the side-pot; both players keep whatever their own Predict positions redeem for. Real DeepBook Predict markets under a Tinder-style UI.
 
 ## Why this exists
 
 Prediction markets are powerful but feel like trading terminals. Swipe-based mobile betting apps (Pulse on Solana, Rush's $500M-in-a-week sub-hour BTC binaries) proved enormous retail demand for "feel-based" prediction UX — but they're shallow and have no real PvP layer. Flicky bridges them: a Tinder-style swipe deck on top of DeepBook Predict's binary-digital primitive, plus a 1v1 escrow layer so two players can put real stakes on "who reads BTC better."
 
-## Player experience in one paragraph
+## End-to-end player flow
 
-You sign in with Google. You're shown a queue with three stake buttons: Practice ($1), Standard ($5), High Roller ($10). You tap Standard. A few seconds later your opponent appears. Five cards flip up — each one is a BTC binary question ("BTC > $70,000 at 12:00 UTC?"). You have 60 seconds. Swipe right for YES, left for NO. Fast swipes score more. The deck locks; both of you sit and watch the market tick for 10 minutes, sending reaction emojis. The oracle resolves. The winner takes the pot. A share-card pops up. You queue again.
+1. **Sign in.** zkLogin via Enoki (Google / Apple OAuth → Sui address). The zkLogin address is the wallet — no separate in-app balance.
+2. **Predict Manager bootstrap.** A `PredictManager` is created for the player on first sign-in, sponsored by Flicky. The player never touches SUI for gas.
+3. **Practice Mode (optional).** Solo vs. a bot with virtual positions — no stake, no `predict::mint`. Full swipe + settle UX so the player learns the loop before risking dUSDC.
+4. **Deposit / Swap.** To enter matching, the player tops up dUSDC. The in-app Deposit screen surfaces the player's Sui address + QR + copy, and includes a built-in **SUI ↔ dUSDC swap (1 SUI : 10 dUSDC)** so a player with only SUI can fund a stake without leaving the app.
+5. **Matching.** Player picks a stake tier — **1, 3, 5, or 10 dUSDC** — and joins the queue. Entry requires `PredictManager` balance **≥ 5 dUSDC** (the per-card mint budget: up to 1 dUSDC of Predict premium × 5 cards). MMR + bucketed per-tier matching; bot-fill on ~30 s queue timeout.
+6. **Play (≤10 min).** Five cards are revealed. Each card is one binary digital tied to the next 5 nearest oracle resolutions that are **>10 min** out (each card has its own expiry). A swipe is a single player-signed PTB that atomically (a) mints YES or NO via `predict::mint` on the player's own `PredictManager` and (b) calls `duel::record_swipe` on the shared `Duel`. Five swipes → five real on-chain Predict positions.
+7. **Settlement.** Each card resolves at its own oracle tick. Per-card PnL = (Predict redeem value) − (premium paid). **Player score = Σ PnL across the 5 cards.** Higher total PnL wins the Duel side-pot. Tie → side-pot split.
+8. **Winner redeem.** Winner claims the dUSDC Duel Pot from the `Duel` escrow on settle, and (when they choose) redeems their own 5 Predict positions via `predict::redeem_permissionless` into their `PredictManager`.
+9. **Loser redeem.** Loser keeps no side-pot but still owns their Predict positions — whatever they minted on the winning side of any card pays out on redeem. The Duel outcome and the Predict outcome are independent ledgers.
 
 ---
 
 ## Game design
 
-### Two tiers
+### Two modes
 
-| Tier | Money flow | Predict integration | Reward |
+| Mode | Money flow | Predict integration | Reward |
 | --- | --- | --- | --- |
-| **Free** | none | virtual swipes, scored against live DeepBook Predict oracle | win-counter increment |
-| **Staked** | dUSDC stake into shared escrow | live swipes recorded against Predict's SVI snapshot, scored against the oracle settlement | winner takes the side-pot |
+| **Practice** | none | solo vs. bot, virtual swipes, scored against the live oracle | learning the loop; no on-chain reward |
+| **Staked** | dUSDC stake into shared `Duel` escrow; per-card `predict::mint` on the player's own `PredictManager` | full PvP, real Predict positions, settled by oracle | winner takes side-pot; both players redeem own positions |
 
-Both tiers share the **same swipe UX, same card pool, same scoring, same timing**. The only difference is money flow.
+Practice is a single-player on-ramp — it shares the swipe UI but does not enter matchmaking or touch the chain. The real product is the Staked PvP loop.
 
-### Stake tiers (staked mode)
+### Stake tiers
 
-| Tier | Stake |
-| --- | --- |
-| Practice | 1 dUSDC |
-| Standard | 5 dUSDC |
-| High Roller | 10 dUSDC |
+| Tier | Stake | Pot (per duel) |
+| --- | --- | --- |
+| Practice queue | 1 dUSDC | 2 dUSDC |
+| Casual | 3 dUSDC | 6 dUSDC |
+| Standard | 5 dUSDC | 10 dUSDC |
+| High Roller | 10 dUSDC | 20 dUSDC |
 
-Matchmaking is bucketed per tier. MMR within each bucket.
+All tiers require `PredictManager` balance ≥ 5 dUSDC before entering the queue, because each duel mints up to 5 dUSDC of Predict premium (5 cards × max 1 dUSDC per card) regardless of side-pot size.
 
 ### Match anatomy
 
 ```
-t = 0s              t = 60s             t = ~10 min         t = ~10 min + 1 block
-┌───────────────┐   ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
-│  Swipe phase  │ → │ Lockup phase  │ → │  Settlement   │ → │   Payout      │
-│  ~60 seconds  │   │  ~10 minutes  │   │  oracle ticks │   │  side-pot to  │
-│  5-card deck  │   │  live view +  │   │  binaries     │   │  winner       │
-│  commit-reveal│   │  reactions    │   │  resolve 0/1  │   │               │
-└───────────────┘   └───────────────┘   └───────────────┘   └───────────────┘
+t = 0s               t ≤ 10 min            per-card oracle tick    after final card settles
+┌────────────────┐   ┌────────────────┐    ┌────────────────┐      ┌────────────────┐
+│  Swipe phase   │ → │ Watch / wait   │  → │  Per-card      │  →   │  Settle duel   │
+│  reveal deck;  │   │  live oracle   │    │  settlement    │      │  pot → winner; │
+│  5 cards each  │   │  ticks; spot   │    │  PnL locks per │      │  players redeem│
+│  mint a Predict│   │  vs. strikes;  │    │  card at its   │      │  their own     │
+│  position      │   │  emoji reacts  │    │  expiry        │      │  positions     │
+└────────────────┘   └────────────────┘    └────────────────┘      └────────────────┘
 ```
 
 1. **Create / Join.** Both players stake dUSDC into the shared `Duel` object. Deck hash is committed on-chain (commit-reveal). Plaintext deck is revealed at swipe-phase start.
-2. **Swipe phase (60 s).** Each player swipes YES/NO on each of 5 cards. Direction + the snapshotted `p_swiped` (from Predict's SVI surface) + decide-time are recorded per swipe.
-3. **Lockup phase (~10 min).** Swipes are frozen. Shared UI streams live oracle ticks, current mark (vibes only — does not affect scoring), and emoji reactions.
-4. **Settlement.** DeepBook Predict's oracle resolves each binary to 0 or 1.
-5. **Payout.** Scores are computed; the higher score wins the entire side-pot. Tie → lowest total swipe time wins. Still tied → split.
+2. **Swipe phase.** Up to 10 minutes total game time. Each swipe is a single player-signed PTB: `predict::mint` (player's `PredictManager`) + `duel::record_swipe` (shared `Duel`). The swipe is atomic by Predict's `sender == manager.owner()` invariant — the keeper cannot mint for the player.
+3. **Watch / wait.** Once both players have swiped all 5 cards (or the 10-min clock expires), the UI streams live oracle ticks, current marks, and emoji reactions until each card's expiry.
+4. **Per-card settlement.** Each binary resolves at its own oracle tick — cards in one deck can settle at different times because they are drawn from the 5 nearest oracles >10 min out.
+5. **Duel settlement.** Once all 5 cards have settled, the indexer triggers `duel::settle_duel`. The contract reads each player's per-card PnL, sums it, and releases the dUSDC side-pot to whoever has the higher total. Tie → split. Players can redeem their own Predict positions independently via `predict::redeem_permissionless`, at any time after each card settles.
 
-### Scoring (odds-weighted)
+### Scoring (real PnL)
 
 ```
-card_score   = correct ? (1 / p_swiped) × speed_multiplier : 0
-player_score = Σ card_score across the 5 cards
+card_pnl     = predict_redeem_value(player, card) − premium_paid(player, card)
+player_score = Σ card_pnl across the 5 cards
 ```
 
-Where:
+- **No speed multiplier.** Scoring is the actual on-chain economic outcome — Predict's premium math is the scoring engine, not a UI-layer multiplier. A player who buys YES at 0.28 implied and wins still earns ~3× more PnL per dUSDC than buying YES at 0.88 — the economics already reward skill over consensus.
+- **No odds-weighted UI score.** The `Duel` does not compute a synthetic score from `p_swiped`; it reads each player's `record_swipe` entries and asks Predict's settled state what each position redeems for.
+- **Ties.** Equal total PnL → side-pot split.
+- **Independence.** The dUSDC side-pot (winner takes all) and the Predict positions (both players keep their own) are independent. A player can lose the Duel and still net-positive from a single hot pick, or win the Duel and have flat individual PnL — the side-pot is the prize for ranking ahead of your opponent.
 
-- `p_swiped` = implied probability of the swiped side, snapshotted from Predict's SVI surface at the exact moment of the swipe. NO side's `p = 1 − YES probability`.
-- `speed_multiplier`:
-    - decided in 0–5 s → **1.5×**
-    - decided in 5–20 s → **1.0×**
-    - decided in 20–60 s → **0.75×**
-    - no swipe before timer → **0** (counts as wrong)
+### Card generation (AI Deckmaster)
 
-**Why odds-weighted:**
+The backend generates each duel's deck from the 5 nearest DeepBook Predict oracle resolutions that are **>10 minutes** in the future at duel creation time.
 
-- **Rewards skill, not consensus.** A correct call on a 28% underdog is worth ~3× a correct call on an 88% favorite.
-- **Mirrors Predict's economics.** `1/p` is what 1 dUSDC of Predict premium pays out on a correct binary; the in-game score reflects this without exposing premium math.
-- **Reduces ties.** Different cards have different point values; two "3/5 correct" players rarely land on the same score.
-- **Snapshot-at-swipe defeats oracle gaming** — the price the player saw is the price they're scored against.
-
-The speed multiplier and odds weighting affect duel score only. They never change Predict's pricing or the binary's 0/1 settlement.
-
-### Card types
-
-Decks mix:
-
-- **Directional binaries** — "BTC > strike X at expiry T?"
-- **Range cards** — "BTC settles in [low, high] at expiry T?"
-- **(Post-MVP) Multi-asset** — BTC + ETH + SUI where oracles permit.
-
-All cards in a duel share **one expiry timestamp** — makes the lockup phase coherent and lets a single keeper call settle the whole match.
-
-### AI Deckmaster
-
-A backend agent generates each duel's deck so the cards feel relevant to right-now markets, not a static catalog.
-
-- **Input:** live SVI surface, spot, last-hour realized vol, time-of-day, duel template chosen by the challenger.
-- **Output:** 5-card deck balanced for difficulty — e.g., 2 close-to-money (hard), 2 mid-distance (medium), 1 deep-OTM (gimme or trap).
-- **Determinism + fairness:** the generator is seeded with the on-chain duel-creation block hash + `duel_id`. Output is reproducible by anyone for audit. Deck is hashed; the hash is committed to the `Duel` object at creation. Plaintext deck is revealed at swipe-phase start.
-
-**Duel templates** (challenger chooses at queue time):
-
-- **BTC Quickie** — 5 BTC binaries, ~10-min expiry, mixed strikes.
-- **Mixed Bag** — BTC + ETH + SUI cards (when oracles support).
-- **Range Day** — all range cards on BTC.
-- **Wild Pack** — Deckmaster's choice across all card types.
-
-### Speed-pressure & sabotage
-
-| Layer | Status | Mechanic |
-| --- | --- | --- |
-| **Speed multiplier** | MVP | Faster decisions score more per card. Conviction rewarded, hesitation punished. |
-| **Sabotage skills** | Post-MVP | Earnable consumables: "Blur" (opponent's next card blurred 3 s), "Distract" (haptic buzz), "Steal Glance" (peek opponent's current pick). Pure UI; never affects on-chain state. |
+- **Input:** live SVI surface, spot, list of upcoming oracle resolution timestamps, the duel's stake tier.
+- **Selection rule:** pick the 5 nearest oracles strictly after `now + 10 min`. Each oracle becomes one card; the generator chooses strike + side (directional vs. range) per card to balance difficulty (mix of close-to-money hard calls and deep-OTM gimmes/traps).
+- **Determinism + fairness:** generator is seeded with the on-chain duel-creation block hash + `duel_id`. Output is reproducible by anyone for audit. Deck is hashed; the hash is committed to the `Duel` object at creation. Plaintext deck is revealed at swipe-phase start.
+- **Card types:** directional binaries ("BTC > strike X at expiry T?") and range cards ("BTC settles in [low, high] at expiry T?"). Each card carries its own expiry — they no longer share a single timestamp.
 
 ### Matchmaking
 
-- **Sync-only for MVP** — both players online and in-app at the same time for the 60-second swipe phase. Shared lockup phase = half the product magic; async kills it.
+- **Sync-only for MVP** — both players online and in-app at the same time. Shared swipe/watch phase is half the product magic; async kills it.
 - **Bot-fill on queue timeout** — if no human opponent in ~30 s, a bot with a fixed skill model fills in. Solves hackathon-scale liquidity.
-- **Async mode (post-MVP)** — could be added as "Background Duel" if real-user liquidity later proves insufficient. Async opens cheating vectors (the second player sees more market movement) so it's deferred.
-
-### Free tier specifics
-
-Free tier is the **same product** as staked, minus money flow. Players experience the actual core game before being asked to stake. No solo / daily-pick mode in MVP — free PvP *is* the free product.
-
-- **Matchmaking:** simple FIFO queue; bot-fill on timeout so a player never waits more than ~30 s.
-- **Stake:** none.
-- **Mint:** none. Positions are virtual; settlement reads from the same Predict oracle that scores staked duels.
-- **Reward:** winner's win-counter increments by 1.
-
-### Conversion funnel (free → staked)
-
-A free player who taps "Play staked" (or wins N free duels) is shown the **Deposit screen** — their zkLogin Sui address + QR + copy button + a "send dUSDC here from any wallet" callout. No subsidy, no faucet, no in-app on-ramp in MVP. Practice tier (1 dUSDC) is the lowest-friction first stake.
-
-*Optional first-win bonus on the staked side* (e.g., +0.5 dUSDC, paid from rake) may be added post-MVP to reward conversion without subsidizing acquisition.
+- **Async mode (post-MVP)** — could be added as "Background Duel" if real-user liquidity proves insufficient.
 
 ### Anti-cheat / fairness
 
 | Vector | Mitigation |
 | --- | --- |
-| Mark manipulation via whale side-trades | Scoring is on **settlement** (0/1), not mark. A whale's side-trade does not move terminal payoff. |
-| Peeking at public Predict surface | Allowed and irrelevant — the surface gives mark, not settled outcome. |
+| Mark manipulation via whale side-trades | Scoring is the actual Predict redeem PnL. A whale's mark move does not change terminal settlement. |
 | Front-running deck with parallel positions | **Commit-reveal**: deck hash committed at match creation, revealed only at swipe-phase start. |
 | Two-account collusion to farm side-pot | MMR queue + zkLogin OAuth binding raises Sybil cost. Stake-locked entry, light proof-of-attention for ranked queue — post-MVP. |
-| Bot-driven swiping | Same 60-s pressure for both players; bot edge is small on freshly-revealed deck. Optional human-only ranked queue with proof-of-attention — post-MVP. |
+| Bot-driven swiping in PvP | Same 10-min window for both players; cards are freshly revealed. Optional human-only ranked queue with proof-of-attention — post-MVP. |
 
 ---
 
 ## Identity, wallet, money flow
 
-- **zkLogin** (Google / Apple OAuth → Sui address) is the wallet identity. There is no separate in-app balance — the zkLogin address **is** the wallet.
-- **Sponsored gas** covers every on-chain action a player takes. The player's zkLogin wallet only ever needs to hold dUSDC for staking — never SUI for gas.
-- **Funding the wallet (staked tier only):** Deposit screen surfaces the zkLogin address + QR + copy. Users top up by sending dUSDC from any wallet (Suiet, Sui Wallet, CEX withdrawal). **No faucet, no in-app on-ramp.**
+- **zkLogin via Enoki** (Google / Apple OAuth → Sui address) is the wallet identity. There is no separate in-app balance — the zkLogin address **is** the wallet.
+- **Predict Manager** is created on first sign-in, sponsored by Flicky. The player never holds SUI for gas, never signs a manager-creation transaction outside the app.
+- **Sponsored gas** covers every on-chain action a player takes (create_duel, join_duel, per-swipe mint+record, settle, redeem). The player's zkLogin wallet only ever needs dUSDC for staking and Predict premium.
+- **Deposit screen** shows the zkLogin address + QR + copy. Users top up by sending dUSDC from any wallet (Suiet, Sui Wallet, CEX withdrawal).
+- **In-app swap** — a SUI → dUSDC swap module at a fixed **1 SUI : 10 dUSDC** rate, so a player whose only on-chain asset is SUI can convert to dUSDC without leaving Flicky. No external on-ramp in MVP.
 
 ---
 
@@ -163,17 +121,46 @@ A free player who taps "Play staked" (or wins N free duels) is shown the **Depos
 
 Predict is the centerpiece of the chain story. Touchpoints:
 
-1. **`OracleSVI`** — snapshots `p_swiped` at the moment of each swipe for odds-weighted scoring; provides the binary's 0/1 settlement value.
-2. **`predict-server` indexer** — backend uses the event stream to detect settlement and to feed the live oracle-tick view during the lockup phase.
-3. **(Trading surface — see ADR-001)** — whether Flicky also calls `predict::mint` and `predict::redeem_permissionless` per duel (taking real Predict positions) or uses Predict as oracle-only is **a live architectural decision tracked in the ADR log**. The user-facing game is identical either way.
+1. **`predict::mint`** — called in the player-signed swipe PTB on the player's own `PredictManager`. Sized per-card from a budget tied to stake tier (≤1 dUSDC per card).
+2. **`predict::redeem_permissionless`** — each player redeems their own 5 positions after settlement. The keeper may also call this opportunistically to surface PnL into the Duel settlement view; payouts always deposit into the player's own `PredictManager`.
+3. **`OracleSVI`** — read for the live mark view during the watch phase, calibrates Deckmaster difficulty, and provides each card's 0/1 settlement.
+4. **`predict-server` indexer** — backend uses the event stream to detect each card's settlement and to feed the live oracle-tick view during the watch phase, and to trigger `duel::settle_duel` once all 5 cards have resolved.
 
 ### Cross-track absorption
 
-Flicky naturally combines three previously-proposed Predict ideas plus the novel PvP layer:
+Flicky combines three previously-proposed Predict ideas plus the novel PvP layer:
 
-- **#30 Gamified Predict App** — Flicky (both tiers) is the PvP version of this.
+- **#30 Gamified Predict App** — Flicky is the PvP version of this.
 - **#21 Settled-Redeem Keeper Network** — Flicky operates one as system infrastructure.
 - **#29 Streaks Leaderboard PWA** — natural v1.1 layer once the streak / ladder retention loop ships.
+
+---
+
+## Component responsibilities
+
+### Smart contracts (`apps/contracts/`)
+
+- **`Duel` shared object.** Escrows both players' dUSDC stakes (side-pot). Records every swipe (player, card index, direction, `PredictManager` reference, premium paid). On `settle_duel`, reads per-player PnL via the recorded positions and releases the side-pot to the winner.
+- **DeepBook Predict mapping.** `record_swipe` is invoked alongside `predict::mint` in the player's PTB; the `Duel` does not call Predict itself but stores the references needed to compute PnL at settlement.
+- **Swap module.** Fixed-rate SUI ↔ dUSDC at 1:10, used by the Deposit/Swap screen for in-app top-ups in MVP.
+
+### Backend (`apps/server`, Bun)
+
+- **Card generation API.** Reads the upcoming oracle resolution schedule, picks the 5 nearest >10 min out, chooses strikes, returns the deck (with hash for commit-reveal).
+- **WebSocket matchmaking + game room.** Create room, join room, broadcast match clock — match timing is authoritative from the server, not the client.
+- **`Duel` indexer.** Watches Duel events (create, swipe, settle), maintains room state, fans state changes back to the WS clients.
+- **PnL & settle-price tracker.** Subscribes to Predict's settle events, computes per-card PnL for each player, triggers `duel::settle_duel` once all 5 cards in a duel have settled.
+- **Sponsored gas service.** Sponsors every player-signed PTB end-to-end.
+
+### Frontend (`apps/web`, Vite + React)
+
+- **Landing.** Brand + how-to-play + entry to login.
+- **Game UI.** Swipe deck, lockup view, share card.
+- **Deposit / Swap page.** Address + QR for inbound dUSDC, SUI → dUSDC swap form.
+- **PTB builder.** Constructs the per-swipe `predict::mint + duel::record_swipe` PTB from backend-provided card data; signs via Enoki; submits via sponsored gas.
+- **How-to-play + documentation pages.** In-app explainers.
+
+> **Principle:** anything the frontend can read directly from the chain or compute locally, it reads/computes locally. The backend exists for things the chain can't do (matchmaking, card selection, indexing, keeper triggers).
 
 ---
 
@@ -181,9 +168,10 @@ Flicky naturally combines three previously-proposed Predict ideas plus the novel
 
 - 1v1 only; tournaments / brackets deferred.
 - BTC-only card pool; broader oracles deferred.
-- Free tier + Staked tier; both on the Predict engine (oracle, SVI, indexer).
-- zkLogin + sponsored gas — load-bearing, not optional.
-- Deposit screen as the only money-in path (no faucet).
+- Practice (solo vs. bot) + Staked PvP (4 tiers: 1 / 3 / 5 / 10 dUSDC) on the Predict engine.
+- zkLogin via Enoki + sponsored gas — load-bearing, not optional.
+- Sponsored Predict Manager creation on first sign-in.
+- Deposit screen + in-app SUI→dUSDC swap (1:10) as the money-in paths.
 - Settled-redeem keeper.
 - AI Deckmaster (open-source generator + on-chain seed + commit-reveal; Nautilus TEE attestation deferred).
 - Share-card image for virality (friend lists / chat / spectate deferred).
@@ -198,9 +186,9 @@ PLP rake loop, graduation to direct Predict trading, streaks/ladder/cosmetics, b
 
 ## Open questions
 
-- **ADR-001 — Tunnel pattern for the swipe phase.** Per-swipe Predict mints vs. tunnel + Predict-as-oracle-only. See ADR log.
-- **Sync vs. async matchmaking** beyond MVP — see Matchmaking section.
-- **Server key management** for tunnel mode (if ADR-001 accepted) — per-duel keypair vs. long-lived service keypair vs. rotating-with-TEE-attestation.
+- **Server key management** for the keeper (per-duel keypair vs. long-lived service keypair vs. rotating-with-TEE-attestation).
+- **Swap liquidity.** Fixed 1:10 SUI/dUSDC is a hackathon simplification; production needs a real source (DeepBook spot, Cetus, sponsored treasury).
+- **Async mode** — see Matchmaking section.
 
 ## Prior art
 

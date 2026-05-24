@@ -9,7 +9,24 @@ Read alongside `docs/oracle-selection.md` (which picks the OracleSVI
 the duel pins to) and `docs/prd.md` (which states the product
 requirements being satisfied).
 
-> **Status legend:** ✓ shipped · ◐ partial · ✗ not implemented
+> **⚠️ Divergence from the current PRD direction.** This doc describes
+> the code as **currently shipped**. The locked PRD direction (see
+> `docs/prd.md`) has since diverged from it on several mechanics — the
+> as-built behavior described below is being replanned to match the
+> new spec. Treat sections below as "what the code does today," not
+> "what the product is targeting." Key deltas:
+>
+> - **Stake tiers:** doc reflects 1 / 5 / 10 dUSDC; new spec is **1 / 3 / 5 / 10 dUSDC** (4 tiers), all gated by `PredictManager` balance ≥ 5 dUSDC.
+> - **Scoring:** doc describes odds-weighted score (`1/p_swiped × speed_multiplier`) computed in `duel::settle_card` from a snapshotted `p_swiped` + `decide_time_ms`. New spec replaces this with **real PnL** (Σ `predict_redeem − premium_paid`) across the 5 Predict positions. `compute_card_score`, the speed multiplier, and the `Swipe.p_swiped` / `decide_time_ms` fields are legacy.
+> - **Card oracles:** doc describes one oracle pinned per duel (`findLatestOracleSvi` → `argmin(expiry)`). New spec picks the **5 nearest oracle resolutions strictly >10 min out**, one per card — each card carries its own expiry. See the banner in `docs/oracle-selection.md`.
+> - **Free tier vs Practice:** doc describes a Free PvP tier sharing matchmaking with virtual positions. New spec replaces this with **Practice Mode = solo vs. a bot** (no PvP queue, no on-chain state). The on-chain "free duel" path (`Duel<SUI>`, virtual swipes via `record_swipe`-only) becomes legacy.
+> - **Swap module:** new spec adds a fixed-rate **1 SUI ↔ 10 dUSDC** in-app swap (`apps/contracts/sources/swap.move`) backing the Deposit screen. Not yet shipped — this doc's Phase B describes the dUSDC-only top-up path.
+> - **Predict Manager bootstrap:** doc treats it as a separate user-initiated step. New spec **sponsors** manager creation on first sign-in (via Enoki + sponsored gas) so the player never signs that tx separately.
+> - **Lockup phase:** doc describes a single "wait for `now > oracle.expiry`". New spec waits per-card — `duel::settle_duel` only runs once all 5 cards have settled.
+>
+> The Duel object's swipe ordering, commit-reveal, escrow / payout half, and the keeper-PTB shape (`settle × 5` + `redeem × N` + `finalize`, all permissionless) all carry forward unchanged.
+
+> **Status legend:** ✓ shipped · ◐ partial · ✗ not implemented · 🜲 superseded by new PRD direction
 
 ---
 
