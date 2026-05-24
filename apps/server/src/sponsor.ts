@@ -15,29 +15,26 @@
  * fallback path (wallet-paid signAndExecute) is wired in
  * `apps/web/src/lib/sponsor.ts` so a server outage degrades gracefully.
  *
- * Env:
- *   ENOKI_PRIVATE_KEY    Enoki app private key (works for testnet + mainnet
- *                        from one key — Enoki dashboard configures both).
- *   ALLOWED_ORIGIN       Comma-separated origins allowed to call /sponsor,
- *                        e.g. "https://flicky.app,http://localhost:5173".
- *                        Leave UNSET (or "*") to allow any origin.
- *
- *   FLICKY_PACKAGE_TESTNET, FLICKY_PACKAGE_MAINNET   (optional)
- *     Override the package id baked into the allowlist. When unset we read
- *     apps/contracts/deployed.json.
- *
  * Allowlist:
- *   Every entry function flicky's PTBs ever issue is listed below. Enoki
- *   rejects any transaction whose MoveCalls include a target NOT in this
- *   list — protects the sponsor wallet from being drained by an attacker
- *   crafting arbitrary transactions through the public sponsor route.
+ *   Every entry function flicky's PTBs issue is listed below. Enoki
+ *   rejects any transaction whose MoveCalls escape this list — protects
+ *   the sponsor wallet from being drained by an attacker crafting
+ *   arbitrary transactions through the public sponsor route.
  */
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
 import { EnokiClient } from "@mysten/enoki"
+import { env } from "./env"
+import { makeLogger } from "./log"
+import { clientIp, consume } from "./ratelimit"
+
+const log = makeLogger("sponsor")
 
 // ─── Allowlist of MoveCall targets ──────────────────────────────────────────
 
+/**
+ * Functions sponsored from the **flicky duel package** (the one in
+ * `apps/contracts/sources/duel.move`). The swap module is published
+ * SEPARATELY (`apps/contracts/swap/`) — see SWAP_FNS below.
+ */
 const FLICKY_FNS = [
   "duel::new_card",
   "duel::create_duel",
@@ -46,6 +43,20 @@ const FLICKY_FNS = [
   "duel::record_swipe",
   "duel::settle_card",
   "duel::finalize",
+]
+
+/**
+ * Player-facing AMM swap functions (separate package).
+ *
+ * The swap module is a generic `Pool<X, Y>` AMM — `swap_x_for_y` /
+ * `swap_y_for_x` are the two directions a player calls for SUI↔dUSDC
+ * top-up. Pool admin (`create_pool`, `add_liquidity`, `remove_liquidity`)
+ * is intentionally NOT in this list — only treasury wallets do that and
+ * they don't need sponsored gas.
+ */
+const SWAP_FNS = [
+  "swap::swap_x_for_y",
+  "swap::swap_y_for_x",
 ]
 
 const DEEPBOOK_PREDICT_FNS = [
@@ -59,57 +70,63 @@ const DEEPBOOK_PREDICT_FNS = [
   "market_key::down",
 ]
 
-// On-chain DeepBook Predict packageId is stable across networks for this
-// hackathon — we only target testnet for now, mainnet would need its own
-// entry.
-const DEEPBOOK_PREDICT_PACKAGES: Record<EnokiNetwork, string> = {
-  testnet: "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138",
-  mainnet: "0x0",
-}
-
-// Sui framework calls that PTBs may issue (e.g. share-object after create).
-// Currently flicky doesn't compose with sui::transfer in its own PTBs but
-// the entry remains for future expansion.
-const SUI_FRAMEWORK_FNS: string[] = []
-
 export type EnokiNetwork = "testnet" | "mainnet"
 
-interface DeployedJson {
-  packageId: string | null
+/**
+ * DeepBook Predict package ids per network. Testnet defaults to what
+ * `env.ts` exposes; mainnet is intentionally not baked in — set
+ * `DEEPBOOK_PREDICT_PACKAGE_MAINNET` (or the legacy single-name
+ * `DEEPBOOK_PREDICT_PACKAGE_ID` if you only target one network) at
+ * deploy time so a typo can't silently approve an attacker's package.
+ */
+function resolveDeepbookPackage(network: EnokiNetwork): string {
+  if (network === "testnet") return env.deepbookPredictPackageId
+  // network === "mainnet"
+  const mainnet =
+    process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET ??
+    (network === ("mainnet" as EnokiNetwork) ? null : null)
+  if (mainnet) return mainnet
+  throw new Error(
+    "DeepBook Predict mainnet package not configured. Set DEEPBOOK_PREDICT_PACKAGE_MAINNET " +
+      "in apps/server/.env before serving sponsored mainnet transactions.",
+  )
 }
 
-function loadFlickyPackageId(network: EnokiNetwork): string {
-  const envOverride = process.env[`FLICKY_PACKAGE_${network.toUpperCase()}`]
-  if (envOverride) return envOverride
-  if (network === "mainnet") {
-    throw new Error("Mainnet flicky package not configured (no deployed.json)")
-  }
-  const path = resolve(import.meta.dir, "../../contracts/deployed.json")
-  try {
-    const deployed = JSON.parse(readFileSync(path, "utf-8")) as DeployedJson
-    if (!deployed.packageId) throw new Error("deployed.json has no packageId")
-    return deployed.packageId
-  } catch (e) {
-    throw new Error(
-      `Cannot resolve flicky package for ${network}: ${e instanceof Error ? e.message : e}`,
-    )
-  }
+function resolveFlickyPackage(network: EnokiNetwork): string {
+  const override = process.env[`FLICKY_PACKAGE_${network.toUpperCase()}`]
+  if (override) return override
+  if (network === "testnet" && env.flickyPackageId) return env.flickyPackageId
+  throw new Error(
+    `Cannot resolve flicky package for ${network} — set FLICKY_PACKAGE_${network.toUpperCase()} ` +
+      `(or publish via apps/contracts on testnet to populate deployed.json).`,
+  )
+}
+
+function resolveSwapPackage(network: EnokiNetwork): string | null {
+  const override = process.env[`SWAP_PACKAGE_${network.toUpperCase()}`]
+  if (override) return override
+  if (network === "testnet") return env.swapPackageId
+  // Mainnet swap pkg not configured yet — return null and just skip
+  // allowlisting swap so a typo can't approve a wrong package.
+  return null
 }
 
 export function buildAllowedTargets(network: EnokiNetwork): string[] {
-  const flicky = loadFlickyPackageId(network)
-  const deepbook = DEEPBOOK_PREDICT_PACKAGES[network]
-  return [
+  const flicky = resolveFlickyPackage(network)
+  const deepbook = resolveDeepbookPackage(network)
+  const swap = resolveSwapPackage(network)
+  const targets = [
     ...FLICKY_FNS.map((fn) => `${flicky}::${fn}`),
     ...DEEPBOOK_PREDICT_FNS.map((fn) => `${deepbook}::${fn}`),
-    ...SUI_FRAMEWORK_FNS,
   ]
+  if (swap) targets.push(...SWAP_FNS.map((fn) => `${swap}::${fn}`))
+  return targets
 }
 
 // ─── CORS ───────────────────────────────────────────────────────────────────
 
 export function sponsorCorsHeaders(reqOrigin: string | null): Record<string, string> {
-  const raw = process.env.ALLOWED_ORIGIN?.trim()
+  const raw = env.allowedOrigin?.trim()
   if (!raw || raw === "*") {
     return {
       "Access-Control-Allow-Origin": reqOrigin || "*",
@@ -134,7 +151,7 @@ export function sponsorCorsHeaders(reqOrigin: string | null): Record<string, str
 }
 
 export function isSponsorOriginAllowed(reqOrigin: string | null): boolean {
-  const raw = process.env.ALLOWED_ORIGIN?.trim()
+  const raw = env.allowedOrigin?.trim()
   if (!raw || raw === "*") return true
   if (!reqOrigin) return false
   return raw
@@ -146,20 +163,18 @@ export function isSponsorOriginAllowed(reqOrigin: string | null): boolean {
 
 // ─── Handler ────────────────────────────────────────────────────────────────
 
-function json(body: unknown, status: number, origin: string | null): Response {
+function jsonRes(body: unknown, status: number, origin: string | null): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json", ...sponsorCorsHeaders(origin) },
   })
 }
 
-/** Lazy-init: we don't want to throw on server boot when the key is unset. */
 let _enoki: EnokiClient | null = null
 function getEnoki(): EnokiClient | null {
   if (_enoki) return _enoki
-  const apiKey = process.env.ENOKI_PRIVATE_KEY
-  if (!apiKey) return null
-  _enoki = new EnokiClient({ apiKey })
+  if (!env.enokiPrivateKey) return null
+  _enoki = new EnokiClient({ apiKey: env.enokiPrivateKey })
   return _enoki
 }
 
@@ -177,34 +192,45 @@ export async function handleSponsorRequest(req: Request): Promise<Response | nul
     return new Response(null, { status: 204, headers: sponsorCorsHeaders(origin) })
   }
   if (req.method !== "POST") {
-    return json({ error: "POST only" }, 405, origin)
+    return jsonRes({ error: "POST only" }, 405, origin)
   }
   if (!isSponsorOriginAllowed(origin)) {
-    return json({ error: "Origin not allowed" }, 403, origin)
+    return jsonRes({ error: "Origin not allowed" }, 403, origin)
+  }
+  const gate = consume("sponsor", clientIp(req, null))
+  if (!gate.ok) {
+    return jsonRes(
+      { error: "rate limited", retryMs: gate.retryMs },
+      429,
+      origin,
+    )
   }
 
   const enoki = getEnoki()
   if (!enoki) {
-    return json({ error: "ENOKI_PRIVATE_KEY not configured" }, 503, origin)
+    return jsonRes({ error: "ENOKI_PRIVATE_KEY not configured" }, 503, origin)
   }
 
   let body: Record<string, unknown>
   try {
     body = (await req.json()) as Record<string, unknown>
   } catch {
-    return json({ error: "Invalid JSON body" }, 400, origin)
+    return jsonRes({ error: "Invalid JSON body" }, 400, origin)
   }
 
   try {
     if (body.action === "create") {
-      const network = body.network as EnokiNetwork | undefined
+      // Default to testnet so the client doesn't have to send `network`
+      // for the common case. Explicit values are validated.
+      const networkRaw = (body.network as string | undefined) ?? "testnet"
+      if (networkRaw !== "testnet" && networkRaw !== "mainnet") {
+        return jsonRes({ error: "network must be testnet | mainnet" }, 400, origin)
+      }
+      const network = networkRaw as EnokiNetwork
       const transactionKindBytes = body.transactionKindBytes as string | undefined
       const sender = body.sender as string | undefined
-      if (network !== "testnet" && network !== "mainnet") {
-        return json({ error: "network must be testnet | mainnet" }, 400, origin)
-      }
       if (!transactionKindBytes || !sender) {
-        return json(
+        return jsonRes(
           { error: "Missing transactionKindBytes or sender" },
           400,
           origin,
@@ -217,26 +243,27 @@ export async function handleSponsorRequest(req: Request): Promise<Response | nul
         allowedMoveCallTargets: buildAllowedTargets(network),
         allowedAddresses: [sender],
       })
-      return json({ bytes: result.bytes, digest: result.digest }, 200, origin)
+      return jsonRes({ bytes: result.bytes, digest: result.digest }, 200, origin)
     }
 
     if (body.action === "execute") {
       const digest = body.digest as string | undefined
       const signature = body.signature as string | undefined
       if (!digest || !signature) {
-        return json({ error: "Missing digest or signature" }, 400, origin)
+        return jsonRes({ error: "Missing digest or signature" }, 400, origin)
       }
       const result = await enoki.executeSponsoredTransaction({ digest, signature })
-      return json({ digest: result.digest }, 200, origin)
+      return jsonRes({ digest: result.digest }, 200, origin)
     }
 
-    return json(
+    return jsonRes(
       { error: "Unknown action — use 'create' or 'execute'" },
       400,
       origin,
     )
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    return json({ error: "Enoki call failed", detail: message }, 502, origin)
+    log.warn(`enoki call failed: ${message}`)
+    return jsonRes({ error: "Enoki call failed", detail: message }, 502, origin)
   }
 }

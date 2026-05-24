@@ -185,10 +185,21 @@ export async function getManagerDusdcBalance(
 
 // === PTB builders ===
 
-/** Create a PredictManager for the caller. One-time setup per player. */
+/** Create a PredictManager for the caller. One-time setup per player.
+ *
+ * The minimized DeepBook Predict codegen at `sui/gen/deepbook_predict`
+ * doesn't expose `create_manager` — the function lives on the deployed
+ * DeepBook package but not on the type-stub used by Flicky's contract.
+ * We build the call manually instead of going through the codegen
+ * binding. Sponsor allowlist whitelists `predict::create_manager` so
+ * the sponsored-gas path still works.
+ */
 export function buildCreateManagerTx(): Transaction {
   const tx = new Transaction()
-  tx.add(predict.createManager({ package: DEEPBOOK.package, arguments: [] }))
+  tx.moveCall({
+    target: `${DEEPBOOK.package}::predict::create_manager`,
+    arguments: [],
+  })
   return tx
 }
 
@@ -258,6 +269,13 @@ export function buildStakedSwipeTx(args: {
   strike: bigint
   isUp: boolean
   quantity: bigint
+  /**
+   * Premium paid for the Predict position, in dUSDC micro-units. The
+   * contract verifies `premium > 0` and the keeper redeems against this
+   * exact value, so the FE should pass what `predict::get_mint_amounts`
+   * (or `pricing::quote_*`) returned at quote time.
+   */
+  premium: bigint
   cardIdx: number
 }): Transaction {
   const tx = new Transaction()
@@ -291,10 +309,21 @@ export function buildStakedSwipeTx(args: {
   )
 
   // 3. Record the swipe in the Flicky duel — same OracleSVI, atomic.
+  // New contract signature: (duel, manager, oracle, card_idx, is_up,
+  // quantity, premium, clock, ctx). Clock + ctx are auto-injected by
+  // the codegen; we pass the other 7 in order.
   tx.add(
     duel.recordSwipe({
       package: CONFIG.packageId,
-      arguments: [args.duelId, args.oracleSviId, args.cardIdx, args.isUp],
+      arguments: [
+        args.duelId,
+        args.managerId,
+        args.oracleSviId,
+        args.cardIdx,
+        args.isUp,
+        args.quantity,
+        args.premium,
+      ],
       typeArguments: [DEEPBOOK.dusdcType],
     }),
   )

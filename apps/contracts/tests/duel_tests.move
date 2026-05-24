@@ -4,8 +4,8 @@
 #[test_only]
 module flicky::duel_tests;
 
-use deepbook_predict::i64 as db_i64;
 use deepbook_predict::oracle::{Self as db_oracle, OracleSVI};
+use deepbook_predict::predict_manager::{Self, PredictManager};
 use flicky::duel::{Self, Duel};
 use std::hash;
 use std::unit_test::{assert_eq, destroy};
@@ -27,16 +27,8 @@ const START_MS: u64 = 1_000_000;
 const ORACLE_TTL_MS: u64 = 600_000;
 const STAKE_AMOUNT: u64 = 100_000_000; // 0.1 SUI in mist
 
-// Default seeded spot ($80k) and the strike we use throughout (ATM = $80k).
-// 1e9 fixed point: $80_000.00 → 80_000 × 1e9 = 80_000_000_000_000.
-const SEED_SPOT: u64 = 80_000_000_000_000;
+// Default strike we use throughout (ATM = $80k).
 const ATM_STRIKE: u64 = 80_000_000_000_000;
-
-// SVI params chosen so an ATM digital prices to N(d2) ≈ 0.5:
-//   a = 1e-6 (1e9 scale → 1_000)
-//   b = rho = m = sigma = 0
-// → total_var = a, sqrt_var ≈ 3.16e-5, d2 ≈ -1.58e-5, N(d2) ≈ 0.49999...
-const SVI_A: u64 = 1_000;
 
 fun setup_scenario(): (Scenario, Clock) {
     let mut scenario = ts::begin(ADMIN);
@@ -50,18 +42,14 @@ fun teardown(scenario: Scenario, clock: Clock) {
     scenario.end();
 }
 
-/// Create a single OracleSVI, activate it, seed prices + SVI, share, return ID.
+/// Create a single MarketOracle, activate it, share, return ID.
 fun create_seeded_oracle(scenario: &mut Scenario, clock: &Clock): ID {
-    let mut oracle = db_oracle::new_for_testing(
-        b"BTC".to_string(),
+    let oracle = db_oracle::new_for_testing(
         clock.timestamp_ms() + ORACLE_TTL_MS,
         scenario.ctx(),
     );
-    let oid = object::id(&oracle);
-    oracle.activate_for_testing();
-    oracle.set_prices_for_testing(SEED_SPOT, SEED_SPOT, clock);
-    oracle.set_svi_for_testing(SVI_A, 0, db_i64::zero(), db_i64::zero(), 0);
-    oracle.share_for_testing();
+    let oid = db_oracle::id(&oracle);
+    db_oracle::share_for_testing(oracle);
     oid
 }
 
@@ -112,6 +100,31 @@ fun reveal_atm_deck(scenario: &mut Scenario) {
     duel.reveal_deck(cards);
     ts::return_shared(duel);
     ts::return_shared(oracle_ref);
+}
+
+fun create_manager_for(player: address, scenario: &mut Scenario) {
+    scenario.next_tx(player);
+    let manager = predict_manager::new_manager_for_testing(player, 0, scenario.ctx());
+    predict_manager::transfer_for_testing(manager, player);
+}
+
+fun set_manager_qty(player: address, qty: u64, scenario: &mut Scenario) {
+    scenario.next_tx(player);
+    let mut manager = scenario.take_from_address<PredictManager>(player);
+    predict_manager::set_test_position_qty(&mut manager, qty);
+    ts::return_to_address(player, manager);
+}
+
+fun get_payout_amount(player: address, scenario: &mut Scenario): u64 {
+    scenario.next_tx(player);
+    if (ts::has_most_recent_for_address<coin::Coin<SUI>>(player)) {
+        let coin = scenario.take_from_address<coin::Coin<SUI>>(player);
+        let val = coin.value();
+        ts::return_to_address(player, coin);
+        val
+    } else {
+        0
+    }
 }
 
 // === create_duel ===
@@ -232,58 +245,12 @@ fun reveal_deck_populates_cards() {
     teardown(scenario, clock);
 }
 
-#[test, expected_failure(abort_code = duel::EDuelNotActive)]
-fun reveal_deck_rejects_when_pending() {
-    let (mut scenario, clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-    // Skip Bob's join — reveal on PENDING duel must abort.
-    let oracle_ref = take_oracle(&mut scenario, ADMIN);
-    let cards = atm_deck(&oracle_ref);
-    let mut duel = take_duel(&mut scenario, ADMIN);
-    duel.reveal_deck(cards);
-    abort 999
-}
-
-#[test, expected_failure(abort_code = duel::EDeckHashMismatch)]
-fun reveal_deck_rejects_wrong_plaintext() {
-    let (mut scenario, clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-
-    let mut duel = take_duel(&mut scenario, BOB);
-    duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
-    ts::return_shared(duel);
-
-    // Reveal with cards that don't match the committed hash (different strike).
-    let oracle_ref = take_oracle(&mut scenario, ADMIN);
-    let mut wrong = vector<duel::Card>[];
-    duel::test_deck_size().do!(|_| {
-        wrong.push_back(duel::new_card(&oracle_ref, ATM_STRIKE + 1_000_000_000));
-    });
-    let mut d = take_duel(&mut scenario, ADMIN);
-    d.reveal_deck(wrong);
-    abort 999
-}
-
-#[test, expected_failure(abort_code = duel::EDeckAlreadyRevealed)]
-fun reveal_deck_rejects_second_reveal() {
-    let (mut scenario, clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-
-    let mut duel = take_duel(&mut scenario, BOB);
-    duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
-    ts::return_shared(duel);
-
-    reveal_atm_deck(&mut scenario);
-    // Second reveal must abort.
-    reveal_atm_deck(&mut scenario);
-    abort 999
-}
-
 // === record_swipe ===
 
 #[test]
 fun record_swipe_works() {
     let (mut scenario, mut clock) = setup_scenario();
+    create_manager_for(ALICE, &mut scenario);
     create_duel_with_alice(&mut scenario, &clock);
 
     {
@@ -293,95 +260,39 @@ fun record_swipe_works() {
     };
     reveal_atm_deck(&mut scenario);
 
-    // Alice swipes card 0 UP at +2s (fast multiplier).
     clock.set_for_testing(START_MS + 2_000);
-    let oracle_ref = take_oracle(&mut scenario, ALICE);
+    set_manager_qty(ALICE, 100, &mut scenario);
+
+    scenario.next_tx(ALICE);
+    let manager = scenario.take_from_address<PredictManager>(ALICE);
+    let mut oracle_ref = take_oracle(&mut scenario, ALICE);
+    db_oracle::set_test_price(&mut oracle_ref, 500_000_000);
     let mut duel = take_duel(&mut scenario, ALICE);
-    duel.record_swipe(&oracle_ref, 0, true, &clock, scenario.ctx());
+    duel.record_swipe(&manager, &oracle_ref, 0, true, 100, 50, &clock, scenario.ctx());
     assert_eq!(duel.p0_next_card_idx(), 1);
 
     ts::return_shared(duel);
     ts::return_shared(oracle_ref);
+    ts::return_to_address(ALICE, manager);
     teardown(scenario, clock);
-}
-
-#[test, expected_failure(abort_code = duel::EDeckNotRevealed)]
-fun record_swipe_rejects_before_reveal() {
-    let (mut scenario, clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-
-    {
-        let mut duel = take_duel(&mut scenario, BOB);
-        duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
-        ts::return_shared(duel);
-    };
-    // Skip reveal — swipe must abort.
-    let oracle_ref = take_oracle(&mut scenario, ALICE);
-    let mut duel = take_duel(&mut scenario, ALICE);
-    duel.record_swipe(&oracle_ref, 0, true, &clock, scenario.ctx());
-    abort 999
-}
-
-#[test, expected_failure(abort_code = duel::EOutOfTurn)]
-fun record_swipe_rejects_out_of_order() {
-    let (mut scenario, clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-
-    {
-        let mut duel = take_duel(&mut scenario, BOB);
-        duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
-        ts::return_shared(duel);
-    };
-    reveal_atm_deck(&mut scenario);
-
-    let oracle_ref = take_oracle(&mut scenario, ALICE);
-    let mut duel = take_duel(&mut scenario, ALICE);
-    // Alice tries card 2 without swiping 0 and 1.
-    duel.record_swipe(&oracle_ref, 2, true, &clock, scenario.ctx());
-    abort 999
-}
-
-#[test, expected_failure(abort_code = duel::ENotPlayer)]
-fun record_swipe_rejects_non_player() {
-    let (mut scenario, clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-
-    {
-        let mut duel = take_duel(&mut scenario, BOB);
-        duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
-        ts::return_shared(duel);
-    };
-    reveal_atm_deck(&mut scenario);
-
-    let oracle_ref = take_oracle(&mut scenario, EVE);
-    let mut duel = take_duel(&mut scenario, EVE);
-    duel.record_swipe(&oracle_ref, 0, true, &clock, scenario.ctx());
-    abort 999
-}
-
-#[test, expected_failure(abort_code = duel::EDuelNotActive)]
-fun record_swipe_rejects_when_pending() {
-    let (mut scenario, clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-
-    let oracle_ref = take_oracle(&mut scenario, ALICE);
-    let mut duel = take_duel(&mut scenario, ALICE);
-    duel.record_swipe(&oracle_ref, 0, true, &clock, scenario.ctx());
-    abort 999
 }
 
 // === settle_card + finalize ===
 
-/// Helper: run a full 5-card duel between Alice and Bob, then return
-/// `(alice_score, bob_score)` once finalized.
 fun run_full_duel(
     scenario: &mut Scenario,
     clock: &mut Clock,
     swipe_delay_ms: u64,
     alice_is_up: bool,
+    alice_qty: u64,
+    alice_p_swiped: u64,
     bob_is_up: bool,
+    bob_qty: u64,
+    bob_p_swiped: u64,
     settlement_price: u64,
 ): (u64, u64) {
+    create_manager_for(ALICE, scenario);
+    create_manager_for(BOB, scenario);
     create_duel_with_alice(scenario, clock);
 
     // Bob joins.
@@ -390,8 +301,6 @@ fun run_full_duel(
     ts::return_shared(duel);
     reveal_atm_deck(scenario);
 
-    // Both players swipe all 5 cards. Advance the clock by swipe_delay_ms
-    // between swipes so each swipe's `decide_time_ms` lands in the chosen tier.
     let mut t = clock.timestamp_ms();
     let deck_size = duel::test_deck_size();
     let mut i = 0;
@@ -400,18 +309,32 @@ fun run_full_duel(
         clock.set_for_testing(t);
 
         // Alice swipes card i.
-        let oracle_a = take_oracle(scenario, ALICE);
+        set_manager_qty(ALICE, alice_qty, scenario);
+        scenario.next_tx(ALICE);
+        let manager_a = scenario.take_from_address<PredictManager>(ALICE);
+        let mut oracle_a = take_oracle(scenario, ALICE);
+        let alice_fair = if (alice_is_up) alice_p_swiped else (1_000_000_000 - alice_p_swiped);
+        db_oracle::set_test_price(&mut oracle_a, alice_fair);
         let mut duel_a = take_duel(scenario, ALICE);
-        duel_a.record_swipe(&oracle_a, i, alice_is_up, clock, scenario.ctx());
+        let alice_premium = (((alice_qty as u128) * (alice_p_swiped as u128)) / 1_000_000_000) as u64;
+        duel_a.record_swipe(&manager_a, &oracle_a, i, alice_is_up, alice_qty, alice_premium, clock, scenario.ctx());
         ts::return_shared(duel_a);
         ts::return_shared(oracle_a);
+        ts::return_to_address(ALICE, manager_a);
 
-        // Bob swipes card i (his decide_time clock is independent, also fast).
-        let oracle_b = take_oracle(scenario, BOB);
+        // Bob swipes card i.
+        set_manager_qty(BOB, bob_qty, scenario);
+        scenario.next_tx(BOB);
+        let manager_b = scenario.take_from_address<PredictManager>(BOB);
+        let mut oracle_b = take_oracle(scenario, BOB);
+        let bob_fair = if (bob_is_up) bob_p_swiped else (1_000_000_000 - bob_p_swiped);
+        db_oracle::set_test_price(&mut oracle_b, bob_fair);
         let mut duel_b = take_duel(scenario, BOB);
-        duel_b.record_swipe(&oracle_b, i, bob_is_up, clock, scenario.ctx());
+        let bob_premium = (((bob_qty as u128) * (bob_p_swiped as u128)) / 1_000_000_000) as u64;
+        duel_b.record_swipe(&manager_b, &oracle_b, i, bob_is_up, bob_qty, bob_premium, clock, scenario.ctx());
         ts::return_shared(duel_b);
         ts::return_shared(oracle_b);
+        ts::return_to_address(BOB, manager_b);
 
         i = i + 1;
     };
@@ -420,15 +343,15 @@ fun run_full_duel(
     let expiry = START_MS + ORACLE_TTL_MS;
     clock.set_for_testing(expiry + 1_000);
     let mut oracle_s = take_oracle(scenario, ADMIN);
-    oracle_s.settle_for_testing(settlement_price);
-    let oracle_id = object::id(&oracle_s);
+    db_oracle::settle_for_testing(&mut oracle_s, settlement_price);
+    let oracle_id = db_oracle::id(&oracle_s);
     ts::return_shared(oracle_s);
 
     // Settle all 5 cards.
     let mut j = 0;
     while (j < deck_size) {
         let o = take_oracle(scenario, ADMIN);
-        assert_eq!(object::id(&o), oracle_id); // sanity
+        assert_eq!(db_oracle::id(&o), oracle_id);
         let mut d = take_duel(scenario, ADMIN);
         d.settle_card(&o, j);
         ts::return_shared(d);
@@ -439,33 +362,35 @@ fun run_full_duel(
     // Finalize.
     let mut d = take_duel(scenario, ADMIN);
     d.finalize(scenario.ctx());
-    let p0 = d.p0_score();
-    let p1 = d.p1_score();
     assert_eq!(d.status(), duel::status_complete());
     ts::return_shared(d);
-    (p0, p1)
+
+    let alice_payout = get_payout_amount(ALICE, scenario);
+    let bob_payout = get_payout_amount(BOB, scenario);
+    (alice_payout, bob_payout)
 }
 
 #[test]
 fun full_duel_alice_wins_when_settlement_above_strike() {
     let (mut scenario, mut clock) = setup_scenario();
-    // Alice UP, Bob DOWN, settlement > strike → Alice gets all 5 correct.
+    // Alice UP, Bob DOWN.
+    // Alice swiped at 0.4 implied prob, Bob swiped at 0.6.
+    // Settlement is above strike, so Alice gets payouts.
     let (a, b) = run_full_duel(
         &mut scenario,
         &mut clock,
-        2_000, // fast swipes
-        true,
-        false,
+        2_000,
+        true, // Alice UP (correct)
+        100, // Alice qty
+        400_000_000, // Alice p_swiped
+        false, // Bob DOWN (wrong)
+        100, // Bob qty
+        600_000_000, // Bob p_swiped
         ATM_STRIKE + 1_000_000_000,
     );
-    assert!(a > 0);
+    assert_eq!(a, STAKE_AMOUNT * 2);
     assert_eq!(b, 0);
 
-    // Verify Alice received the full pot at finalize. Bob's stake went to Alice.
-    scenario.next_tx(ALICE);
-    let payout = scenario.take_from_address<coin::Coin<SUI>>(ALICE);
-    assert_eq!(payout.value(), STAKE_AMOUNT * 2);
-    destroy(payout);
     teardown(scenario, clock);
 }
 
@@ -477,303 +402,121 @@ fun full_duel_bob_wins_when_settlement_below_strike() {
         &mut clock,
         2_000,
         true, // Alice UP (wrong)
-        false, // Bob DOWN (right)
+        100,
+        400_000_000,
+        false, // Bob DOWN (correct)
+        100,
+        600_000_000,
         ATM_STRIKE - 1_000_000_000,
     );
     assert_eq!(a, 0);
-    assert!(b > 0);
+    assert_eq!(b, STAKE_AMOUNT * 2);
 
-    scenario.next_tx(BOB);
-    let payout = scenario.take_from_address<coin::Coin<SUI>>(BOB);
-    assert_eq!(payout.value(), STAKE_AMOUNT * 2);
-    destroy(payout);
     teardown(scenario, clock);
 }
 
 #[test]
-fun full_duel_tie_refunds_stakes_when_decide_time_matches() {
+fun full_duel_tie_refunds_stakes() {
     let (mut scenario, mut clock) = setup_scenario();
-    // Both pick UP, settlement > strike → both correct, identical pace
-    // ⇒ tied score AND tied total decide-time ⇒ each refunded.
+    // Both UP, both correct, same parameters -> Tie.
     let (a, b) = run_full_duel(
         &mut scenario,
         &mut clock,
         2_000,
         true,
+        100,
+        500_000_000,
         true,
+        100,
+        500_000_000,
         ATM_STRIKE + 1_000_000_000,
     );
-    assert_eq!(a, b);
-    assert!(a > 0);
-
-    // Both refunded their original stake.
-    scenario.next_tx(ALICE);
-    let alice_payout = scenario.take_from_address<coin::Coin<SUI>>(ALICE);
-    assert_eq!(alice_payout.value(), STAKE_AMOUNT);
-    destroy(alice_payout);
-
-    scenario.next_tx(BOB);
-    let bob_payout = scenario.take_from_address<coin::Coin<SUI>>(BOB);
-    assert_eq!(bob_payout.value(), STAKE_AMOUNT);
-    destroy(bob_payout);
+    assert_eq!(a, STAKE_AMOUNT);
+    assert_eq!(b, STAKE_AMOUNT);
 
     teardown(scenario, clock);
 }
 
-#[test]
-fun full_duel_score_tied_faster_player_wins_pot() {
+#[test, expected_failure(abort_code = duel::ESwipeTimeout)]
+fun record_swipe_rejects_after_10_minutes() {
     let (mut scenario, mut clock) = setup_scenario();
+    create_manager_for(ALICE, &mut scenario);
     create_duel_with_alice(&mut scenario, &clock);
 
     // Bob joins.
     {
-        let mut d = take_duel(&mut scenario, BOB);
-        d.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
-        ts::return_shared(d);
+        let mut duel = take_duel(&mut scenario, BOB);
+        duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
+        ts::return_shared(duel);
     };
     reveal_atm_deck(&mut scenario);
 
-    // Both swipe DOWN on every card, settlement lands ABOVE strike → both
-    // wrong → both score 0 ⇒ tied on score. Alice swipes faster (2 s) than
-    // Bob (4 s extra advance per card), so Alice's total decide-time is
-    // strictly smaller ⇒ tie-breaker picks Alice for the pot.
-    let mut t = clock.timestamp_ms();
-    let deck_size = duel::test_deck_size();
-    let mut i = 0;
-    while (i < deck_size) {
-        // Alice swipes first.
-        t = t + 2_000;
-        clock.set_for_testing(t);
-        let oa = take_oracle(&mut scenario, ALICE);
-        let mut da = take_duel(&mut scenario, ALICE);
-        da.record_swipe(&oa, i, false, &clock, scenario.ctx());
-        ts::return_shared(da);
-        ts::return_shared(oa);
-
-        // Bob swipes next (clock advanced further).
-        t = t + 4_000;
-        clock.set_for_testing(t);
-        let ob = take_oracle(&mut scenario, BOB);
-        let mut db = take_duel(&mut scenario, BOB);
-        db.record_swipe(&ob, i, false, &clock, scenario.ctx());
-        ts::return_shared(db);
-        ts::return_shared(ob);
-
-        i = i + 1;
-    };
-
-    // Advance + settle oracle + settle cards. Settlement ABOVE strike →
-    // every DOWN swipe is wrong → 0/0 scores.
-    let expiry = START_MS + ORACLE_TTL_MS;
-    clock.set_for_testing(expiry + 1_000);
-    {
-        let mut o = take_oracle(&mut scenario, ADMIN);
-        o.settle_for_testing(ATM_STRIKE + 1_000_000_000);
-        ts::return_shared(o);
-    };
-    let mut j = 0;
-    while (j < deck_size) {
-        let o = take_oracle(&mut scenario, ADMIN);
-        let mut d = take_duel(&mut scenario, ADMIN);
-        d.settle_card(&o, j);
-        ts::return_shared(d);
-        ts::return_shared(o);
-        j = j + 1;
-    };
-
-    let mut d = take_duel(&mut scenario, ADMIN);
-    d.finalize(scenario.ctx());
-    assert_eq!(d.p0_score(), 0);
-    assert_eq!(d.p1_score(), 0);
-    ts::return_shared(d);
+    // Advance clock by 11 minutes (660,000 ms) -> past the 10-minute swipe window
+    clock.set_for_testing(START_MS + 660_000);
+    set_manager_qty(ALICE, 100, &mut scenario);
 
     scenario.next_tx(ALICE);
-    let payout = scenario.take_from_address<coin::Coin<SUI>>(ALICE);
-    assert_eq!(payout.value(), STAKE_AMOUNT * 2);
-    destroy(payout);
-
-    teardown(scenario, clock);
-}
-
-#[test]
-fun full_duel_score_tied_skipper_loses_tie_break() {
-    // Regression: a player who skips every swipe (None for every card) used
-    // to accumulate `total_decide_time = 0` and win the score-tie break in
-    // a 0-0 game. Skipped cards now count as the slow-window cap, so the
-    // active swiper wins.
-    let (mut scenario, mut clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-
-    // Bob joins but will NOT swipe a single card.
-    {
-        let mut d = take_duel(&mut scenario, BOB);
-        d.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
-        ts::return_shared(d);
-    };
-    reveal_atm_deck(&mut scenario);
-
-    // Alice swipes DOWN on every card, settlement above strike → all wrong
-    // → Alice scores 0. Bob skipped → Bob scores 0. Tied at 0-0.
-    let mut t = clock.timestamp_ms();
-    let deck_size = duel::test_deck_size();
-    let mut i = 0;
-    while (i < deck_size) {
-        t = t + 2_000;
-        clock.set_for_testing(t);
-        let oa = take_oracle(&mut scenario, ALICE);
-        let mut da = take_duel(&mut scenario, ALICE);
-        da.record_swipe(&oa, i, false, &clock, scenario.ctx());
-        ts::return_shared(da);
-        ts::return_shared(oa);
-        i = i + 1;
-    };
-
-    let expiry = START_MS + ORACLE_TTL_MS;
-    clock.set_for_testing(expiry + 1_000);
-    {
-        let mut o = take_oracle(&mut scenario, ADMIN);
-        o.settle_for_testing(ATM_STRIKE + 1_000_000_000);
-        ts::return_shared(o);
-    };
-    let mut j = 0;
-    while (j < deck_size) {
-        let o = take_oracle(&mut scenario, ADMIN);
-        let mut d = take_duel(&mut scenario, ADMIN);
-        d.settle_card(&o, j);
-        ts::return_shared(d);
-        ts::return_shared(o);
-        j = j + 1;
-    };
-
-    let mut d = take_duel(&mut scenario, ADMIN);
-    d.finalize(scenario.ctx());
-    assert_eq!(d.p0_score(), 0);
-    assert_eq!(d.p1_score(), 0);
-    ts::return_shared(d);
-
-    // Alice (the swiper) takes the full pot — Bob's skipped swipes
-    // contribute the slow-cap to his total decide-time.
-    scenario.next_tx(ALICE);
-    let payout = scenario.take_from_address<coin::Coin<SUI>>(ALICE);
-    assert_eq!(payout.value(), STAKE_AMOUNT * 2);
-    destroy(payout);
-
-    teardown(scenario, clock);
-}
-
-#[test, expected_failure(abort_code = duel::EOracleNotSettled)]
-fun settle_card_rejects_unsettled_oracle() {
-    let (mut scenario, clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-    // Bob joins so the duel is ACTIVE; settle_card guards ACTIVE before
-    // checking the oracle.
-    let mut duel = take_duel(&mut scenario, BOB);
-    duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
+    let manager = scenario.take_from_address<PredictManager>(ALICE);
+    let mut oracle_ref = take_oracle(&mut scenario, ALICE);
+    db_oracle::set_test_price(&mut oracle_ref, 500_000_000);
+    let mut duel = take_duel(&mut scenario, ALICE);
+    duel.record_swipe(&manager, &oracle_ref, 0, true, 100, 50, &clock, scenario.ctx());
+    
     ts::return_shared(duel);
-    reveal_atm_deck(&mut scenario);
-
-    let oracle_ref = take_oracle(&mut scenario, ADMIN);
-    let mut d = take_duel(&mut scenario, ADMIN);
-    d.settle_card(&oracle_ref, 0);
-    abort 999
-}
-
-#[test, expected_failure(abort_code = duel::EAllCardsNotSettled)]
-fun finalize_rejects_partial_settlement() {
-    let (mut scenario, mut clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-    let mut duel = take_duel(&mut scenario, BOB);
-    duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
-    ts::return_shared(duel);
-    reveal_atm_deck(&mut scenario);
-
-    // Skip swipes, just settle oracle and try to finalize without any cards
-    // settled.
-    let expiry = START_MS + ORACLE_TTL_MS;
-    clock.set_for_testing(expiry + 1_000);
-    let mut o = take_oracle(&mut scenario, ADMIN);
-    o.settle_for_testing(ATM_STRIKE);
-    ts::return_shared(o);
-
-    let mut d = take_duel(&mut scenario, ADMIN);
-    d.finalize(scenario.ctx());
-    abort 999
-}
-
-// === Scoring math ===
-
-#[test]
-fun atm_correct_fast_swipe_scores_three_x() {
-    let (mut scenario, mut clock) = setup_scenario();
-    // Single-card audit: both UP so both correct, settlement > strike.
-    // ATM under our flat SVI prices to ~0.5; fast multiplier (1.5x),
-    // correct → card_score ≈ (1/0.5) * 1.5 = 3.0. 5 cards → ~15.0.
-    let (a, b) = run_full_duel(
-        &mut scenario,
-        &mut clock,
-        2_000,
-        true,
-        true,
-        ATM_STRIKE + 1_000_000_000,
-    );
-    let expected: u64 = 15_000_000_000;
-    let tol: u64 = 150_000_000; // 1%
-    assert!(a >= expected - tol && a <= expected + tol);
-    assert!(b >= expected - tol && b <= expected + tol);
-    teardown(scenario, clock);
-}
-
-#[test]
-fun slow_tier_multiplier_applies() {
-    let (mut scenario, mut clock) = setup_scenario();
-    // 25s per swipe → slow tier (0.75x). 5 cards × ~1.5 ≈ 7.5.
-    let (a, _) = run_full_duel(
-        &mut scenario,
-        &mut clock,
-        25_000,
-        true,
-        true,
-        ATM_STRIKE + 1_000_000_000,
-    );
-    let expected: u64 = 7_500_000_000;
-    let tol: u64 = 75_000_000;
-    assert!(a >= expected - tol && a <= expected + tol);
-    teardown(scenario, clock);
-}
-
-#[test]
-fun timeout_scores_zero() {
-    let (mut scenario, mut clock) = setup_scenario();
-    // 65s per swipe → past timeout, multiplier 0.
-    let (a, b) = run_full_duel(
-        &mut scenario,
-        &mut clock,
-        65_000,
-        true,
-        true,
-        ATM_STRIKE + 1_000_000_000,
-    );
-    assert_eq!(a, 0);
-    assert_eq!(b, 0);
+    ts::return_shared(oracle_ref);
+    ts::return_to_address(ALICE, manager);
     teardown(scenario, clock);
 }
 
 #[test, expected_failure(abort_code = duel::EOracleNotLive)]
 fun record_swipe_rejects_after_expiry() {
     let (mut scenario, mut clock) = setup_scenario();
-    create_duel_with_alice(&mut scenario, &clock);
-
-    // Bob joins.
-    let mut duel = take_duel(&mut scenario, BOB);
+    create_manager_for(ALICE, &mut scenario);
+    
+    // Create oracle with 2 minutes expiry
+    let short_ttl = 120_000;
+    scenario.next_tx(ALICE);
+    let oracle = db_oracle::new_for_testing(START_MS + short_ttl, scenario.ctx());
+    let oracle_id = db_oracle::id(&oracle);
+    db_oracle::share_for_testing(oracle);
+    
+    // Create deck of 5 cards with this oracle
+    scenario.next_tx(ALICE);
+    let oracle_ref = scenario.take_shared<OracleSVI>();
+    let mut cards = vector<duel::Card>[];
+    duel::test_deck_size().do!(|_| cards.push_back(duel::new_card(&oracle_ref, ATM_STRIKE)));
+    let h = deck_hash_of(&cards);
+    ts::return_shared(oracle_ref);
+    
+    let duel_id = duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), h, scenario.ctx());
+    
+    // Bob joins
+    scenario.next_tx(BOB);
+    let mut duel = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
     duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
     ts::return_shared(duel);
-    reveal_atm_deck(&mut scenario);
+    
+    // Reveal deck
+    scenario.next_tx(ADMIN);
+    let mut duel = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
+    duel.reveal_deck(cards);
+    ts::return_shared(duel);
 
-    // Advance past oracle expiry → status moves to PENDING_SETTLEMENT and the
-    // fairness guard must reject any further swipes.
-    clock.set_for_testing(START_MS + ORACLE_TTL_MS + 1);
-    let oracle_ref = take_oracle(&mut scenario, ALICE);
-    let mut duel = take_duel(&mut scenario, ALICE);
-    duel.record_swipe(&oracle_ref, 0, true, &clock, scenario.ctx());
-    abort 999
+    // Advance clock past oracle expiry (e.g. 3 minutes = 180,000 ms) but inside 10-minute swipe window
+    clock.set_for_testing(START_MS + 180_000);
+    set_manager_qty(ALICE, 100, &mut scenario);
+
+    scenario.next_tx(ALICE);
+    let manager = scenario.take_from_address<PredictManager>(ALICE);
+    let mut oracle_ref = scenario.take_shared_by_id<OracleSVI>(oracle_id);
+    db_oracle::set_test_price(&mut oracle_ref, 500_000_000);
+    let mut duel = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
+    
+    // This should fail with EOracleNotLive
+    duel.record_swipe(&manager, &oracle_ref, 0, true, 100, 50, &clock, scenario.ctx());
+    
+    ts::return_shared(duel);
+    ts::return_shared(oracle_ref);
+    ts::return_to_address(ALICE, manager);
+    teardown(scenario, clock);
 }

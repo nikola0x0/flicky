@@ -4,10 +4,17 @@
 import { MoveStruct, normalizeMoveArguments, type RawTransactionArgument } from '../utils/index.js';
 import { bcs } from '@mysten/sui/bcs';
 import { type Transaction, type TransactionArgument } from '@mysten/sui/transactions';
+import * as balance_manager from './deps/deepbook/balance_manager.js';
+import * as table from './deps/sui/table.js';
 const $moduleName = 'deepbook_predict::predict_manager';
 export const PredictManager = new MoveStruct({ name: `${$moduleName}::PredictManager`, fields: {
         id: bcs.Address,
-        owner: bcs.Address
+        owner: bcs.Address,
+        balance_manager: balance_manager.BalanceManager,
+        deposit_cap: balance_manager.DepositCap,
+        withdraw_cap: balance_manager.WithdrawCap,
+        positions: table.Table,
+        range_positions: table.Table
     } });
 export interface OwnerArguments {
     self: RawTransactionArgument<string>;
@@ -32,14 +39,14 @@ export function owner(options: OwnerOptions) {
     });
 }
 export interface PositionArguments {
-    Self: RawTransactionArgument<string>;
-    Key: TransactionArgument;
+    self: RawTransactionArgument<string>;
+    key: TransactionArgument;
 }
 export interface PositionOptions {
     package?: string;
     arguments: PositionArguments | [
-        Self: RawTransactionArgument<string>,
-        Key: TransactionArgument
+        self: RawTransactionArgument<string>,
+        key: TransactionArgument
     ];
 }
 export function position(options: PositionOptions) {
@@ -48,7 +55,7 @@ export function position(options: PositionOptions) {
         null,
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["Self", "Key"];
+    const parameterNames = ["self", "key"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'predict_manager',
@@ -57,14 +64,14 @@ export function position(options: PositionOptions) {
     });
 }
 export interface RangePositionArguments {
-    Self: RawTransactionArgument<string>;
-    Key: TransactionArgument;
+    self: RawTransactionArgument<string>;
+    key: TransactionArgument;
 }
 export interface RangePositionOptions {
     package?: string;
     arguments: RangePositionArguments | [
-        Self: RawTransactionArgument<string>,
-        Key: TransactionArgument
+        self: RawTransactionArgument<string>,
+        key: TransactionArgument
     ];
 }
 export function rangePosition(options: RangePositionOptions) {
@@ -73,7 +80,7 @@ export function rangePosition(options: RangePositionOptions) {
         null,
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["Self", "Key"];
+    const parameterNames = ["self", "key"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'predict_manager',
@@ -163,5 +170,27 @@ export function withdraw(options: WithdrawOptions) {
         function: 'withdraw',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
         typeArguments: options.typeArguments
+    });
+}
+export interface ShareArguments {
+    self: RawTransactionArgument<string>;
+}
+export interface ShareOptions {
+    package?: string;
+    arguments: ShareArguments | [
+        self: RawTransactionArgument<string>
+    ];
+}
+export function share(options: ShareOptions) {
+    const packageAddress = options.package ?? 'deepbook_predict';
+    const argumentsTypes = [
+        null
+    ] satisfies (string | null)[];
+    const parameterNames = ["self"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'predict_manager',
+        function: 'share',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }

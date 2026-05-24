@@ -2,38 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Flicky duel: a two-player, five-card prediction match escrowing stakes
-/// in a shared object, consuming DeepBook Predict's `OracleSVI` per card for
-/// `p_swiped` snapshots and terminal correctness.
+/// in a shared object, consuming DeepBook Predict positions for correctness
+/// and computing payout.
 ///
 /// Lifecycle:
 ///   `PENDING` (creator staked, waiting for challenger) →
 ///   `ACTIVE`  (both staked, swipes in progress) →
 ///   `COMPLETE` (all cards settled and stakes paid out).
-///
-/// Per the README/PRD spec:
-/// - Each card references one `OracleSVI` + one strike on its grid.
-/// - Swipes are strictly sequential per player; each swipe snapshots the
-///   implied probability of the chosen direction (`p_swiped`) at the moment
-///   of the swipe — this is what scoring rewards.
-/// - Card score = `correct ? (1 / p_swiped) * speed_multiplier : 0`, with
-///   per-card decide-time measured from the previous swipe (or duel start
-///   for card 0).
-///
-/// Out of POC scope (follow-ups):
-/// - Commit-reveal deck hashing (cards currently visible at creation).
-/// - DeepBook `predict::mint` calls in the same PTB as `record_swipe`.
-/// - Forfeit-on-timeout for slow players.
-/// - Strike-grid validation in `new_card`: DeepBook's tick metadata lives in
-///   `Predict<Quote>.oracle_config`, not on the oracle itself. Off-grid
-///   strikes are rejected at `predict::mint` time when the player's swipe
-///   PTB bundles the mint call.
 module flicky::duel;
 
 use deepbook_predict::oracle::{Self as db_oracle, OracleSVI};
-use flicky::pricing;
-use std::hash;
+use deepbook_predict::predict_manager::{Self, PredictManager};
+use deepbook_predict::market_key;
 use sui::balance::{Self, Balance};
+use deepbook::constants as db_constants;
+use token::deep::DEEP;
 use sui::bcs;
+use std::hash;
 use sui::clock::Clock;
 use sui::coin::{Self, Coin};
 use sui::event;
@@ -51,21 +36,15 @@ const EOracleMismatch: u64 = 8;
 const EOutOfTurn: u64 = 9;
 const ECardAlreadySettled: u64 = 10;
 const EAllCardsNotSettled: u64 = 11;
-const EOracleNotSettled: u64 = 12;
 const EZeroStake: u64 = 13;
-/// Raised by `record_swipe` when the oracle backing the card is no longer
-/// ACTIVE (inactive, already expired, or settled). Prevents trivially-known
-/// outcomes from being scored.
 const EOracleNotLive: u64 = 14;
-/// `deck_hash` must be exactly 32 bytes (sha2-256 length).
 const EInvalidDeckHash: u64 = 15;
-/// `reveal_deck` called twice on the same Duel.
 const EDeckAlreadyRevealed: u64 = 16;
-/// Plaintext deck passed to `reveal_deck` does not hash to the committed
-/// `deck_hash`. Anti-front-run guarantee.
 const EDeckHashMismatch: u64 = 17;
-/// `record_swipe` requires the deck to have been revealed first.
 const EDeckNotRevealed: u64 = 18;
+const ENotManagerOwner: u64 = 19;
+const EZeroPositionQuantity: u64 = 20;
+const ESwipeTimeout: u64 = 21;
 
 // === Status ===
 const STATUS_PENDING: u8 = 1;
@@ -73,69 +52,40 @@ const STATUS_ACTIVE: u8 = 2;
 const STATUS_COMPLETE: u8 = 3;
 
 // === Constants ===
-/// Cards per duel. Tinder-style 5-card swipe deck.
 const DECK_SIZE: u64 = 5;
-/// 9-decimal fixed point (1e9 == 1.0 or 100%).
-const ONE_E9: u64 = 1_000_000_000;
-
-// Speed thresholds (ms) and 9-decimal multipliers.
-const SPEED_FAST_MAX_MS: u64 = 5_000;
-const SPEED_NORMAL_MAX_MS: u64 = 20_000;
-const SPEED_SLOW_MAX_MS: u64 = 60_000;
-const SPEED_FAST_MULT: u64 = 1_500_000_000; // 1.5x
-const SPEED_NORMAL_MULT: u64 = 1_000_000_000; // 1.0x
-const SPEED_SLOW_MULT: u64 = 750_000_000; // 0.75x
 
 // === Structs ===
 
-/// One prediction card. References a DeepBook `OracleSVI` + a strike.
 public struct Card has copy, drop, store {
     oracle_id: ID,
     strike: u64,
 }
 
-/// One player's response to one card. Snapshot taken at swipe time.
 public struct Swipe has copy, drop, store {
     is_up: bool,
-    /// Implied probability of the chosen direction at the moment of swipe.
-    p_swiped: u64,
-    /// Time spent on this card, in ms, since the previous swipe (or duel
-    /// start for card 0). Drives the speed multiplier.
-    decide_time_ms: u64,
+    quantity: u64,
+    premium: u64,
 }
 
-/// Two-player prediction duel. Generic over the stake coin type `T`
-/// (dUSDC in production; mock coins in tests).
 public struct Duel<phantom T> has key {
     id: UID,
     status: u8,
-    /// sha2-256 of `bcs::to_bytes(&cards)` committed at create time. Cards
-    /// stay empty until `reveal_deck` is called with the plaintext.
     deck_hash: vector<u8>,
     cards: vector<Card>,
     creator: address,
-    /// `@0x0` until a challenger joins.
     challenger: address,
     p0_stake: Balance<T>,
     p1_stake: Balance<T>,
     p0_swipes: vector<Option<Swipe>>,
     p1_swipes: vector<Option<Swipe>>,
-    /// Accumulated scores in 9-decimal fixed point.
-    p0_score: u64,
-    p1_score: u64,
-    /// Clock checkpoint per player: the start time for the next swipe's
-    /// `decide_time_ms`. Set to `started_at_ms` on join, advanced on each swipe.
-    p0_last_swipe_or_start_ms: u64,
-    p1_last_swipe_or_start_ms: u64,
-    /// Next card index each player must swipe (must be strictly sequential).
+    p0_payout: u64,
+    p0_premium: u64,
+    p1_payout: u64,
+    p1_premium: u64,
     p0_next_card_idx: u64,
     p1_next_card_idx: u64,
-    /// Per-card terminal price, populated by `settle_card` when the oracle
-    /// for that card has settled.
     card_settlements: vector<Option<u64>>,
-    /// Count of cards whose `card_settlements[i]` is `Some`.
     settled_count: u64,
-    /// On-chain timestamp when `join_duel` landed; `0` while PENDING.
     started_at_ms: u64,
 }
 
@@ -164,22 +114,18 @@ public struct SwipeRecorded has copy, drop {
     player: address,
     card_idx: u64,
     is_up: bool,
-    p_swiped: u64,
-    decide_time_ms: u64,
+    quantity: u64,
+    premium: u64,
 }
 
 public struct CardSettled has copy, drop {
     duel_id: ID,
     card_idx: u64,
     settlement_price: u64,
-    p0_card_score: u64,
-    p1_card_score: u64,
 }
 
 public struct DuelFinalized has copy, drop {
     duel_id: ID,
-    p0_score: u64,
-    p1_score: u64,
     winner: address, // @0x0 == tie
     payout_to_p0: u64,
     payout_to_p1: u64,
@@ -187,11 +133,8 @@ public struct DuelFinalized has copy, drop {
 
 // === Public: card construction ===
 
-/// Build a `Card` referencing this oracle + strike. Strike-grid validation
-/// happens at `predict::mint` time in the player's swipe PTB; we accept any
-/// strike here.
 public fun new_card(oracle: &OracleSVI, strike: u64): Card {
-    Card { oracle_id: object::id(oracle), strike }
+    Card { oracle_id: db_oracle::id(oracle), strike }
 }
 
 public fun card_oracle_id(card: &Card): ID { card.oracle_id }
@@ -200,12 +143,6 @@ public fun card_strike(card: &Card): u64 { card.strike }
 
 // === Public: lifecycle ===
 
-/// Creator stakes and commits the deck's hash. Cards are revealed later
-/// via `reveal_deck`. Returns the new shared duel ID.
-///
-/// The `deck_hash` is `sha2_256(bcs::to_bytes(&cards))` computed off-chain
-/// by the Deckmaster. Committing the hash before the challenger joins
-/// prevents front-running with parallel Predict positions.
 public fun create_duel<T>(
     stake: Coin<T>,
     deck_hash: vector<u8>,
@@ -236,10 +173,10 @@ public fun create_duel<T>(
         p1_stake: balance::zero<T>(),
         p0_swipes,
         p1_swipes,
-        p0_score: 0,
-        p1_score: 0,
-        p0_last_swipe_or_start_ms: 0,
-        p1_last_swipe_or_start_ms: 0,
+        p0_payout: 0,
+        p0_premium: 0,
+        p1_payout: 0,
+        p1_premium: 0,
         p0_next_card_idx: 0,
         p1_next_card_idx: 0,
         card_settlements,
@@ -260,10 +197,6 @@ public fun create_duel<T>(
     duel_id
 }
 
-/// Reveal the committed deck. Permissionless — anyone with the plaintext
-/// can call. Verifies `sha2_256(bcs::to_bytes(&cards)) == duel.deck_hash`
-/// and populates `duel.cards`. Must run after `join_duel` (duel.status ==
-/// ACTIVE) and before any `record_swipe`.
 public fun reveal_deck<T>(duel: &mut Duel<T>, cards: vector<Card>) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(duel.cards.is_empty(), EDeckAlreadyRevealed);
@@ -275,8 +208,6 @@ public fun reveal_deck<T>(duel: &mut Duel<T>, cards: vector<Card>) {
     event::emit(DeckRevealed { duel_id: object::id(duel) });
 }
 
-/// Challenger matches the creator's stake and starts the match. Both decks
-/// become "revealed" at this moment — per-player decide-time clocks start.
 public fun join_duel<T>(
     duel: &mut Duel<T>,
     stake: Coin<T>,
@@ -296,8 +227,6 @@ public fun join_duel<T>(
     duel.status = STATUS_ACTIVE;
     let now_ms = clock.timestamp_ms();
     duel.started_at_ms = now_ms;
-    duel.p0_last_swipe_or_start_ms = now_ms;
-    duel.p1_last_swipe_or_start_ms = now_ms;
 
     event::emit(DuelJoined {
         duel_id: object::id(duel),
@@ -307,15 +236,14 @@ public fun join_duel<T>(
     });
 }
 
-/// Player records a swipe on the next card in their sequence. Must be the
-/// creator or challenger; the supplied `oracle` must match `cards[card_idx]`.
-/// Snapshots the implied probability of the chosen direction (UP or DOWN)
-/// from DeepBook's SVI surface.
 public fun record_swipe<T>(
     duel: &mut Duel<T>,
+    manager: &PredictManager,
     oracle: &OracleSVI,
     card_idx: u64,
     is_up: bool,
+    quantity: u64,
+    premium: u64,
     clock: &Clock,
     ctx: &TxContext,
 ) {
@@ -323,36 +251,39 @@ public fun record_swipe<T>(
     assert!(!duel.cards.is_empty(), EDeckNotRevealed);
     assert!(card_idx < DECK_SIZE, ECardIndexOOB);
 
+    // Enforce 10-minute swipe window constraint
+    assert!(clock.timestamp_ms() <= duel.started_at_ms + 600_000, ESwipeTimeout);
+
     let sender = ctx.sender();
     let is_p0 = sender == duel.creator;
     let is_p1 = sender == duel.challenger;
     assert!(is_p0 || is_p1, ENotPlayer);
 
+    assert!(manager.owner() == sender, ENotManagerOwner);
+
     let card = &duel.cards[card_idx];
-    assert!(card.oracle_id == object::id(oracle), EOracleMismatch);
-    // Swipes are only fair while the oracle is ACTIVE — past expiry or settled,
-    // the outcome is observable and `p_swiped` collapses to a trivial value.
+    assert!(card.oracle_id == db_oracle::id(oracle), EOracleMismatch);
     assert!(oracle.status(clock) == db_oracle::status_active(), EOracleNotLive);
 
     let next_idx = if (is_p0) duel.p0_next_card_idx else duel.p1_next_card_idx;
     assert!(card_idx == next_idx, EOutOfTurn);
 
-    let now_ms = clock.timestamp_ms();
-    let baseline = if (is_p0) duel.p0_last_swipe_or_start_ms
-        else duel.p1_last_swipe_or_start_ms;
-    let decide_time_ms = if (now_ms > baseline) now_ms - baseline else 0;
+    // Query PredictManager to ensure the player actually has at least this position quantity
+    let expiry = db_oracle::expiry(oracle);
+    let key = market_key::new(card.oracle_id, expiry, card.strike, is_up);
+    let current_position_qty = predict_manager::position(manager, key);
+    assert!(current_position_qty >= quantity, EZeroPositionQuantity);
+    assert!(quantity > 0, EZeroPositionQuantity);
 
-    let p_up = pricing::p_up(oracle, card.strike);
-    let p_swiped = if (is_up) p_up else ONE_E9 - p_up;
+    // Verify premium is greater than zero
+    assert!(premium > 0, EZeroPositionQuantity);
 
-    let swipe = Swipe { is_up, p_swiped, decide_time_ms };
+    let swipe = Swipe { is_up, quantity, premium };
     if (is_p0) {
         *vector::borrow_mut(&mut duel.p0_swipes, card_idx) = option::some(swipe);
-        duel.p0_last_swipe_or_start_ms = now_ms;
         duel.p0_next_card_idx = card_idx + 1;
     } else {
         *vector::borrow_mut(&mut duel.p1_swipes, card_idx) = option::some(swipe);
-        duel.p1_last_swipe_or_start_ms = now_ms;
         duel.p1_next_card_idx = card_idx + 1;
     };
 
@@ -361,30 +292,45 @@ public fun record_swipe<T>(
         player: sender,
         card_idx,
         is_up,
-        p_swiped,
-        decide_time_ms,
+        quantity,
+        premium,
     });
 }
 
-/// Permissionless. Settles one card once its oracle has reached SETTLED,
-/// computing both players' scores for that card.
 public fun settle_card<T>(duel: &mut Duel<T>, oracle: &OracleSVI, card_idx: u64) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(card_idx < DECK_SIZE, ECardIndexOOB);
     let card = &duel.cards[card_idx];
-    assert!(card.oracle_id == object::id(oracle), EOracleMismatch);
+    assert!(card.oracle_id == db_oracle::id(oracle), EOracleMismatch);
     assert!(duel.card_settlements[card_idx].is_none(), ECardAlreadySettled);
 
-    let settle_opt = oracle.settlement_price();
-    assert!(settle_opt.is_some(), EOracleNotSettled);
-    let settlement_price = settle_opt.destroy_some();
+    let settlement_price_opt = db_oracle::settlement_price(oracle);
+    assert!(settlement_price_opt.is_some(), EOracleNotLive);
+    let settlement_price = *settlement_price_opt.borrow();
     let strike = card.strike;
 
-    let p0_card_score = compute_card_score(&duel.p0_swipes[card_idx], settlement_price, strike);
-    let p1_card_score = compute_card_score(&duel.p1_swipes[card_idx], settlement_price, strike);
+    // Settle Player 0
+    if (duel.p0_swipes[card_idx].is_some()) {
+        let swipe = *duel.p0_swipes[card_idx].borrow();
+        let actual_up = settlement_price > strike;
+        let correct = actual_up == swipe.is_up;
+        let payout = if (correct) swipe.quantity else 0;
+        let premium = swipe.premium;
+        duel.p0_payout = duel.p0_payout + payout;
+        duel.p0_premium = duel.p0_premium + premium;
+    };
 
-    duel.p0_score = duel.p0_score + p0_card_score;
-    duel.p1_score = duel.p1_score + p1_card_score;
+    // Settle Player 1
+    if (duel.p1_swipes[card_idx].is_some()) {
+        let swipe = *duel.p1_swipes[card_idx].borrow();
+        let actual_up = settlement_price > strike;
+        let correct = actual_up == swipe.is_up;
+        let payout = if (correct) swipe.quantity else 0;
+        let premium = swipe.premium;
+        duel.p1_payout = duel.p1_payout + payout;
+        duel.p1_premium = duel.p1_premium + premium;
+    };
+
     *vector::borrow_mut(&mut duel.card_settlements, card_idx) = option::some(settlement_price);
     duel.settled_count = duel.settled_count + 1;
 
@@ -392,17 +338,9 @@ public fun settle_card<T>(duel: &mut Duel<T>, oracle: &OracleSVI, card_idx: u64)
         duel_id: object::id(duel),
         card_idx,
         settlement_price,
-        p0_card_score,
-        p1_card_score,
     });
 }
 
-/// Permissionless once all cards are settled.
-///
-/// Payout rules (PRD §Payout):
-///   - Higher score wins the entire pot.
-///   - Tie on score → lower total decide-time wins.
-///   - Still tied → each player gets their own stake back.
 public fun finalize<T>(duel: &mut Duel<T>, ctx: &mut TxContext) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(duel.settled_count == DECK_SIZE, EAllCardsNotSettled);
@@ -413,22 +351,17 @@ public fun finalize<T>(duel: &mut Duel<T>, ctx: &mut TxContext) {
     let total_p1 = duel.p1_stake.value();
     let total = total_p0 + total_p1;
 
-    let (payout_to_p0, payout_to_p1, winner) = if (duel.p0_score > duel.p1_score) {
+    // Subtraction-less comparison for PnL: Payout_0 + Premium_1 vs Payout_1 + Premium_0
+    let val0 = (duel.p0_payout as u128) + (duel.p1_premium as u128);
+    let val1 = (duel.p1_payout as u128) + (duel.p0_premium as u128);
+
+    let (payout_to_p0, payout_to_p1, winner) = if (val0 > val1) {
         (total, 0, p0)
-    } else if (duel.p1_score > duel.p0_score) {
+    } else if (val1 > val0) {
         (0, total, p1)
     } else {
-        // Score-tied → faster total decide-time wins.
-        let p0_time = total_decide_time(&duel.p0_swipes);
-        let p1_time = total_decide_time(&duel.p1_swipes);
-        if (p0_time < p1_time) {
-            (total, 0, p0)
-        } else if (p1_time < p0_time) {
-            (0, total, p1)
-        } else {
-            // Still tied — refund each player's own stake.
-            (total_p0, total_p1, @0x0)
-        }
+        // Tie
+        (total_p0, total_p1, @0x0)
     };
 
     pay_player(&mut duel.p0_stake, &mut duel.p1_stake, p0, payout_to_p0, ctx);
@@ -438,31 +371,10 @@ public fun finalize<T>(duel: &mut Duel<T>, ctx: &mut TxContext) {
 
     event::emit(DuelFinalized {
         duel_id: object::id(duel),
-        p0_score: duel.p0_score,
-        p1_score: duel.p1_score,
         winner,
         payout_to_p0,
         payout_to_p1,
     });
-}
-
-/// Sum of `decide_time_ms` across all recorded swipes. Skipped cards
-/// (None) are counted as the slow-window cap so a player who refuses
-/// to swipe can't beat a player who answered every card on the
-/// score-tie breaker. Used in `finalize`.
-fun total_decide_time(swipes: &vector<Option<Swipe>>): u64 {
-    let mut total: u64 = 0;
-    let mut i = 0;
-    while (i < swipes.length()) {
-        let s = &swipes[i];
-        if (s.is_some()) {
-            total = total + s.borrow().decide_time_ms;
-        } else {
-            total = total + SPEED_SLOW_MAX_MS;
-        };
-        i = i + 1;
-    };
-    total
 }
 
 // === Read API ===
@@ -481,9 +393,13 @@ public fun deck<T>(duel: &Duel<T>): &vector<Card> { &duel.cards }
 
 public fun deck_hash<T>(duel: &Duel<T>): vector<u8> { duel.deck_hash }
 
-public fun p0_score<T>(duel: &Duel<T>): u64 { duel.p0_score }
+public fun p0_payout<T>(duel: &Duel<T>): u64 { duel.p0_payout }
 
-public fun p1_score<T>(duel: &Duel<T>): u64 { duel.p1_score }
+public fun p0_premium<T>(duel: &Duel<T>): u64 { duel.p0_premium }
+
+public fun p1_payout<T>(duel: &Duel<T>): u64 { duel.p1_payout }
+
+public fun p1_premium<T>(duel: &Duel<T>): u64 { duel.p1_premium }
 
 public fun p0_stake_value<T>(duel: &Duel<T>): u64 { duel.p0_stake.value() }
 
@@ -505,40 +421,6 @@ public fun deck_size(): u64 { DECK_SIZE }
 
 // === Internal helpers ===
 
-fun compute_card_score(swipe: &Option<Swipe>, settlement_price: u64, strike: u64): u64 {
-    if (swipe.is_none()) return 0;
-    let s = *swipe.borrow();
-    let actual_up = settlement_price > strike;
-    if (actual_up != s.is_up) return 0;
-    card_score_from_swipe(s.p_swiped, s.decide_time_ms)
-}
-
-/// `card_score = (1 / p_swiped) * speed_multiplier`, all in 9-decimal.
-/// Computed in u128 to avoid intermediate overflow.
-fun card_score_from_swipe(p_swiped: u64, decide_time_ms: u64): u64 {
-    if (p_swiped == 0) return 0;
-    let mult = speed_multiplier(decide_time_ms);
-    if (mult == 0) return 0;
-    let score =
-        (ONE_E9 as u128) * (ONE_E9 as u128) * (mult as u128)
-        / ((p_swiped as u128) * (ONE_E9 as u128));
-    score as u64
-}
-
-fun speed_multiplier(decide_time_ms: u64): u64 {
-    if (decide_time_ms <= SPEED_FAST_MAX_MS) {
-        SPEED_FAST_MULT
-    } else if (decide_time_ms <= SPEED_NORMAL_MAX_MS) {
-        SPEED_NORMAL_MULT
-    } else if (decide_time_ms <= SPEED_SLOW_MAX_MS) {
-        SPEED_SLOW_MULT
-    } else {
-        0
-    }
-}
-
-/// Withdraw `amount` from the duel's two stake balances (p0 first, then p1)
-/// and transfer the resulting coin to `recipient`. No-op when `amount == 0`.
 fun pay_player<T>(
     p0_stake: &mut Balance<T>,
     p1_stake: &mut Balance<T>,
@@ -559,19 +441,10 @@ fun pay_player<T>(
     transfer::public_transfer(coin::from_balance(payout, ctx), recipient);
 }
 
-// === Test-only constants surfaced for assertions ===
-
 #[test_only]
 public fun test_deck_size(): u64 { DECK_SIZE }
 
-#[test_only]
-public fun test_one_e9(): u64 { ONE_E9 }
+public fun dummy_deps(_deep: &DEEP) {
+    db_constants::float_scaling();
+}
 
-#[test_only]
-public fun test_speed_fast_mult(): u64 { SPEED_FAST_MULT }
-
-#[test_only]
-public fun test_speed_normal_mult(): u64 { SPEED_NORMAL_MULT }
-
-#[test_only]
-public fun test_speed_slow_mult(): u64 { SPEED_SLOW_MULT }

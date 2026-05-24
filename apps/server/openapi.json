@@ -1,0 +1,476 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Flicky Backend API",
+    "version": "0.1.0",
+    "description": "Bun + bun:sqlite backend for the Flicky PvP prediction-duel game on Sui. Serves card-generation (commit-reveal), Enoki-sponsored gas, oracle reads, duel state queries, and a WebSocket matchmaking + room-broadcast channel at /ws.\n\nFor the WS protocol see `src/ws/protocol.ts` in the repo (OpenAPI does not cover WebSocket messages — use AsyncAPI for that if it grows beyond the inline reference).",
+    "contact": { "name": "Flicky", "url": "https://github.com/nikola0x0/flicky" }
+  },
+  "servers": [
+    { "url": "http://localhost:3001", "description": "Local dev" }
+  ],
+  "tags": [
+    { "name": "system", "description": "Health + diagnostics" },
+    { "name": "deckmaster", "description": "5-card binary deck generation with on-chain commit-reveal" },
+    { "name": "oracle", "description": "DeepBook Predict OracleSVI reads" },
+    { "name": "duels", "description": "Duel state mirror — indexer-fed SQLite cache for client reads without re-hitting Sui RPC" },
+    { "name": "leaderboard", "description": "Top players by MMR rating" },
+    { "name": "sponsor", "description": "Enoki sponsored-transaction relay" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["system"],
+        "summary": "Server status + service flags + cursor lag",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Health" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/deckmaster/generate": {
+      "post": {
+        "tags": ["deckmaster"],
+        "summary": "Generate a 5-card deck (5 nearest oracles >10 min out)",
+        "description": "Picks the 5 nearest live BTC OracleSVI objects strictly later than `now + 10 min`, derives per-card strikes via a deterministic seeded PRG, persists the plaintext, and returns the BCS-hashed commitment. Pass `sender` to bind the seed to the player address (recommended for audit).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DeckmasterGenerateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deck created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GeneratedDeck" }
+              }
+            }
+          },
+          "503": {
+            "description": "Not enough eligible oracles right now (retry in a few minutes)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/deckmaster/reveal": {
+      "get": {
+        "tags": ["deckmaster"],
+        "summary": "Look up the plaintext deck for a committed hash",
+        "description": "Returns the same cards + seed that produced the on-chain `deck_hash`. Anyone can recompute `sha2_256(BCS(cards)) == hash` and the strike derivation from `(seed, oracle_id_i)` to audit.",
+        "parameters": [
+          { "name": "hash", "in": "query", "required": true, "schema": { "type": "string", "example": "0xabc…" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plaintext deck",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RevealedDeck" }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown hash",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/oracle/list": {
+      "get": {
+        "tags": ["oracle"],
+        "summary": "List eligible DeepBook OracleSVI objects",
+        "parameters": [
+          {
+            "name": "asset",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "default": "BTC" }
+          },
+          {
+            "name": "minHeadroomMs",
+            "in": "query",
+            "required": false,
+            "description": "Override the >10-min headroom floor (default DECK_CARD_MIN_HEADROOM_MS)",
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sorted ascending by expiry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "asset": { "type": "string" },
+                    "oracles": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/OracleSnapshot" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/oracle/{id}": {
+      "get": {
+        "tags": ["oracle"],
+        "summary": "Fetch a single OracleSVI snapshot",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OracleSnapshot" }
+              }
+            }
+          },
+          "404": {
+            "description": "Object not found / not a moveObject",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/duels/recent": {
+      "get": {
+        "tags": ["duels"],
+        "summary": "Recent duels from the indexer mirror",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20, "maximum": 100 } },
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["PENDING", "ACTIVE", "COMPLETE"] } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "duels": { "type": "array", "items": { "$ref": "#/components/schemas/DuelLite" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/duels/{id}": {
+      "get": {
+        "tags": ["duels"],
+        "summary": "Fetch a single mirrored duel",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Duel state",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DuelLite" }
+              }
+            }
+          },
+          "404": {
+            "description": "Indexer hasn't seen this duel yet",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/leaderboard": {
+      "get": {
+        "tags": ["leaderboard"],
+        "summary": "Top players by MMR rating",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20, "maximum": 100 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sorted by rating descending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "players": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "address": { "type": "string" },
+                          "rating": { "type": "integer" },
+                          "gamesPlayed": { "type": "integer" },
+                          "wins": { "type": "integer" },
+                          "losses": { "type": "integer" },
+                          "ties": { "type": "integer" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sponsor": {
+      "post": {
+        "tags": ["sponsor"],
+        "summary": "Enoki sponsored-tx — two-step protocol",
+        "description": "`action: \"create\"` returns sponsor-signed bytes for the wallet to sign with `signTransaction`; `action: \"execute\"` submits the combined signatures.\n\nAllowlist gates MoveCall targets — see `src/sponsor.ts::FLICKY_FNS` + `DEEPBOOK_PREDICT_FNS`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  { "$ref": "#/components/schemas/SponsorCreateRequest" },
+                  { "$ref": "#/components/schemas/SponsorExecuteRequest" }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/SponsorCreateResponse" },
+                    { "$ref": "#/components/schemas/SponsorExecuteResponse" }
+                  ]
+                }
+              }
+            }
+          },
+          "403": { "description": "Origin not in ALLOWED_ORIGIN" },
+          "503": { "description": "ENOKI_PRIVATE_KEY not configured" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" },
+          "detail": {}
+        },
+        "required": ["error"]
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "port": { "type": "integer" },
+          "network": { "type": "string", "enum": ["mainnet", "testnet", "devnet", "localnet"] },
+          "flickyPackageId": { "type": "string", "nullable": true },
+          "decks": { "type": "integer", "description": "count of plaintext decks in the reveal store" },
+          "ws": {
+            "type": "object",
+            "properties": {
+              "connectedAddresses": { "type": "integer" },
+              "rooms": { "type": "integer" },
+              "queues": { "type": "object", "additionalProperties": { "type": "integer" } }
+            }
+          },
+          "services": {
+            "type": "object",
+            "properties": {
+              "sponsor": { "type": "string" },
+              "keeper": { "type": "string" },
+              "indexer": { "type": "string" }
+            }
+          },
+          "cursors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tracker": { "type": "string" },
+                "txDigest": { "type": "string" },
+                "eventSeq": { "type": "string" },
+                "ageMs": { "type": "integer" }
+              }
+            }
+          },
+          "oracleStream": {
+            "type": "object",
+            "description": "Live oracle tick streaming subsystem stats — how many distinct oracles + sockets are currently subscribed.",
+            "properties": {
+              "oracles": { "type": "integer" },
+              "sockets": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "DeckmasterGenerateRequest": {
+        "type": "object",
+        "properties": {
+          "asset": { "type": "string", "default": "BTC" },
+          "sender": { "type": "string", "description": "Player Sui address (0x…). Bound into the seed for auditability." }
+        }
+      },
+      "GeneratedDeck": {
+        "type": "object",
+        "properties": {
+          "cards": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "oracle_id": { "type": "string" },
+                "strike": { "type": "string", "description": "u64 as decimal string" },
+                "expiry": { "type": "string", "description": "Oracle expiry ms timestamp as decimal string" }
+              }
+            }
+          },
+          "hash": { "type": "string", "description": "sha2_256(BCS(cards)) as 0x-prefixed hex; commit to duel::create_duel" },
+          "seed": { "type": "string", "description": "0x-prefixed 32-byte hex; PRG seed used for strike derivation" }
+        }
+      },
+      "RevealedDeck": {
+        "type": "object",
+        "properties": {
+          "cards": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "oracle_id": { "type": "string" },
+                "strike": { "type": "string" }
+              }
+            }
+          },
+          "hash": { "type": "string" },
+          "seed": { "type": "string", "nullable": true }
+        }
+      },
+      "OracleSnapshot": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "expiry": { "type": "string" },
+          "spot": { "type": "string" },
+          "forward": { "type": "string" },
+          "active": { "type": "boolean" },
+          "settled": { "type": "boolean" }
+        }
+      },
+      "DuelLite": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "type": "string", "enum": ["PENDING", "ACTIVE", "COMPLETE"] },
+          "stakeCoinType": { "type": "string" },
+          "creator": { "type": "string" },
+          "challenger": { "type": "string" },
+          "cardsRevealed": { "type": "boolean" },
+          "cardCount": { "type": "integer" },
+          "settledCount": { "type": "integer" },
+          "p0Payout": { "type": "string", "description": "Cumulative dUSDC won across settled cards (real PnL)" },
+          "p0Premium": { "type": "string", "description": "Cumulative dUSDC paid as premium" },
+          "p1Payout": { "type": "string" },
+          "p1Premium": { "type": "string" },
+          "startedAtMs": { "type": "integer", "description": "ms timestamp when the duel went ACTIVE (set on join_duel)" },
+          "cardOutcomes": {
+            "type": "array",
+            "description": "Per-card outcomes for settled cards (length == settledCount)",
+            "items": {
+              "type": "object",
+              "properties": {
+                "cardIdx": { "type": "integer" },
+                "settlementPrice": { "type": "string" },
+                "strike": { "type": "string" },
+                "upWon": { "type": "boolean", "description": "settlementPrice > strike" },
+                "p0Pnl": { "type": ["string", "null"], "description": "Signed real PnL: (won ? quantity : 0) - premium. Null if no swipe." },
+                "p1Pnl": { "type": ["string", "null"] },
+                "p0Swipe": {
+                  "type": ["object", "null"],
+                  "properties": {
+                    "isUp": { "type": "boolean" },
+                    "quantity": { "type": "string" },
+                    "premium": { "type": "string" }
+                  }
+                },
+                "p1Swipe": { "type": ["object", "null"] }
+              }
+            }
+          },
+          "lastUpdatedMs": { "type": "integer" }
+        }
+      },
+      "SponsorCreateRequest": {
+        "type": "object",
+        "required": ["action", "transactionKindBytes", "sender"],
+        "properties": {
+          "action": { "type": "string", "const": "create" },
+          "network": { "type": "string", "enum": ["testnet", "mainnet"], "default": "testnet" },
+          "transactionKindBytes": { "type": "string", "description": "base64-encoded transaction kind (no gas)" },
+          "sender": { "type": "string" }
+        }
+      },
+      "SponsorCreateResponse": {
+        "type": "object",
+        "properties": {
+          "bytes": { "type": "string" },
+          "digest": { "type": "string" }
+        }
+      },
+      "SponsorExecuteRequest": {
+        "type": "object",
+        "required": ["action", "digest", "signature"],
+        "properties": {
+          "action": { "type": "string", "const": "execute" },
+          "digest": { "type": "string" },
+          "signature": { "type": "string" }
+        }
+      },
+      "SponsorExecuteResponse": {
+        "type": "object",
+        "properties": { "digest": { "type": "string" } }
+      }
+    }
+  }
+}

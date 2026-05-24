@@ -29,6 +29,13 @@ const config: SuiCodegenConfig = {
       path: "./deepbook_predict_min",
       package: "deepbook_predict",
     },
+    {
+      // SUI ↔ dUSDC AMM swap module — separate package on chain at
+      // `0x51ea0f2932…`. Generates `swap.swap_x_for_y` / `swap_y_for_x`
+      // bindings the deposit screen uses for the top-up flow.
+      path: "./swap",
+      package: "swap",
+    },
   ],
 
   // `sui move summary` output lands under ./package_summaries/ — don't commit it.

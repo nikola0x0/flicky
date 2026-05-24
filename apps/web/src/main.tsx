@@ -13,12 +13,12 @@ const queryClient = new QueryClient()
 
 const networks = {
   testnet: new SuiJsonRpcClient({
-    network: "testnet",
     url: getJsonRpcFullnodeUrl("testnet"),
+    network: "testnet",
   }),
   mainnet: new SuiJsonRpcClient({
-    network: "mainnet",
     url: getJsonRpcFullnodeUrl("mainnet"),
+    network: "mainnet",
   }),
 }
 

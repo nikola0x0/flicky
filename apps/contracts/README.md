@@ -1,123 +1,185 @@
 # @flicky/contracts
 
-Move 2024 package for Flicky (Tinder-style PvP prediction-duel on top of
-DeepBook Predict) + TypeScript tooling for publish / upgrade / codegen
-against **Sui testnet**.
+Move 2024 smart contract package for **Flicky** (Tinder-style PvP prediction-duel built on top of **DeepBook Predict**) plus TypeScript tooling for deployment, package upgrades, and typed binding generation against the **Sui Testnet**.
 
-## Quick reference
+---
+
+## 📖 Table of Contents
+- [Quick Reference Commands](#quick-reference-commands)
+- [System Overview & Architecture](#system-overview--architecture)
+- [Move Modules Documentation](#move-modules-documentation)
+- [The 4-Step E2E Duel Lifecycle](#the-4-step-e2e-duel-lifecycle)
+- [Error Codes Reference](#error-codes-reference)
+- [Environment Setup](#environment-setup)
+- [Deployment & Tooling Scripts](#deployment--tooling-scripts)
+- [Stub Dependency Packages](#stub-dependency-packages)
+- [Standalone Swap AMM Pool](#standalone-swap-amm-pool)
+
+---
+
+## ⚡ Quick Reference Commands
+
+Run these commands from the `apps/contracts` directory:
 
 ```bash
-# Compile + run Move unit tests
-bun run test               # sui move test --gas-limit 100000000000
+# Compile and run Move unit tests
+bun run test               # Runs: sui move test --gas-limit 100000000000
 
-# Compile only
-bun run build              # sui move build
+# Compile the Move codebase
+bun run build              # Runs: sui move build
 
-# First deploy to testnet (requires SUI_DEPLOYER_PRIVATE_KEY in .env.local)
+# Deploy to Testnet (requires SUI_DEPLOYER_PRIVATE_KEY in .env.local)
 bun run publish
 
-# Upgrade after any Move change
+# Upgrade after making any Move contract changes
 bun run upgrade
 
-# Regenerate TS bindings from the current Move package
+# Regenerate TypeScript bindings from the current Move package
 bun run codegen
 ```
 
-## Env setup
+---
 
-Copy `.env.example` to `.env.local`:
+## 🏗️ System Overview & Architecture
 
-```bash
-cp .env.example .env.local
+Flicky bridges social betting (PvP Escrows) with automated binary options markets (DeepBook Predict). The logic operates on two distinct layers:
+1. **Flicky Duel Escrow (Staking)**: Two players lock a fixed amount of collateral (e.g. 1, 3, 5, or 10 dUSDC) into a shared `Duel<T>` object.
+2. **DeepBook Predict Trading (Gameplay)**: When "swiping" UP or DOWN on a card, players mint actual binary options contracts on-chain using their personal `PredictManager`. This premium is funded separately from their wallet, ensuring option assets belong entirely to them.
+
+### State Transition Machine
+```
+   [PENDING] (Creator stakes + commits deck hash)
+       │
+       ▼ (Challenger joins + matches stake)
+    [ACTIVE]
+       │
+       ▼ (Creator reveals deck cards to on-chain)
+    [PLAYING]
+       │
+       ▼ (Both players submit swipes; 10 min window)
+  [AWAITING EXPIRY]
+       │
+       ▼ (Oracles expire; individual cards settled)
+  [ALL SETTLED]
+       │
+       ▼ (Finalize scores and distribute escrow)
+   [COMPLETE]
 ```
 
-Fill `SUI_DEPLOYER_PRIVATE_KEY`. To export your active Sui CLI keypair:
+---
 
-```bash
-sui keytool export --key-identity $(sui client active-address)
-```
+## 📦 Move Modules Documentation
 
-Paste the resulting `suiprivkey1q...` string as the value.
+Located in `sources/`:
 
-## What the scripts write
+*   **`duel.move`**: The core game coordinator. Manages the lifecycle of a `Duel<T>` shared object, processes challenger joins, verifies deck coordinates against committed hashes, records player predictions, settles individual cards against expired Oracles, and distributes rewards.
+*   **`pricing.move`**: SVI binary-digital fair pricing calculator. Reads `OracleSVI` spot/forward prices and surface volatility parameters, computing cumulative distribution functions $N(d_2)$ to mirror DeepBook's fair option pricing logic.
+*   **`math.move` / `i64.move`**: Fixed-point mathematical libraries (ln, sqrt, exp, normal CDF) ported from `deepbook_predict::math` / `deepbook_predict::i64` for precise on-chain calculations.
 
-`scripts/publish.ts` writes `deployed.json` with:
+---
 
-- `packageId` — the deployed package (changes on every upgrade).
-- `originalPackageId` — first-publish package id; preserved across upgrades.
-- `upgradeCap` — the cap that authorizes future upgrades.
+## 🔄 The 4-Step E2E Duel Lifecycle
 
-`scripts/upgrade.ts` updates `packageId` + `previousPackageId` and mirrors
-the new `packageId` into `apps/web/.env.local`. `originalPackageId` is
-preserved.
+### Step 1: Start Duel (Create & Join)
+*   **Create**: The Creator stakes a specific amount of `Coin<T>` (e.g., 1 dUSDC) and commits a `deck_hash` (the SHA3-256 hash of the 5 generated cards). The duel is initialized in `STATUS_PENDING`.
+*   **Join**: A Challenger calls `join_duel`, staking the exact same amount of `Coin<T>` to match the Creator. The status advances to `STATUS_ACTIVE`, and the game timer starts.
 
-## Modules
+### Step 2: Reveal Deck
+*   The Creator calls `reveal_deck`, passing the raw 5 `Card` coordinates (containing Pyth Oracle IDs and strike prices snapped to the grid).
+*   The contract validates that:
+    $$\text{sha3\_256}(\text{bcs::to\_bytes}(\text{cards})) == \text{deck\_hash}$$
+    Once successfully revealed, the cards become visible on-chain, enabling swipes.
 
-See `sources/`:
+### Step 3: Submit Player Swipes
+*   Players swipe UP or DOWN sequentially starting from **Card 0 to Card 4** within a **10-minute window** (`started_at_ms + 600,000ms`).
+*   To record a swipe, the client runs an atomic Programmable Transaction Block (PTB):
+    1.  Mints the binary option contract via `predict::mint`, utilizing the player's personal `PredictManager`.
+    2.  Calls `duel::record_swipe`, verifying that the player's `PredictManager` holds a sufficient balance of the minted position to back their prediction.
 
-| Module | Purpose |
-| --- | --- |
-| `duel` | `Duel<T>` shared object: escrow + 5-card swipe state + per-card scoring + finalize. |
-| `pricing` | SVI binary-digital fair pricing — reads `OracleSVI.svi()` + `forward_price()` and computes `N(d2)` (mirrors DeepBook's package-private `compute_nd2`). |
-| `math` / `i64` | Fixed-point helpers (ln, sqrt, exp, normal CDF) — direct port of `deepbook_predict::math`/`i64`. |
+### Step 4: Settle & Finalize
+*   **Settle Card**: Once an individual card's Pyth Oracle reaches its expiry and is resolved on-chain, `settle_card` can be called. The contract compares the Oracle's final `settlement_price` against the card's `strike` to determine which player guessed correctly, calculating card-level PnL.
+*   **Finalize**: After all 5 cards are settled, `finalize` is called. The system compares the sum of the PnL of both players:
+    $$\text{Score}_p = \sum_{i=0}^4 (\text{Payout}_i - \text{Premium}_i)$$
+    The player with the higher score claims the entire escrowed stake pool. In the event of a tie, stakes are refunded.
 
-## Local stub packages
+---
 
-Three "empty" Move packages exist alongside `sources/` purely to declare the
-on-chain addresses of DeepBook + transitive deps for the compiler. Flicky
-never inlines any of these — at runtime, calls resolve to the actual
-published packages.
+## 🚨 Error Codes Reference
 
-| Stub | Address bound | Purpose |
-| --- | --- | --- |
-| `deepbook_predict_min/` | `0xf5ea2b3749…` | Layout-equivalent struct re-declarations + public read API of `OracleSVI`, plus thin signatures for `predict::*`, `predict_manager::*`, `market_key::*`, `range_key::*` so codegen can emit typed builders. |
-| `deepbook_min/` | `0x74cd5657…` (latest deepbook v19) | Empty placeholder. Required because deployed `deepbook_predict` references `deepbook::math` types in its linkage table — Sui's publish validator demands the full transitive closure. |
-| `token_min/` | `0x36dbef86…` | Empty placeholder. `deepbook` depends on it transitively. |
+Listed below are the exception abort codes defined in `duel.move`:
 
-The compiler tree-shakes `deepbook_min` out of the publish dep list because
-nothing in our local source actually `use deepbook::*`. `scripts/publish.ts`
-manually re-injects the latest deepbook address per network — see the
-`FORCE_INJECT_DEPS` block. Update when DeepBook upgrades again.
+| Code | Constant | Description |
+| :---: | :--- | :--- |
+| **0** | `ENotPlayer` | The signer is neither the Creator nor the Challenger of this duel. |
+| **1** | `EDuelNotPending` | Operation requires a pending duel, but the duel status has already moved forward. |
+| **2** | `EDuelNotActive` | Operation requires an active duel (e.g. swipes, settle, finalize). |
+| **3** | `EAlreadyJoined` | A challenger has already joined this duel. |
+| **4** | `ECreatorCannotJoin` | The creator is attempting to challenge/join their own duel. |
+| **5** | `EStakeMismatch` | The challenger's staking amount does not match the creator's staking tier. |
+| **6** | `EInvalidDeckSize` | The revealed cards vector length is not exactly `DECK_SIZE` (5). |
+| **7** | `ECardIndexOOB` | The target card index is out of bounds (must be 0-4). |
+| **8** | `EOracleMismatch` | The passed oracle object does not match the committed oracle ID for this card index. |
+| **9** | `EOutOfTurn` | Swipe was submitted out of order. Cards must be swiped sequentially from Card 0 to 4. |
+| **10** | `ECardAlreadySettled` | The card at this index has already been settled. |
+| **11** | `EAllCardsNotSettled` | Finalization failed because some cards in the deck have not been settled yet. |
+| **13** | `EZeroStake` | The staking amount for creating a duel must be greater than zero. |
+| **14** | `EOracleNotLive` | The Oracle does not have a `settlement_price` yet (either not expired or not resolved). |
+| **15** | `EInvalidDeckHash` | The submitted deck hash is empty or invalid. |
+| **16** | `EDeckAlreadyRevealed` | The deck cards have already been revealed on-chain. |
+| **17** | `EDeckHashMismatch` | The revealed cards do not match the deck hash committed during creation. |
+| **18** | `EDeckNotRevealed` | Swiping is blocked because the creator has not revealed the deck (Step 2). |
+| **19** | `ENotManagerOwner` | The sender does not own the `PredictManager` passed to record the swipe. |
+| **20** | `EZeroPositionQuantity` | The swipe quantity is zero or exceeds the options owned inside the `PredictManager`. |
+| **21** | `ESwipeTimeout` | The 10-minute swiping window has expired. |
 
-> For a longer explanation of why these are separate packages (named-address
-> binding + one-package-per-address constraint) see the project root chat
-> log around "tại sao phải có deepbook_predict_min".
+---
 
-## Swap Package (Standalone AMM)
+## ⚙️ Environment Setup
 
-Located in [swap/](file:///Users/alvin/Developer/sui-flow/flicky/apps/contracts/swap/):
-A standalone Constant Product AMM pool package deployed to test swap operations between **SUI** and **dUSDC**.
+1.  Copy `.env.example` to `.env.local`:
+    ```bash
+    cp .env.example .env.local
+    ```
+2.  Export your active Sui keypair to retrieve the private key:
+    ```bash
+    sui keytool export --key-identity $(sui client active-address)
+    ```
+3.  Paste the output `suiprivkey1q...` string as the value for `SUI_DEPLOYER_PRIVATE_KEY` in `.env.local`.
 
-* **Testnet Package ID**: `0x51ea0f29321f3c25f8b2f530ecd3ed3dec569d954c8832d318de7e203653a936`
-* **Upgrade Capability**: `0x676dcb5f4a83791aed86c7a2f0488a75caa93aa49f90b22b98b30a17ebe8c178`
+---
 
-For detailed usage instructions, functions, structures, and tests, see [swap/README.md](file:///Users/alvin/Developer/sui-flow/flicky/apps/contracts/swap/README.md).
+## 🛠️ Deployment & Tooling Scripts
 
-## Why codegen + how to run it
+*   **`scripts/publish.ts`**: Deploys the package to Testnet and writes `deployed.json` containing:
+    *   `packageId`: The active package ID.
+    *   `originalPackageId`: The immutable genesis package ID (preserved across upgrades).
+    *   `upgradeCap`: The object authorizing upgrades.
+*   **`scripts/upgrade.ts`**: Upgrades the package using the `upgradeCap`, updates `deployed.json`, and injects the new `packageId` directly into `apps/web/.env.local`.
+*   **`scripts/codegen.ts`**: Uses `@mysten/codegen` to parse Move build artifacts and output type-safe `moveCall` bindings under `apps/web/src/sui/gen/`. This eliminates hand-rolled call signatures and manual BCS serialization.
 
-`@mysten/codegen` reads the Move package summaries and emits typed `moveCall`
-builders into `apps/web/src/sui/gen/`. The web app and server can then call:
+---
 
-```ts
-import { duel } from "@/sui/gen/flicky"
-import { predict } from "@/sui/gen/deepbook_predict"
+## 📦 Stub Dependency Packages
 
-tx.add(duel.recordSwipe({
-  package: CONFIG.packageId,
-  arguments: [duelId, oracleId, cardIdx, isUp],
-  typeArguments: [stakeCoinType],
-}))
-```
+Three minimal "stub" Move packages are included to facilitate local compilation against on-chain dependencies:
 
-— no hand-rolled `${packageId}::module::function` strings, no manual BCS
-arg encoding. **The output directory is gitignored**; every developer runs
-`bun run codegen` after `bun install` to populate it locally. Re-run after
-any Move signature change.
+| Stub Package | Bound Address | Description |
+| :--- | :--- | :--- |
+| `deepbook_predict_min/` | `0xf5ea2b3749…` | Declares the public structs and signatures (`predict::*`, `predict_manager::*`, `OracleSVI`) for DeepBook Predict. |
+| `deepbook_min/` | `0x74cd5657…` | Declares dependency signatures for DeepBook v3 core. Required because `deepbook_predict` references core math structures. |
+| `token_min/` | `0x36dbef86…` | Declares the SUI Token/Deep package stubs required transitively. |
 
-If codegen reports `Cannot find module '@mysten/codegen'`, run `bun install`
-from the repo root.
+> [!NOTE]
+> The compiler tree-shakes empty stubs out of compilation. During deployment, `publish.ts` automatically maps these stubs to the official on-chain packages (e.g. DeepBook Predict main package).
 
-## See also
+---
 
-- [`../../docs/prd.md`](../../docs/prd.md) — game design
-- [`../../docs/deepbook-oracle-architecture.md`](../../docs/deepbook-oracle-architecture.md) — oracle integration model
+## 🪙 Standalone Swap AMM Pool
+
+Located in the [swap/](file:///Users/alvin/Developer/sui-flow/flicky/apps/contracts/swap/) directory:
+A Constant Product ($x \cdot y = k$) AMM pool deployed to facilitate instant, slippage-protected test swaps between **SUI** and **dUSDC**.
+
+*   **Testnet Package ID**: `0x51ea0f29321f3c25f8b2f530ecd3ed3dec569d954c8832d318de7e203653a936`
+*   **Upgrade Cap**: `0x676dcb5f4a83791aed86c7a2f0488a75caa93aa49f90b22b98b30a17ebe8c178`
+
+For setup, code breakdown, and test execution details, see the standalone [swap/README.md](file:///Users/alvin/Developer/sui-flow/flicky/apps/contracts/swap/README.md).
