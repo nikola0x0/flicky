@@ -180,38 +180,81 @@ function fmtPnl(pnl: string | null): string {
 }
 
 /**
- * Premium "paid so far" for the given side — settled premium (from the
- * cumulative duel field) plus pending premium from any swipes that
- * haven't been settled yet. Returns a base-10 string so downstream
- * formatters can reuse the same BigInt math.
+ * Per-card live PnL — proportional (mark-to-market) view.
  *
- * Without this combined view, the running-PnL display would show 0
- * premium until the keeper (or a manual settle) actually catches up
- * — defeating the point of "real-time" updates.
+ *   diff   = swipe.isUp ? (live − strike) : (strike − live)
+ *   pnl    = diff × quantity / FLOAT_SCALING
+ *
+ * Where FLOAT_SCALING = 1e9 (oracle price scale). Quantity is in
+ * dUSDC micro-units (1e6); price diff is in 1e9 fixed. Dividing by
+ * 1e9 leaves the answer in micro-dUSDC, so a $1 favorable price move
+ * yields exactly `quantity` micro-dUSDC of PnL — a $42 move on a
+ * 0.02 dUSDC position works out to 42 × 20_000 = 840_000 micro-dUSDC
+ * = +0.84 dUSDC if your direction is correct, −0.84 if wrong.
+ *
+ * Returns null when we lack a tick (can't yet judge winning side).
+ *
+ * Settled cards still use the contract's binary PnL (`p{0,1}Pnl`)
+ * from `cardOutcomes` — this proportional preview only applies
+ * pre-settlement.
  */
-function runningPremium(
+const FLOAT_SCALING = 1_000_000_000n
+
+function liveCardPnl(
+  swipe: { isUp: boolean; quantity: string; premium: string } | null,
+  strike: string | undefined,
+  forward: string | undefined,
+): bigint | null {
+  if (!swipe || strike === undefined || forward === undefined) return null
+  const s = BigInt(strike)
+  const f = BigInt(forward)
+  const q = BigInt(swipe.quantity)
+  const diff = swipe.isUp ? f - s : s - f
+  return (diff * q) / FLOAT_SCALING
+}
+
+/**
+ * Total running PnL for `side` = settled PnL (definitive, from the
+ * contract's payout − premium cumulative fields) + live PnL for cards
+ * that have a swipe + an oracle tick but no settlement yet. Cards with
+ * no swipe contribute 0; cards swiped without a tick are skipped
+ * (we honestly don't know the direction outcome yet).
+ */
+function runningPnl(
   rs: {
+    p0Payout: string
     p0Premium: string
+    p1Payout: string
     p1Premium: string
     cardOutcomes: Array<{ cardIdx: number }>
     swipes: Array<{
       cardIdx: number
-      p0Swipe: { premium: string } | null
-      p1Swipe: { premium: string } | null
+      p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
+      p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
     }>
   },
   side: 'p0' | 'p1',
-): string {
-  const settledIdx = new Set(rs.cardOutcomes.map((o) => o.cardIdx))
+  deck: { cards: Array<{ oracle_id: string; strike: string }> } | null,
+  ticks: Record<string, { spot: string; forward: string }>,
+): bigint {
   const settled =
-    side === 'p0' ? BigInt(rs.p0Premium) : BigInt(rs.p1Premium)
-  let pending = 0n
+    side === 'p0'
+      ? BigInt(rs.p0Payout) - BigInt(rs.p0Premium)
+      : BigInt(rs.p1Payout) - BigInt(rs.p1Premium)
+  const settledIdx = new Set(rs.cardOutcomes.map((o) => o.cardIdx))
+  let live = 0n
   for (const s of rs.swipes) {
     if (settledIdx.has(s.cardIdx)) continue
     const swipe = side === 'p0' ? s.p0Swipe : s.p1Swipe
-    if (swipe) pending += BigInt(swipe.premium)
+    if (!swipe) continue
+    const card = deck?.cards[s.cardIdx]
+    if (!card) continue
+    const tick = ticks[card.oracle_id]
+    if (!tick) continue
+    const pnl = liveCardPnl(swipe, card.strike, tick.forward)
+    if (pnl !== null) live += pnl
   }
-  return (settled + pending).toString()
+  return settled + live
 }
 
 /**
@@ -1214,10 +1257,18 @@ export default function E2EFlowPanel({ onOutput }: Props) {
         )
         const res = await signAndExecute({ transaction: tx })
         await client.waitForTransaction({ digest: res.digest })
-        setSwipeResults((prev) => [
-          ...prev,
-          { cardIdx, isUp, digest: res.digest },
-        ])
+        // Dedup: the backend indexer can publish `room_state` with this
+        // swipe BEFORE our local append runs (it polls every ~3 s and
+        // waitForTransaction blocks for the same fullnode it queries).
+        // If the hydration effect already pushed cardIdx via the
+        // chain payload, don't double-add — that would shift
+        // `nextSwipeIdx` past the next real slot.
+        setSwipeResults((prev) => {
+          if (prev.some((s) => s.cardIdx === cardIdx)) return prev
+          return [...prev, { cardIdx, isUp, digest: res.digest }].sort(
+            (a, b) => a.cardIdx - b.cardIdx,
+          )
+        })
         onOutput({
           type: 'success',
           title: `swipe card ${cardIdx} ${isUp ? 'UP' : 'DOWN'}`,
@@ -1971,47 +2022,53 @@ export default function E2EFlowPanel({ onOutput }: Props) {
               </div>
             )}
 
-            {/* Running PnL totals — settled payouts + pending premiums per side.
-                Settled payouts/premiums come from `pX_payout/premium` (only
-                updated by settle_card). For unsettled cards we add each
-                committed swipe's premium so the "paid so far" total
-                refreshes the instant a swipe lands on chain. */}
+            {/* Running PnL totals — settled PnL is definitive (contract
+                math), unsettled cards mark-to-market against the live
+                oracle forward vs strike + swipe direction. */}
             {(roomState.cardOutcomes.length > 0 ||
-              roomState.swipes.length > 0) && (
-              <div className="grid grid-cols-2 gap-2 rounded border border-gray-800 bg-gray-950 p-2 text-[11px]">
-                <PnlSummary
-                  label={
-                    myRole === 'creator'
-                      ? 'You (creator)'
-                      : myRole === 'challenger'
-                        ? 'You (challenger)'
-                        : 'Creator'
-                  }
-                  payout={
-                    myRole === 'challenger'
-                      ? roomState.p1Payout
-                      : roomState.p0Payout
-                  }
-                  premium={runningPremium(
-                    roomState,
-                    myRole === 'challenger' ? 'p1' : 'p0',
-                  )}
-                  highlight
-                />
-                <PnlSummary
-                  label="Opponent"
-                  payout={
-                    myRole === 'challenger'
-                      ? roomState.p0Payout
-                      : roomState.p1Payout
-                  }
-                  premium={runningPremium(
-                    roomState,
-                    myRole === 'challenger' ? 'p0' : 'p1',
-                  )}
-                />
-              </div>
-            )}
+              roomState.swipes.length > 0) && (() => {
+                const meSide: 'p0' | 'p1' =
+                  myRole === 'challenger' ? 'p1' : 'p0'
+                const oppSide: 'p0' | 'p1' =
+                  myRole === 'challenger' ? 'p0' : 'p1'
+                const settledIdx = new Set(
+                  roomState.cardOutcomes.map((o) => o.cardIdx),
+                )
+                const liveCountFor = (side: 'p0' | 'p1') =>
+                  roomState.swipes.filter((s) => {
+                    if (settledIdx.has(s.cardIdx)) return false
+                    const sw = side === 'p0' ? s.p0Swipe : s.p1Swipe
+                    if (!sw) return false
+                    const card = deck?.cards[s.cardIdx]
+                    if (!card) return false
+                    return oracleTicks[card.oracle_id] !== undefined
+                  }).length
+                return (
+                  <div className="grid grid-cols-2 gap-2 rounded border border-gray-800 bg-gray-950 p-2 text-[11px]">
+                    <PnlSummary
+                      label={
+                        myRole === 'creator'
+                          ? 'You (creator)'
+                          : myRole === 'challenger'
+                            ? 'You (challenger)'
+                            : 'Creator'
+                      }
+                      pnl={runningPnl(roomState, meSide, deck, oracleTicks)}
+                      settledCount={roomState.settledCount}
+                      totalCards={roomState.cardCount}
+                      liveCount={liveCountFor(meSide)}
+                      highlight
+                    />
+                    <PnlSummary
+                      label="Opponent"
+                      pnl={runningPnl(roomState, oppSide, deck, oracleTicks)}
+                      settledCount={roomState.settledCount}
+                      totalCards={roomState.cardCount}
+                      liveCount={liveCountFor(oppSide)}
+                    />
+                  </div>
+                )
+              })()}
 
             {/* Per-card breakdown: show all 5 slots whether settled yet or not.
                 For unsettled slots we still pull both players' swipes
@@ -2049,6 +2106,18 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                     ? outcome.p0Pnl
                     : outcome.p1Pnl
                   : null
+                const card = deck?.cards[cardIdx]
+                const tick = card ? oracleTicks[card.oracle_id] : undefined
+                const myLivePnl = liveCardPnl(
+                  mySwipeOnChain,
+                  card?.strike,
+                  tick?.forward,
+                )
+                const oppLivePnl = liveCardPnl(
+                  oppSwipeOnChain,
+                  card?.strike,
+                  tick?.forward,
+                )
                 return (
                   <CardRow
                     key={cardIdx}
@@ -2059,6 +2128,10 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                     oppSwipeOnChain={oppSwipeOnChain}
                     myPnl={myPnl}
                     oppPnl={oppPnl}
+                    myLivePnl={myLivePnl}
+                    oppLivePnl={oppLivePnl}
+                    strike={card?.strike}
+                    forward={tick?.forward}
                     onSettle={() => stepManualSettle(cardIdx)}
                     settling={busyStep === 'result'}
                   />
@@ -2335,23 +2408,27 @@ function SwipeTile({
 }
 
 /**
- * Compact PnL card — shows a player's real PnL net (payout from won
- * cards − premium paid on lost cards), all in dUSDC.
+ * Compact PnL card — shows a player's running PnL (settled cards are
+ * definitive from the contract; unsettled-but-swiped cards are
+ * marked-to-market against the live oracle forward vs strike). The
+ * sub-label calls out the live portion so it's clear which slice
+ * may flip once `settle_card` lands.
  */
 function PnlSummary({
   label,
-  payout,
-  premium,
+  pnl,
+  settledCount,
+  totalCards,
+  liveCount,
   highlight,
 }: {
   label: string
-  payout: string
-  premium: string
+  pnl: bigint
+  settledCount: number
+  totalCards: number
+  liveCount: number
   highlight?: boolean
 }) {
-  const payoutN = BigInt(payout)
-  const premiumN = BigInt(premium)
-  const net = payoutN - premiumN
   return (
     <div
       className={`rounded p-2 ${highlight ? 'border border-indigo-700 bg-indigo-950/30' : 'bg-gray-900'}`}
@@ -2360,25 +2437,28 @@ function PnlSummary({
         {label}
       </div>
       <div
-        className={`mt-1 font-mono text-base font-bold ${net > 0n ? 'text-emerald-300' : net < 0n ? 'text-red-300' : 'text-gray-300'}`}
+        className={`mt-1 font-mono text-base font-bold ${pnl > 0n ? 'text-emerald-300' : pnl < 0n ? 'text-red-300' : 'text-gray-300'}`}
       >
-        {net >= 0n ? '+' : ''}
-        {(Number(net) / 1_000_000).toFixed(4)} dUSDC
+        {pnl >= 0n ? '+' : ''}
+        {(Number(pnl) / 1_000_000).toFixed(4)} dUSDC
       </div>
       <div className="mt-0.5 text-[10px] text-gray-500">
-        won {fmtDusdc(payoutN)} · paid {fmtDusdc(premiumN)}
+        {settledCount}/{totalCards} settled
+        {liveCount > 0 ? ` · ${liveCount} live (mark-to-market)` : ''}
       </div>
     </div>
   )
 }
 
 /**
- * Per-card row inside the settlement table. Renders three states:
- *   - awaiting settlement (no outcome on chain yet) — shows my swipe
- *     direction (from local state), plus a "Settle" button if oracle
- *     may have resolved.
- *   - settled — shows strike, settlement price, who won, both players'
- *     swipe directions, and both players' PnL.
+ * Per-card row inside the settlement table. Two render modes:
+ *   - settled: strike, settlement price, who won, both sides' swipe
+ *     directions + each side's actual PnL (payout − premium).
+ *   - unsettled-but-swiped: each side's swipe direction + a *live PnL*
+ *     computed off the current oracle forward vs strike (so if the
+ *     forward is currently above the strike, an UP swipe shows green
+ *     `+(quantity − premium)`; a DOWN swipe shows red `−premium`).
+ *     Updates every oracle tick — flips colors as price moves.
  */
 function CardRow({
   cardIdx,
@@ -2388,6 +2468,10 @@ function CardRow({
   oppSwipeOnChain,
   myPnl,
   oppPnl,
+  myLivePnl,
+  oppLivePnl,
+  strike,
+  forward,
   onSettle,
   settling,
 }: {
@@ -2398,6 +2482,10 @@ function CardRow({
   oppSwipeOnChain: { isUp: boolean; quantity: string; premium: string } | null
   myPnl: string | null
   oppPnl: string | null
+  myLivePnl: bigint | null
+  oppLivePnl: bigint | null
+  strike: string | undefined
+  forward: string | undefined
   onSettle: () => void
   settling: boolean
 }) {
@@ -2408,12 +2496,16 @@ function CardRow({
     mySwipeOnChain ? mySwipeOnChain.isUp : mySwipeLocal?.isUp,
   )
   const oppArrow = arrowOf(oppSwipeOnChain?.isUp)
-  const pnlClass = (p: string | null) =>
-    p && BigInt(p) > 0n
+  const pnlClass = (p: bigint | null) =>
+    p !== null && p > 0n
       ? 'text-emerald-300'
-      : p && BigInt(p) < 0n
+      : p !== null && p < 0n
         ? 'text-red-300'
         : 'text-gray-500'
+  const fmtBigPnl = (p: bigint | null) =>
+    p === null
+      ? '—'
+      : (p >= 0n ? '+' : '') + (Number(p) / 1_000_000).toFixed(4)
   return (
     <div className="grid grid-cols-12 items-center gap-2 rounded bg-gray-950 px-2 py-1.5 text-[11px]">
       <span className="col-span-1 font-mono text-gray-500">#{cardIdx}</span>
@@ -2434,22 +2526,53 @@ function CardRow({
           </span>
           <span className="col-span-2 text-right">
             <span className="text-gray-500">you {myArrow} </span>
-            <span className={pnlClass(myPnl)}>{fmtPnl(myPnl)}</span>
+            <span className={pnlClass(myPnl !== null ? BigInt(myPnl) : null)}>
+              {fmtPnl(myPnl)}
+            </span>
           </span>
           <span className="col-span-3 text-right">
             <span className="text-gray-500">opp {oppArrow} </span>
-            <span className={pnlClass(oppPnl)}>{fmtPnl(oppPnl)}</span>
+            <span className={pnlClass(oppPnl !== null ? BigInt(oppPnl) : null)}>
+              {fmtPnl(oppPnl)}
+            </span>
           </span>
         </>
       ) : (
         <>
-          <span className="col-span-4 text-gray-500">
-            {mySwipeLocal ? `your swipe: ${myArrow}` : 'awaiting swipe'}
+          {/* unsettled — show strike vs live, comparison badge, both sides' swipe + live PnL.
+              The badge makes the math transparent: "live > strike → UP" means anyone who
+              swiped UP is currently winning, anyone who swiped DOWN is losing. */}
+          <span className="col-span-2 text-gray-400">
+            {strike ? `$${(Number(strike) / 1e9).toFixed(0)}` : '—'}
           </span>
-          <span className="col-span-3 text-gray-600 italic">
-            opponent: {oppArrow === '—' ? 'private until settle' : oppArrow}
+          <span className="col-span-2 text-gray-500">
+            {forward ? `→ $${(Number(forward) / 1e9).toFixed(0)}` : '…'}
           </span>
-          <span className="col-span-4 text-right">
+          <span className="col-span-2">
+            {strike && forward ? (
+              <span
+                className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${
+                  BigInt(forward) >= BigInt(strike)
+                    ? 'bg-emerald-900/60 text-emerald-200'
+                    : 'bg-red-900/60 text-red-200'
+                }`}
+                title={`live ${BigInt(forward) >= BigInt(strike) ? '>=' : '<'} strike → ${BigInt(forward) >= BigInt(strike) ? 'UP' : 'DOWN'} winning`}
+              >
+                {BigInt(forward) >= BigInt(strike) ? '⬆ leading' : '⬇ leading'}
+              </span>
+            ) : (
+              <span className="text-gray-600">…</span>
+            )}
+          </span>
+          <span className="col-span-2 text-right">
+            <span className="text-gray-500">you {myArrow} </span>
+            <span className={pnlClass(myLivePnl)}>{fmtBigPnl(myLivePnl)}</span>
+          </span>
+          <span className="col-span-2 text-right">
+            <span className="text-gray-500">opp {oppArrow} </span>
+            <span className={pnlClass(oppLivePnl)}>{fmtBigPnl(oppLivePnl)}</span>
+          </span>
+          <span className="col-span-1 text-right">
             <button
               onClick={onSettle}
               disabled={settling}
