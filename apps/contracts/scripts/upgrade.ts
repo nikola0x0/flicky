@@ -56,25 +56,13 @@ async function main() {
   const buildOutput = JSON.parse(
     execSync("sui move build --dump-bytecode-as-base64 --path .", {
       cwd: resolve(import.meta.dir, ".."),
+      env: { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` },
     }).toString(),
   ) as { modules: string[]; dependencies: string[]; digest: number[] };
 
-  // Force-inject the latest deepbook publish — see publish.ts for the
-  // identical rationale (compiler tree-shakes it out because the local
-  // stub doesn't `use deepbook::*`).
-  const FORCE_INJECT_DEPS: Record<string, string[]> = {
-    testnet: [
-      "0x74cd5657843c627f3d80f713b71e9f895bbbeb470956d8a8e1185badf6cc77c8",
-    ],
-  };
-  for (const dep of FORCE_INJECT_DEPS[NETWORK] ?? []) {
-    if (!buildOutput.dependencies.includes(dep)) {
-      buildOutput.dependencies.push(dep);
-    }
-  }
-
   console.log(
-    `Compiled ${buildOutput.modules.length} modules, ${buildOutput.dependencies.length} deps`,
+    `Compiled ${buildOutput.modules.length} modules, ${buildOutput.dependencies.length} deps:`,
+    JSON.stringify(buildOutput.dependencies, null, 2)
   );
 
   // 2. Build upgrade tx.

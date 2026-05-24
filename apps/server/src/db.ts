@@ -51,20 +51,34 @@ export function getDb(): Database {
         cards_revealed  INTEGER NOT NULL,        -- 0 / 1
         card_count      INTEGER NOT NULL,
         settled_count   INTEGER NOT NULL,
-        p0_score        TEXT NOT NULL,           -- u64 as text
-        p1_score        TEXT NOT NULL,
+        -- Cumulative real-PnL fields per the new contract:
+        --   winner determined by (p0_payout + p1_premium) vs (p1_payout + p0_premium).
+        p0_payout       TEXT NOT NULL DEFAULT '0',
+        p0_premium      TEXT NOT NULL DEFAULT '0',
+        p1_payout       TEXT NOT NULL DEFAULT '0',
+        p1_premium      TEXT NOT NULL DEFAULT '0',
+        started_at_ms   INTEGER NOT NULL DEFAULT 0,
         -- JSON array of per-card outcomes (one entry per settled card,
         -- written incrementally by the indexer on CardSettled events).
-        -- See DuelRow.cardOutcomes for the shape.
         card_outcomes   TEXT NOT NULL DEFAULT '[]',
         last_updated_ms INTEGER NOT NULL
       )
     `)
-    // Older deploys may have the table without card_outcomes — add it.
-    try {
-      _db.exec(`ALTER TABLE duel ADD COLUMN card_outcomes TEXT NOT NULL DEFAULT '[]'`)
-    } catch {
-      // ALTER fails if the column already exists (post-fresh-create) — that's the success case.
+    // Backfill schema for older DB files. ALTER fails silently if the
+    // column already exists, which is the success case here.
+    for (const stmt of [
+      `ALTER TABLE duel ADD COLUMN card_outcomes TEXT NOT NULL DEFAULT '[]'`,
+      `ALTER TABLE duel ADD COLUMN p0_payout TEXT NOT NULL DEFAULT '0'`,
+      `ALTER TABLE duel ADD COLUMN p0_premium TEXT NOT NULL DEFAULT '0'`,
+      `ALTER TABLE duel ADD COLUMN p1_payout TEXT NOT NULL DEFAULT '0'`,
+      `ALTER TABLE duel ADD COLUMN p1_premium TEXT NOT NULL DEFAULT '0'`,
+      `ALTER TABLE duel ADD COLUMN started_at_ms INTEGER NOT NULL DEFAULT 0`,
+    ]) {
+      try {
+        _db.exec(stmt)
+      } catch {
+        /* already present */
+      }
     }
     _db.exec(`CREATE INDEX IF NOT EXISTS duel_status_updated
               ON duel (status, last_updated_ms DESC)`)
@@ -200,8 +214,10 @@ export function saveCursor(trackerId: string, cursor: EventCursor): void {
 export interface CardOutcome {
   cardIdx: number
   settlementPrice: string
-  p0CardScore: string
-  p1CardScore: string
+  /** Card strike copied for convenience so consumers can compute UP-won locally. */
+  strike: string
+  /** `settlementPrice > strike` — UP side won this card. */
+  upWon: boolean
 }
 
 export interface DuelRow {
@@ -213,8 +229,13 @@ export interface DuelRow {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
-  p0Score: string
-  p1Score: string
+  /** Cumulative real-PnL fields. See contract `Duel.p{0,1}_payout/premium`. */
+  p0Payout: string
+  p0Premium: string
+  p1Payout: string
+  p1Premium: string
+  /** Clock timestamp when the duel went ACTIVE (set in `join_duel`). 0 while PENDING. */
+  startedAtMs: number
   cardOutcomes: CardOutcome[]
   lastUpdatedMs: number
 }
@@ -225,8 +246,9 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
       .query(
         `INSERT INTO duel (id, status, stake_coin_type, creator, challenger,
                            cards_revealed, card_count, settled_count,
-                           p0_score, p1_score, card_outcomes, last_updated_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           p0_payout, p0_premium, p1_payout, p1_premium,
+                           started_at_ms, card_outcomes, last_updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status          = excluded.status,
            stake_coin_type = excluded.stake_coin_type,
@@ -235,8 +257,11 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
            cards_revealed  = excluded.cards_revealed,
            card_count      = excluded.card_count,
            settled_count   = excluded.settled_count,
-           p0_score        = excluded.p0_score,
-           p1_score        = excluded.p1_score,
+           p0_payout       = excluded.p0_payout,
+           p0_premium      = excluded.p0_premium,
+           p1_payout       = excluded.p1_payout,
+           p1_premium      = excluded.p1_premium,
+           started_at_ms   = excluded.started_at_ms,
            card_outcomes   = excluded.card_outcomes,
            last_updated_ms = excluded.last_updated_ms`,
       )
@@ -249,8 +274,11 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
         d.cardsRevealed ? 1 : 0,
         d.cardCount,
         d.settledCount,
-        d.p0Score,
-        d.p1Score,
+        d.p0Payout,
+        d.p0Premium,
+        d.p1Payout,
+        d.p1Premium,
+        d.startedAtMs,
         JSON.stringify(d.cardOutcomes),
         Date.now(),
       )
@@ -309,8 +337,11 @@ interface DuelRowRaw {
   cards_revealed: number
   card_count: number
   settled_count: number
-  p0_score: string
-  p1_score: string
+  p0_payout: string
+  p0_premium: string
+  p1_payout: string
+  p1_premium: string
+  started_at_ms: number
   card_outcomes: string
   last_updated_ms: number
 }
@@ -331,8 +362,11 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
     cardsRevealed: r.cards_revealed === 1,
     cardCount: r.card_count,
     settledCount: r.settled_count,
-    p0Score: r.p0_score,
-    p1Score: r.p1_score,
+    p0Payout: r.p0_payout,
+    p0Premium: r.p0_premium,
+    p1Payout: r.p1_payout,
+    p1Premium: r.p1_premium,
+    startedAtMs: r.started_at_ms,
     cardOutcomes: outcomes,
     lastUpdatedMs: r.last_updated_ms,
   }

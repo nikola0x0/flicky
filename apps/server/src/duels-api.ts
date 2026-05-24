@@ -22,8 +22,11 @@ function toWire(d: DuelRow) {
     cardsRevealed: d.cardsRevealed,
     cardCount: d.cardCount,
     settledCount: d.settledCount,
-    p0Score: d.p0Score,
-    p1Score: d.p1Score,
+    p0Payout: d.p0Payout,
+    p0Premium: d.p0Premium,
+    p1Payout: d.p1Payout,
+    p1Premium: d.p1Premium,
+    startedAtMs: d.startedAtMs,
     cardOutcomes: d.cardOutcomes,
     lastUpdatedMs: d.lastUpdatedMs,
   }

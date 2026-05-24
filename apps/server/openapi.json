@@ -401,8 +401,11 @@
           "cardsRevealed": { "type": "boolean" },
           "cardCount": { "type": "integer" },
           "settledCount": { "type": "integer" },
-          "p0Score": { "type": "string" },
-          "p1Score": { "type": "string" },
+          "p0Payout": { "type": "string", "description": "Cumulative dUSDC won across settled cards (real PnL)" },
+          "p0Premium": { "type": "string", "description": "Cumulative dUSDC paid as premium" },
+          "p1Payout": { "type": "string" },
+          "p1Premium": { "type": "string" },
+          "startedAtMs": { "type": "integer", "description": "ms timestamp when the duel went ACTIVE (set on join_duel)" },
           "cardOutcomes": {
             "type": "array",
             "description": "Per-card outcomes for settled cards (length == settledCount)",
@@ -411,8 +414,8 @@
               "properties": {
                 "cardIdx": { "type": "integer" },
                 "settlementPrice": { "type": "string" },
-                "p0CardScore": { "type": "string" },
-                "p1CardScore": { "type": "string" }
+                "strike": { "type": "string" },
+                "upWon": { "type": "boolean", "description": "settlementPrice > strike" }
               }
             }
           },

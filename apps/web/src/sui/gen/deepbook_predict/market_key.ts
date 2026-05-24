@@ -9,7 +9,7 @@ export const MarketKey = new MoveStruct({ name: `${$moduleName}::MarketKey`, fie
         oracle_id: bcs.Address,
         expiry: bcs.u64(),
         strike: bcs.u64(),
-        is_up: bcs.bool()
+        direction: bcs.u8()
     } });
 export interface UpArguments {
     oracleId: RawTransactionArgument<string>;
@@ -71,7 +71,7 @@ export interface NewArguments {
     oracleId: RawTransactionArgument<string>;
     expiry: RawTransactionArgument<number | bigint>;
     strike: RawTransactionArgument<number | bigint>;
-    isUp: RawTransactionArgument<boolean>;
+    direction: RawTransactionArgument<boolean>;
 }
 export interface NewOptions {
     package?: string;
@@ -79,7 +79,7 @@ export interface NewOptions {
         oracleId: RawTransactionArgument<string>,
         expiry: RawTransactionArgument<number | bigint>,
         strike: RawTransactionArgument<number | bigint>,
-        isUp: RawTransactionArgument<boolean>
+        direction: RawTransactionArgument<boolean>
     ];
 }
 export function _new(options: NewOptions) {
@@ -90,7 +90,7 @@ export function _new(options: NewOptions) {
         'u64',
         'bool'
     ] satisfies (string | null)[];
-    const parameterNames = ["oracleId", "expiry", "strike", "isUp"];
+    const parameterNames = ["oracleId", "expiry", "strike", "direction"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'market_key',
@@ -99,12 +99,12 @@ export function _new(options: NewOptions) {
     });
 }
 export interface OracleIdArguments {
-    key: TransactionArgument;
+    self: TransactionArgument;
 }
 export interface OracleIdOptions {
     package?: string;
     arguments: OracleIdArguments | [
-        key: TransactionArgument
+        self: TransactionArgument
     ];
 }
 export function oracleId(options: OracleIdOptions) {
@@ -112,7 +112,7 @@ export function oracleId(options: OracleIdOptions) {
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["key"];
+    const parameterNames = ["self"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'market_key',
@@ -121,12 +121,12 @@ export function oracleId(options: OracleIdOptions) {
     });
 }
 export interface ExpiryArguments {
-    key: TransactionArgument;
+    self: TransactionArgument;
 }
 export interface ExpiryOptions {
     package?: string;
     arguments: ExpiryArguments | [
-        key: TransactionArgument
+        self: TransactionArgument
     ];
 }
 export function expiry(options: ExpiryOptions) {
@@ -134,7 +134,7 @@ export function expiry(options: ExpiryOptions) {
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["key"];
+    const parameterNames = ["self"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'market_key',
@@ -143,12 +143,12 @@ export function expiry(options: ExpiryOptions) {
     });
 }
 export interface StrikeArguments {
-    key: TransactionArgument;
+    self: TransactionArgument;
 }
 export interface StrikeOptions {
     package?: string;
     arguments: StrikeArguments | [
-        key: TransactionArgument
+        self: TransactionArgument
     ];
 }
 export function strike(options: StrikeOptions) {
@@ -156,7 +156,7 @@ export function strike(options: StrikeOptions) {
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["key"];
+    const parameterNames = ["self"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'market_key',
@@ -165,12 +165,12 @@ export function strike(options: StrikeOptions) {
     });
 }
 export interface IsUpArguments {
-    key: TransactionArgument;
+    self: TransactionArgument;
 }
 export interface IsUpOptions {
     package?: string;
     arguments: IsUpArguments | [
-        key: TransactionArgument
+        self: TransactionArgument
     ];
 }
 export function isUp(options: IsUpOptions) {
@@ -178,7 +178,7 @@ export function isUp(options: IsUpOptions) {
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["key"];
+    const parameterNames = ["self"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'market_key',
@@ -187,12 +187,12 @@ export function isUp(options: IsUpOptions) {
     });
 }
 export interface IsDownArguments {
-    key: TransactionArgument;
+    self: TransactionArgument;
 }
 export interface IsDownOptions {
     package?: string;
     arguments: IsDownArguments | [
-        key: TransactionArgument
+        self: TransactionArgument
     ];
 }
 export function isDown(options: IsDownOptions) {
@@ -200,7 +200,7 @@ export function isDown(options: IsDownOptions) {
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["key"];
+    const parameterNames = ["self"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'market_key',

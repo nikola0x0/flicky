@@ -4,6 +4,7 @@ export declare const CONFIG: {
     readonly predictPackageId: any;
     readonly registryId: any;
     readonly predictObjectId: any;
+    readonly flickyPackageId: any;
     readonly marketOracleId: any;
     readonly pythSourceId: any;
     readonly dusdcPackageId: any;

@@ -5,31 +5,12 @@
 
 /**
  * Flicky duel: a two-player, five-card prediction match escrowing stakes in a
- * shared object, consuming DeepBook Predict's `OracleSVI` per card for `p_swiped`
- * snapshots and terminal correctness.
+ * shared object, consuming DeepBook Predict positions for correctness and
+ * computing payout.
  * 
  * Lifecycle: `PENDING` (creator staked, waiting for challenger) → `ACTIVE` (both
  * staked, swipes in progress) → `COMPLETE` (all cards settled and stakes paid
  * out).
- * 
- * Per the README/PRD spec:
- * 
- * - Each card references one `OracleSVI` + one strike on its grid.
- * - Swipes are strictly sequential per player; each swipe snapshots the implied
- *   probability of the chosen direction (`p_swiped`) at the moment of the swipe —
- *   this is what scoring rewards.
- * - Card score = `correct ? (1 / p_swiped) * speed_multiplier : 0`, with per-card
- *   decide-time measured from the previous swipe (or duel start for card 0).
- * 
- * Out of POC scope (follow-ups):
- * 
- * - Commit-reveal deck hashing (cards currently visible at creation).
- * - DeepBook `predict::mint` calls in the same PTB as `record_swipe`.
- * - Forfeit-on-timeout for slow players.
- * - Strike-grid validation in `new_card`: DeepBook's tick metadata lives in
- *   `Predict<Quote>.oracle_config`, not on the oracle itself. Off-grid strikes are
- *   rejected at `predict::mint` time when the player's swipe PTB bundles the mint
- *   call.
  */
 
 import { MoveStruct, normalizeMoveArguments, type RawTransactionArgument } from '../utils/index.js';
@@ -43,50 +24,28 @@ export const Card = new MoveStruct({ name: `${$moduleName}::Card`, fields: {
     } });
 export const Swipe = new MoveStruct({ name: `${$moduleName}::Swipe`, fields: {
         is_up: bcs.bool(),
-        /** Implied probability of the chosen direction at the moment of swipe. */
-        p_swiped: bcs.u64(),
-        /**
-         * Time spent on this card, in ms, since the previous swipe (or duel start for card
-         * 0). Drives the speed multiplier.
-         */
-        decide_time_ms: bcs.u64()
+        quantity: bcs.u64(),
+        premium: bcs.u64()
     } });
 export const Duel = new MoveStruct({ name: `${$moduleName}::Duel<phantom T>`, fields: {
         id: bcs.Address,
         status: bcs.u8(),
-        /**
-         * sha2-256 of `bcs::to_bytes(&cards)` committed at create time. Cards stay empty
-         * until `reveal_deck` is called with the plaintext.
-         */
         deck_hash: bcs.vector(bcs.u8()),
         cards: bcs.vector(Card),
         creator: bcs.Address,
-        /** `@0x0` until a challenger joins. */
         challenger: bcs.Address,
         p0_stake: balance.Balance,
         p1_stake: balance.Balance,
         p0_swipes: bcs.vector(bcs.option(Swipe)),
         p1_swipes: bcs.vector(bcs.option(Swipe)),
-        /** Accumulated scores in 9-decimal fixed point. */
-        p0_score: bcs.u64(),
-        p1_score: bcs.u64(),
-        /**
-         * Clock checkpoint per player: the start time for the next swipe's
-         * `decide_time_ms`. Set to `started_at_ms` on join, advanced on each swipe.
-         */
-        p0_last_swipe_or_start_ms: bcs.u64(),
-        p1_last_swipe_or_start_ms: bcs.u64(),
-        /** Next card index each player must swipe (must be strictly sequential). */
+        p0_payout: bcs.u64(),
+        p0_premium: bcs.u64(),
+        p1_payout: bcs.u64(),
+        p1_premium: bcs.u64(),
         p0_next_card_idx: bcs.u64(),
         p1_next_card_idx: bcs.u64(),
-        /**
-         * Per-card terminal price, populated by `settle_card` when the oracle for that
-         * card has settled.
-         */
         card_settlements: bcs.vector(bcs.option(bcs.u64())),
-        /** Count of cards whose `card_settlements[i]` is `Some`. */
         settled_count: bcs.u64(),
-        /** On-chain timestamp when `join_duel` landed; `0` while PENDING. */
         started_at_ms: bcs.u64()
     } });
 export const DuelCreated = new MoveStruct({ name: `${$moduleName}::DuelCreated`, fields: {
@@ -109,20 +68,16 @@ export const SwipeRecorded = new MoveStruct({ name: `${$moduleName}::SwipeRecord
         player: bcs.Address,
         card_idx: bcs.u64(),
         is_up: bcs.bool(),
-        p_swiped: bcs.u64(),
-        decide_time_ms: bcs.u64()
+        quantity: bcs.u64(),
+        premium: bcs.u64()
     } });
 export const CardSettled = new MoveStruct({ name: `${$moduleName}::CardSettled`, fields: {
         duel_id: bcs.Address,
         card_idx: bcs.u64(),
-        settlement_price: bcs.u64(),
-        p0_card_score: bcs.u64(),
-        p1_card_score: bcs.u64()
+        settlement_price: bcs.u64()
     } });
 export const DuelFinalized = new MoveStruct({ name: `${$moduleName}::DuelFinalized`, fields: {
         duel_id: bcs.Address,
-        p0_score: bcs.u64(),
-        p1_score: bcs.u64(),
         winner: bcs.Address,
         payout_to_p0: bcs.u64(),
         payout_to_p1: bcs.u64()
@@ -138,10 +93,6 @@ export interface NewCardOptions {
         strike: RawTransactionArgument<number | bigint>
     ];
 }
-/**
- * Build a `Card` referencing this oracle + strike. Strike-grid validation happens
- * at `predict::mint` time in the player's swipe PTB; we accept any strike here.
- */
 export function newCard(options: NewCardOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
@@ -214,14 +165,6 @@ export interface CreateDuelOptions {
         string
     ];
 }
-/**
- * Creator stakes and commits the deck's hash. Cards are revealed later via
- * `reveal_deck`. Returns the new shared duel ID.
- *
- * The `deck_hash` is `sha2_256(bcs::to_bytes(&cards))` computed off-chain by the
- * Deckmaster. Committing the hash before the challenger joins prevents
- * front-running with parallel Predict positions.
- */
 export function createDuel(options: CreateDuelOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
@@ -251,12 +194,6 @@ export interface RevealDeckOptions {
         string
     ];
 }
-/**
- * Reveal the committed deck. Permissionless — anyone with the plaintext can call.
- * Verifies `sha2_256(bcs::to_bytes(&cards)) == duel.deck_hash` and populates
- * `duel.cards`. Must run after `join_duel` (duel.status == ACTIVE) and before any
- * `record_swipe`.
- */
 export function revealDeck(options: RevealDeckOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
@@ -286,10 +223,6 @@ export interface JoinDuelOptions {
         string
     ];
 }
-/**
- * Challenger matches the creator's stake and starts the match. Both decks become
- * "revealed" at this moment — per-player decide-time clocks start.
- */
 export function joinDuel(options: JoinDuelOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
@@ -308,38 +241,41 @@ export function joinDuel(options: JoinDuelOptions) {
 }
 export interface RecordSwipeArguments {
     duel: RawTransactionArgument<string>;
+    manager: RawTransactionArgument<string>;
     oracle: RawTransactionArgument<string>;
     cardIdx: RawTransactionArgument<number | bigint>;
     isUp: RawTransactionArgument<boolean>;
+    quantity: RawTransactionArgument<number | bigint>;
+    premium: RawTransactionArgument<number | bigint>;
 }
 export interface RecordSwipeOptions {
     package?: string;
     arguments: RecordSwipeArguments | [
         duel: RawTransactionArgument<string>,
+        manager: RawTransactionArgument<string>,
         oracle: RawTransactionArgument<string>,
         cardIdx: RawTransactionArgument<number | bigint>,
-        isUp: RawTransactionArgument<boolean>
+        isUp: RawTransactionArgument<boolean>,
+        quantity: RawTransactionArgument<number | bigint>,
+        premium: RawTransactionArgument<number | bigint>
     ];
     typeArguments: [
         string
     ];
 }
-/**
- * Player records a swipe on the next card in their sequence. Must be the creator
- * or challenger; the supplied `oracle` must match `cards[card_idx]`. Snapshots the
- * implied probability of the chosen direction (UP or DOWN) from DeepBook's SVI
- * surface.
- */
 export function recordSwipe(options: RecordSwipeOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null,
         null,
+        null,
         'u64',
         'bool',
+        'u64',
+        'u64',
         '0x2::clock::Clock'
     ] satisfies (string | null)[];
-    const parameterNames = ["duel", "oracle", "cardIdx", "isUp"];
+    const parameterNames = ["duel", "manager", "oracle", "cardIdx", "isUp", "quantity", "premium"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -364,10 +300,6 @@ export interface SettleCardOptions {
         string
     ];
 }
-/**
- * Permissionless. Settles one card once its oracle has reached SETTLED, computing
- * both players' scores for that card.
- */
 export function settleCard(options: SettleCardOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
@@ -396,15 +328,6 @@ export interface FinalizeOptions {
         string
     ];
 }
-/**
- * Permissionless once all cards are settled.
- *
- * Payout rules (PRD §Payout):
- *
- * - Higher score wins the entire pot.
- * - Tie on score → lower total decide-time wins.
- * - Still tied → each player gets their own stake back.
- */
 export function finalize(options: FinalizeOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
@@ -601,19 +524,19 @@ export function deckHash(options: DeckHashOptions) {
         typeArguments: options.typeArguments
     });
 }
-export interface P0ScoreArguments {
+export interface P0PayoutArguments {
     duel: RawTransactionArgument<string>;
 }
-export interface P0ScoreOptions {
+export interface P0PayoutOptions {
     package?: string;
-    arguments: P0ScoreArguments | [
+    arguments: P0PayoutArguments | [
         duel: RawTransactionArgument<string>
     ];
     typeArguments: [
         string
     ];
 }
-export function p0Score(options: P0ScoreOptions) {
+export function p0Payout(options: P0PayoutOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null
@@ -622,24 +545,24 @@ export function p0Score(options: P0ScoreOptions) {
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
-        function: 'p0_score',
+        function: 'p0_payout',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
         typeArguments: options.typeArguments
     });
 }
-export interface P1ScoreArguments {
+export interface P0PremiumArguments {
     duel: RawTransactionArgument<string>;
 }
-export interface P1ScoreOptions {
+export interface P0PremiumOptions {
     package?: string;
-    arguments: P1ScoreArguments | [
+    arguments: P0PremiumArguments | [
         duel: RawTransactionArgument<string>
     ];
     typeArguments: [
         string
     ];
 }
-export function p1Score(options: P1ScoreOptions) {
+export function p0Premium(options: P0PremiumOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null
@@ -648,7 +571,59 @@ export function p1Score(options: P1ScoreOptions) {
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
-        function: 'p1_score',
+        function: 'p0_premium',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+        typeArguments: options.typeArguments
+    });
+}
+export interface P1PayoutArguments {
+    duel: RawTransactionArgument<string>;
+}
+export interface P1PayoutOptions {
+    package?: string;
+    arguments: P1PayoutArguments | [
+        duel: RawTransactionArgument<string>
+    ];
+    typeArguments: [
+        string
+    ];
+}
+export function p1Payout(options: P1PayoutOptions) {
+    const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null
+    ] satisfies (string | null)[];
+    const parameterNames = ["duel"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'duel',
+        function: 'p1_payout',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+        typeArguments: options.typeArguments
+    });
+}
+export interface P1PremiumArguments {
+    duel: RawTransactionArgument<string>;
+}
+export interface P1PremiumOptions {
+    package?: string;
+    arguments: P1PremiumArguments | [
+        duel: RawTransactionArgument<string>
+    ];
+    typeArguments: [
+        string
+    ];
+}
+export function p1Premium(options: P1PremiumOptions) {
+    const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null
+    ] satisfies (string | null)[];
+    const parameterNames = ["duel"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'duel',
+        function: 'p1_premium',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
         typeArguments: options.typeArguments
     });
@@ -833,5 +808,27 @@ export function deckSize(options: DeckSizeOptions = {}) {
         package: packageAddress,
         module: 'duel',
         function: 'deck_size',
+    });
+}
+export interface DummyDepsArguments {
+    Deep: TransactionArgument;
+}
+export interface DummyDepsOptions {
+    package?: string;
+    arguments: DummyDepsArguments | [
+        Deep: TransactionArgument
+    ];
+}
+export function dummyDeps(options: DummyDepsOptions) {
+    const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null
+    ] satisfies (string | null)[];
+    const parameterNames = ["Deep"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'duel',
+        function: 'dummy_deps',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }

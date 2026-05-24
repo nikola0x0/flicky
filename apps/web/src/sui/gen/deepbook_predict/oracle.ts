@@ -3,7 +3,7 @@
  **************************************************************/
 import { MoveStruct, normalizeMoveArguments, type RawTransactionArgument } from '../utils/index.js';
 import { bcs } from '@mysten/sui/bcs';
-import { type Transaction, type TransactionArgument } from '@mysten/sui/transactions';
+import { type Transaction } from '@mysten/sui/transactions';
 import * as i64 from './i64.js';
 import * as vec_set from './deps/sui/vec_set.js';
 const $moduleName = 'deepbook_predict::oracle';
@@ -29,16 +29,13 @@ export const OracleSVI = new MoveStruct({ name: `${$moduleName}::OracleSVI`, fie
         timestamp: bcs.u64(),
         settlement_price: bcs.option(bcs.u64())
     } });
-export const OracleSVICap = new MoveStruct({ name: `${$moduleName}::OracleSVICap`, fields: {
-        id: bcs.Address
-    } });
 export interface IdArguments {
-    oracle: RawTransactionArgument<string>;
+    market: RawTransactionArgument<string>;
 }
 export interface IdOptions {
     package?: string;
     arguments: IdArguments | [
-        oracle: RawTransactionArgument<string>
+        market: RawTransactionArgument<string>
     ];
 }
 export function id(options: IdOptions) {
@@ -46,7 +43,7 @@ export function id(options: IdOptions) {
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
+    const parameterNames = ["market"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'oracle',
@@ -55,12 +52,12 @@ export function id(options: IdOptions) {
     });
 }
 export interface ExpiryArguments {
-    oracle: RawTransactionArgument<string>;
+    market: RawTransactionArgument<string>;
 }
 export interface ExpiryOptions {
     package?: string;
     arguments: ExpiryArguments | [
-        oracle: RawTransactionArgument<string>
+        market: RawTransactionArgument<string>
     ];
 }
 export function expiry(options: ExpiryOptions) {
@@ -68,7 +65,7 @@ export function expiry(options: ExpiryOptions) {
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
+    const parameterNames = ["market"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'oracle',
@@ -76,57 +73,13 @@ export function expiry(options: ExpiryOptions) {
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }
-export interface UnderlyingAssetArguments {
-    oracle: RawTransactionArgument<string>;
-}
-export interface UnderlyingAssetOptions {
-    package?: string;
-    arguments: UnderlyingAssetArguments | [
-        oracle: RawTransactionArgument<string>
-    ];
-}
-export function underlyingAsset(options: UnderlyingAssetOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'underlying_asset',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface IsActiveArguments {
-    oracle: RawTransactionArgument<string>;
-}
-export interface IsActiveOptions {
-    package?: string;
-    arguments: IsActiveArguments | [
-        oracle: RawTransactionArgument<string>
-    ];
-}
-export function isActive(options: IsActiveOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'is_active',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
 export interface IsSettledArguments {
-    oracle: RawTransactionArgument<string>;
+    market: RawTransactionArgument<string>;
 }
 export interface IsSettledOptions {
     package?: string;
     arguments: IsSettledArguments | [
-        oracle: RawTransactionArgument<string>
+        market: RawTransactionArgument<string>
     ];
 }
 export function isSettled(options: IsSettledOptions) {
@@ -134,7 +87,7 @@ export function isSettled(options: IsSettledOptions) {
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
+    const parameterNames = ["market"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'oracle',
@@ -142,145 +95,13 @@ export function isSettled(options: IsSettledOptions) {
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }
-export interface PricesArguments {
-    oracle: RawTransactionArgument<string>;
-}
-export interface PricesOptions {
-    package?: string;
-    arguments: PricesArguments | [
-        oracle: RawTransactionArgument<string>
-    ];
-}
-export function prices(options: PricesOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'prices',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface SpotPriceArguments {
-    oracle: RawTransactionArgument<string>;
-}
-export interface SpotPriceOptions {
-    package?: string;
-    arguments: SpotPriceArguments | [
-        oracle: RawTransactionArgument<string>
-    ];
-}
-export function spotPrice(options: SpotPriceOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'spot_price',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface ForwardPriceArguments {
-    oracle: RawTransactionArgument<string>;
-}
-export interface ForwardPriceOptions {
-    package?: string;
-    arguments: ForwardPriceArguments | [
-        oracle: RawTransactionArgument<string>
-    ];
-}
-export function forwardPrice(options: ForwardPriceOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'forward_price',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface SviArguments {
-    oracle: RawTransactionArgument<string>;
-}
-export interface SviOptions {
-    package?: string;
-    arguments: SviArguments | [
-        oracle: RawTransactionArgument<string>
-    ];
-}
-export function svi(options: SviOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'svi',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface SettlementPriceArguments {
-    oracle: RawTransactionArgument<string>;
-}
-export interface SettlementPriceOptions {
-    package?: string;
-    arguments: SettlementPriceArguments | [
-        oracle: RawTransactionArgument<string>
-    ];
-}
-export function settlementPrice(options: SettlementPriceOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'settlement_price',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface TimestampArguments {
-    oracle: RawTransactionArgument<string>;
-}
-export interface TimestampOptions {
-    package?: string;
-    arguments: TimestampArguments | [
-        oracle: RawTransactionArgument<string>
-    ];
-}
-export function timestamp(options: TimestampOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'timestamp',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
 export interface StatusArguments {
-    oracle: RawTransactionArgument<string>;
+    market: RawTransactionArgument<string>;
 }
 export interface StatusOptions {
     package?: string;
     arguments: StatusArguments | [
-        oracle: RawTransactionArgument<string>
+        market: RawTransactionArgument<string>
     ];
 }
 export function status(options: StatusOptions) {
@@ -289,25 +110,12 @@ export function status(options: StatusOptions) {
         null,
         '0x2::clock::Clock'
     ] satisfies (string | null)[];
-    const parameterNames = ["oracle"];
+    const parameterNames = ["market"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'oracle',
         function: 'status',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface StatusInactiveOptions {
-    package?: string;
-    arguments?: [
-    ];
-}
-export function statusInactive(options: StatusInactiveOptions = {}) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'status_inactive',
     });
 }
 export interface StatusActiveOptions {
@@ -349,113 +157,50 @@ export function statusSettled(options: StatusSettledOptions = {}) {
         function: 'status_settled',
     });
 }
-export interface SviAArguments {
-    p: TransactionArgument;
+export interface SettlementPriceArguments {
+    market: RawTransactionArgument<string>;
 }
-export interface SviAOptions {
+export interface SettlementPriceOptions {
     package?: string;
-    arguments: SviAArguments | [
-        p: TransactionArgument
+    arguments: SettlementPriceArguments | [
+        market: RawTransactionArgument<string>
     ];
 }
-export function sviA(options: SviAOptions) {
+export function settlementPrice(options: SettlementPriceOptions) {
     const packageAddress = options.package ?? 'deepbook_predict';
     const argumentsTypes = [
         null
     ] satisfies (string | null)[];
-    const parameterNames = ["p"];
+    const parameterNames = ["market"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'oracle',
-        function: 'svi_a',
+        function: 'settlement_price',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }
-export interface SviBArguments {
-    p: TransactionArgument;
+export interface ComputePriceArguments {
+    market: RawTransactionArgument<string>;
+    Strike: RawTransactionArgument<number | bigint>;
 }
-export interface SviBOptions {
+export interface ComputePriceOptions {
     package?: string;
-    arguments: SviBArguments | [
-        p: TransactionArgument
+    arguments: ComputePriceArguments | [
+        market: RawTransactionArgument<string>,
+        Strike: RawTransactionArgument<number | bigint>
     ];
 }
-export function sviB(options: SviBOptions) {
+export function computePrice(options: ComputePriceOptions) {
     const packageAddress = options.package ?? 'deepbook_predict';
     const argumentsTypes = [
-        null
+        null,
+        'u64'
     ] satisfies (string | null)[];
-    const parameterNames = ["p"];
+    const parameterNames = ["market", "Strike"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'oracle',
-        function: 'svi_b',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface SviRhoArguments {
-    p: TransactionArgument;
-}
-export interface SviRhoOptions {
-    package?: string;
-    arguments: SviRhoArguments | [
-        p: TransactionArgument
-    ];
-}
-export function sviRho(options: SviRhoOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["p"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'svi_rho',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface SviMArguments {
-    p: TransactionArgument;
-}
-export interface SviMOptions {
-    package?: string;
-    arguments: SviMArguments | [
-        p: TransactionArgument
-    ];
-}
-export function sviM(options: SviMOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["p"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'svi_m',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-    });
-}
-export interface SviSigmaArguments {
-    p: TransactionArgument;
-}
-export interface SviSigmaOptions {
-    package?: string;
-    arguments: SviSigmaArguments | [
-        p: TransactionArgument
-    ];
-}
-export function sviSigma(options: SviSigmaOptions) {
-    const packageAddress = options.package ?? 'deepbook_predict';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["p"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'oracle',
-        function: 'svi_sigma',
+        function: 'compute_price',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }

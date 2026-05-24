@@ -44,35 +44,19 @@ async function main() {
 
   console.log(`Deployer: ${address}`);
   console.log(`Network:  ${NETWORK}`);
+  console.log(`Sui CLI:  ${execSync("sui --version", { env: { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` } }).toString().trim()}`);
 
   // 1. Compile + emit bytecode via the Sui CLI.
   const buildOutput = JSON.parse(
     execSync("sui move build --dump-bytecode-as-base64 --path .", {
       cwd: resolve(import.meta.dir, ".."),
+      env: { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` },
     }).toString(),
   ) as { modules: string[]; dependencies: string[]; digest?: number[] };
 
-  // The Move compiler tree-shakes the `deepbook` dep out of our publish list
-  // because the local `deepbook_predict_min` stub doesn't actually `use
-  // deepbook::*`. But the on-chain `deepbook_predict` package's linkage table
-  // does — Sui's publish validator therefore requires the (upgraded) deepbook
-  // address to appear in our publish deps. We inject it here per network.
-  //
-  // Latest deepbook published-at (read from deepbook_predict's on-chain
-  // linkage table). Update when DeepBook upgrades again.
-  const FORCE_INJECT_DEPS: Record<string, string[]> = {
-    testnet: [
-      "0x74cd5657843c627f3d80f713b71e9f895bbbeb470956d8a8e1185badf6cc77c8", // deepbook @ v19
-    ],
-  };
-  for (const dep of FORCE_INJECT_DEPS[NETWORK] ?? []) {
-    if (!buildOutput.dependencies.includes(dep)) {
-      buildOutput.dependencies.push(dep);
-    }
-  }
-
   console.log(
-    `Compiled ${buildOutput.modules.length} modules, ${buildOutput.dependencies.length} deps`,
+    `Compiled ${buildOutput.modules.length} modules, ${buildOutput.dependencies.length} deps:`,
+    JSON.stringify(buildOutput.dependencies, null, 2)
   );
 
   // 2. Build the publish transaction.
@@ -85,11 +69,19 @@ async function main() {
   tx.setSender(address);
 
   // 3. Execute.
-  const result = await client.signAndExecuteTransaction({
-    transaction: tx,
-    signer: keypair,
-    options: { showEffects: true, showObjectChanges: true },
-  });
+  let result;
+  try {
+    result = await client.signAndExecuteTransaction({
+      transaction: tx,
+      signer: keypair,
+      options: { showEffects: true, showObjectChanges: true },
+    });
+  } catch (err: any) {
+    console.error("FULL ERROR DETAILS:");
+    console.error(JSON.stringify(err, null, 2));
+    console.error(err);
+    process.exit(1);
+  }
 
   if (result.effects?.status?.status !== "success") {
     console.error("Publish failed:", result.effects?.status);

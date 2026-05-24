@@ -25,6 +25,7 @@ import type { SuiClient } from "@mysten/sui/client"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import {
+  getDuel,
   loadCursor,
   mergeCardOutcome,
   saveCursor,
@@ -65,9 +66,34 @@ interface DuelLite {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
-  p0Score: bigint
-  p1Score: bigint
+  p0Payout: bigint
+  p0Premium: bigint
+  p1Payout: bigint
+  p1Premium: bigint
+  startedAtMs: bigint
   cardOutcomes: CardOutcome[]
+}
+
+interface CardRaw {
+  fields?: { oracle_id?: string; strike?: string }
+}
+
+/**
+ * Card settlements come back as either `string` (Some price), `null`
+ * (None), or `{ fields: { vec: [price] } }` depending on how the Sui
+ * RPC serialised the Move `Option<u64>`. `parseSettlement` normalises
+ * all three.
+ */
+type SettlementRaw = string | null | { fields?: { vec?: unknown[] } }
+
+function parseSettlement(s: unknown): string | null {
+  if (s === null || s === undefined) return null
+  if (typeof s === "string") return s
+  if (typeof s === "object") {
+    const vec = (s as { fields?: { vec?: unknown[] } }).fields?.vec
+    if (Array.isArray(vec) && vec.length > 0) return String(vec[0])
+  }
+  return null
 }
 
 async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null> {
@@ -76,36 +102,42 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
     options: { showContent: true, showType: true },
   })
   if (obj.data?.content?.dataType !== "moveObject") return null
-  const f = obj.data.content.fields as {
+  const f = obj.data.content.fields as unknown as {
     status: string
     creator: string
     challenger: string
-    cards: unknown[]
-    card_settlements: Array<string | null>
-    p0_score: string
-    p1_score: string
-    // Per-card scoring fields emitted by the contract on settle_card.
-    // The shape varies between contract revisions; older versions may
-    // omit per-card score vectors and only emit them via events.
-    p0_card_scores?: string[]
-    p1_card_scores?: string[]
+    cards: CardRaw[]
+    card_settlements: SettlementRaw[]
+    p0_payout?: string
+    p0_premium?: string
+    p1_payout?: string
+    p1_premium?: string
+    started_at_ms?: string
+    settled_count?: string
   }
   const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
   const cards = Array.isArray(f.cards) ? f.cards : []
-  // Reconstruct per-card outcomes from the on-chain object. Each entry
-  // exists only for settled cards (card_settlements[i] != null).
+  // Reconstruct per-card outcomes from the on-chain object. Cards in
+  // the new contract carry `{oracle_id, strike}`; combined with the
+  // settlement_price we can compute `upWon` server-side so the UI
+  // doesn't have to.
   const cardOutcomes: CardOutcome[] = []
   const settlements = f.card_settlements ?? []
   for (let i = 0; i < settlements.length; i++) {
-    const s = settlements[i]
-    if (s === null || s === undefined) continue
+    const price = parseSettlement(settlements[i])
+    if (price === null) continue
+    const strike = cards[i]?.fields?.strike ?? "0"
     cardOutcomes.push({
       cardIdx: i,
-      settlementPrice: String(s),
-      p0CardScore: String(f.p0_card_scores?.[i] ?? "0"),
-      p1CardScore: String(f.p1_card_scores?.[i] ?? "0"),
+      settlementPrice: price,
+      strike,
+      upWon: BigInt(price) > BigInt(strike),
     })
   }
+  const settledCount =
+    f.settled_count !== undefined
+      ? Number(f.settled_count)
+      : settlements.filter((s) => parseSettlement(s) !== null).length
   return {
     id: normalizeSuiObjectId(id),
     status: STATUS_MAP[String(f.status)] ?? "PENDING",
@@ -114,9 +146,12 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
     challenger: f.challenger,
     cardsRevealed: cards.length > 0,
     cardCount: cards.length,
-    settledCount: settlements.filter((s) => s !== null).length,
-    p0Score: BigInt(f.p0_score ?? "0"),
-    p1Score: BigInt(f.p1_score ?? "0"),
+    settledCount,
+    p0Payout: BigInt(f.p0_payout ?? "0"),
+    p0Premium: BigInt(f.p0_premium ?? "0"),
+    p1Payout: BigInt(f.p1_payout ?? "0"),
+    p1Premium: BigInt(f.p1_premium ?? "0"),
+    startedAtMs: BigInt(f.started_at_ms ?? "0"),
     cardOutcomes,
   }
 }
@@ -171,7 +206,7 @@ export class DuelIndexer {
   private async drainTracker(
     eventType: string,
     touched: Set<string>,
-    finalized: Array<{ duelId: string; p0: string; p1: string; p0Score: bigint; p1Score: bigint }>,
+    finalized: Array<{ duelId: string; p0: string; p1: string; winner: string }>,
   ): Promise<void> {
     let cursor: EventCursor | null = loadCursor(eventType)
     // Soft cap: at most 10 pages per tracker per tick. Prevents one
@@ -188,51 +223,58 @@ export class DuelIndexer {
         const p = e.parsedJson as Record<string, unknown> | undefined
         const id = p?.duel_id as string | undefined
         if (id) touched.add(normalizeSuiObjectId(id))
-        // CardSettled carries per-card outcome data — write it to the
-        // mirror immediately so /duels/{id} reflects it without waiting
-        // for the next refresh. The subsequent refreshDuel still runs
-        // and re-reads from chain, overwriting these with authoritative
-        // values (which should match).
+        // CardSettled (new contract) emits just `settlement_price` —
+        // per-card scores are no longer in the event. We still mirror
+        // the outcome eagerly using the strike from the duel's mirror
+        // row; if the row isn't present yet, the next refreshDuel pass
+        // backfills via on-chain read.
         if (eventType.endsWith("::CardSettled") && p && id) {
           const duelId = normalizeSuiObjectId(id)
           const cardIdxRaw = p.card_idx as string | number | undefined
           const settlementPrice = p.settlement_price as string | undefined
-          const p0CardScore = p.p0_card_score as string | undefined
-          const p1CardScore = p.p1_card_score as string | undefined
-          if (
-            cardIdxRaw !== undefined &&
-            settlementPrice !== undefined &&
-            p0CardScore !== undefined &&
-            p1CardScore !== undefined
-          ) {
+          if (cardIdxRaw !== undefined && settlementPrice !== undefined) {
+            // The strike isn't in the event; we'll let refreshDuel
+            // overwrite this entry with the authoritative strike. For
+            // now write a partial outcome (strike=0, upWon=false) so
+            // `settled_count` aligns with mirrored entries.
             try {
               mergeCardOutcome(duelId, {
                 cardIdx: Number(cardIdxRaw),
                 settlementPrice,
-                p0CardScore,
-                p1CardScore,
+                strike: "0",
+                upWon: false,
               })
             } catch {
               // db error logged inside db.ts
             }
           }
         }
-        // DuelFinalized carries the scores + (creator, challenger) we
-        // need for MMR. Surface it to the caller.
-        if (eventType.endsWith("::DuelFinalized") && p) {
-          const duelId = id ? normalizeSuiObjectId(id) : null
-          const p0 = (p.creator ?? p.p0) as string | undefined
-          const p1 = (p.challenger ?? p.p1) as string | undefined
-          const p0Score = p.p0_score as string | undefined
-          const p1Score = p.p1_score as string | undefined
-          if (duelId && p0 && p1 && p0Score !== undefined && p1Score !== undefined) {
-            finalized.push({
-              duelId,
-              p0,
-              p1,
-              p0Score: BigInt(p0Score),
-              p1Score: BigInt(p1Score),
-            })
+        // DuelFinalized — new shape is { duel_id, winner, payout_to_p0, payout_to_p1 }.
+        // We surface (winner, creator, challenger) so MMR can attribute
+        // outcomes. `creator` + `challenger` aren't in the event; pull
+        // from the mirror.
+        if (eventType.endsWith("::DuelFinalized") && p && id) {
+          const duelId = normalizeSuiObjectId(id)
+          const winner = p.winner as string | undefined
+          if (winner) {
+            // Look up creator + challenger from the indexer mirror — by
+            // the time DuelFinalized fires they're guaranteed to be in
+            // the row (DuelCreated wrote them).
+            const row = (() => {
+              try {
+                return getDuel(duelId)
+              } catch {
+                return null
+              }
+            })()
+            if (row && row.creator && row.challenger) {
+              finalized.push({
+                duelId,
+                p0: row.creator,
+                p1: row.challenger,
+                winner,
+              })
+            }
           }
         }
       }
@@ -250,7 +292,7 @@ export class DuelIndexer {
 
   async tick(): Promise<void> {
     const touched = new Set<string>()
-    const finalized: Array<{ duelId: string; p0: string; p1: string; p0Score: bigint; p1Score: bigint }> = []
+    const finalized: Array<{ duelId: string; p0: string; p1: string; winner: string }> = []
     for (const t of this.eventTypes) {
       try {
         await this.drainTracker(t, touched, finalized)
@@ -271,8 +313,14 @@ export class DuelIndexer {
     // Apply ELO updates after the mirror is refreshed so leaderboard
     // reflects the same `last_updated_ms` window.
     for (const f of finalized) {
-      const outcome =
-        f.p0Score > f.p1Score ? "p0_win" : f.p1Score > f.p0Score ? "p1_win" : "tie"
+      // DuelFinalized now carries `winner` directly (or @0x0 for tie).
+      const outcome: "p0_win" | "p1_win" | "tie" =
+        f.winner === "0x0000000000000000000000000000000000000000000000000000000000000000" ||
+        f.winner === "0x0"
+          ? "tie"
+          : f.winner === f.p0
+            ? "p0_win"
+            : "p1_win"
       try {
         applyDuelOutcome(f.p0, f.p1, outcome)
       } catch (e) {
@@ -296,8 +344,11 @@ export class DuelIndexer {
         cardsRevealed: d.cardsRevealed,
         cardCount: d.cardCount,
         settledCount: d.settledCount,
-        p0Score: d.p0Score.toString(),
-        p1Score: d.p1Score.toString(),
+        p0Payout: d.p0Payout.toString(),
+        p0Premium: d.p0Premium.toString(),
+        p1Payout: d.p1Payout.toString(),
+        p1Premium: d.p1Premium.toString(),
+        startedAtMs: Number(d.startedAtMs),
         cardOutcomes: d.cardOutcomes,
       })
     } catch {
@@ -310,8 +361,11 @@ export class DuelIndexer {
       cardsRevealed: d.cardsRevealed,
       cardCount: d.cardCount,
       settledCount: d.settledCount,
-      p0Score: d.p0Score.toString(),
-      p1Score: d.p1Score.toString(),
+      p0Payout: d.p0Payout.toString(),
+      p0Premium: d.p0Premium.toString(),
+      p1Payout: d.p1Payout.toString(),
+      p1Premium: d.p1Premium.toString(),
+      startedAtMs: Number(d.startedAtMs),
       creator: d.creator,
       challenger: d.challenger,
       stakeCoinType: d.stakeCoinType,

@@ -124,8 +124,11 @@ describe("handleChatReact — filters to creator + challenger (PRD §Social)", (
       cardsRevealed: true,
       cardCount: 5,
       settledCount: 0,
-      p0Score: "0",
-      p1Score: "0",
+      p0Payout: "0",
+      p0Premium: "0",
+      p1Payout: "0",
+      p1Premium: "0",
+      startedAtMs: 0,
       cardOutcomes: [],
     })
   }

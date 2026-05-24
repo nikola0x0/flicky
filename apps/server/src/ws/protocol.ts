@@ -59,8 +59,17 @@ export type ServerMsg =
       cardsRevealed: boolean
       cardCount: number
       settledCount: number
-      p0Score: string
-      p1Score: string
+      /**
+       * Real-PnL cumulative fields per the new contract. Winner is
+       * `(p0Payout + p1Premium) vs (p1Payout + p0Premium)` — UI can
+       * render running net or final result.
+       */
+      p0Payout: string
+      p0Premium: string
+      p1Payout: string
+      p1Premium: string
+      /** ms timestamp when the duel went ACTIVE (set on join_duel). 0 while PENDING. */
+      startedAtMs: number
       creator: string
       challenger: string
       stakeCoinType: string
@@ -68,8 +77,8 @@ export type ServerMsg =
       cardOutcomes: Array<{
         cardIdx: number
         settlementPrice: string
-        p0CardScore: string
-        p1CardScore: string
+        strike: string
+        upWon: boolean
       }>
     }
   | { type: "room_settled"; duelId: string; winner: string; payoutTo: string }
