@@ -7,8 +7,9 @@ import TradingPanel from './components/panels/TradingPanel'
 import LPPanel from './components/panels/LPPanel'
 import KeeperPanel from './components/panels/KeeperPanel'
 import OraclePanel from './components/panels/OraclePanel'
+import SwapPanel from './components/panels/SwapPanel'
 
-type Panel = 'manager' | 'trading' | 'lp' | 'keeper' | 'oracle'
+type Panel = 'manager' | 'trading' | 'lp' | 'keeper' | 'oracle' | 'swap'
 
 interface PanelOutput {
   type: 'success' | 'error' | 'info'
@@ -28,6 +29,7 @@ export default function App() {
     lp: { label: 'LP', icon: '💰' },
     keeper: { label: 'Keeper', icon: '🔧' },
     oracle: { label: 'Oracle', icon: '🔭' },
+    swap: { label: 'Swap', icon: '🔄' },
   }
 
   return (
@@ -89,6 +91,7 @@ export default function App() {
             {activePanel === 'lp' && <LPPanel onOutput={setOutput} />}
             {activePanel === 'keeper' && <KeeperPanel onOutput={setOutput} />}
             {activePanel === 'oracle' && <OraclePanel onOutput={setOutput} />}
+            {activePanel === 'swap' && <SwapPanel onOutput={setOutput} />}
           </div>
 
           {/* Right Panel: Output */}
