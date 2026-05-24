@@ -1,0 +1,126 @@
+/**
+ * Wire protocol for the `/ws` endpoint. Every message is a JSON object
+ * with a `type` discriminator. The server is authoritative for clocks,
+ * matchmaking state, and duel state — clients send intents and receive
+ * deltas, never the other way around.
+ */
+
+// ─── Stake tiers ────────────────────────────────────────────────────────────
+//
+// dUSDC, 6-decimal. PRD §Stake tiers — 1 / 3 / 5 / 10 dUSDC, all gated
+// by PredictManager balance ≥ 5 dUSDC. Practice has no on-chain stake;
+// it shares the swipe engine but skips the queue and the chain.
+
+export const STAKE_TIERS = {
+  practice: 0n,
+  casual: 3_000_000n,
+  standard: 5_000_000n,
+  high_roller: 10_000_000n,
+  starter: 1_000_000n,
+} as const
+
+export type Tier = keyof typeof STAKE_TIERS
+
+export function isValidTier(s: unknown): s is Tier {
+  return typeof s === "string" && Object.hasOwn(STAKE_TIERS, s)
+}
+
+// ─── Client → Server ────────────────────────────────────────────────────────
+
+export type ClientMsg =
+  | { type: "hello"; address: string }
+  | { type: "queue_join"; tier: Tier }
+  | { type: "queue_leave" }
+  | { type: "practice_start" }
+  | { type: "room_subscribe"; duelId: string }
+  | { type: "room_unsubscribe"; duelId: string }
+  | { type: "chat_send"; text: string }
+  | { type: "chat_react"; duelId: string; emoji: string }
+  | { type: "oracle_subscribe"; oracleIds: string[] }
+  | { type: "oracle_unsubscribe"; oracleIds: string[] }
+  | { type: "ping" }
+
+// ─── Server → Client ────────────────────────────────────────────────────────
+
+export type ServerMsg =
+  | { type: "hello"; address: string }
+  | { type: "queue_status"; tier: Tier; size: number; waitMs: number }
+  | { type: "queue_left" }
+  | {
+      type: "match_found"
+      tier: Tier
+      role: "creator" | "challenger"
+      opponent: string
+    }
+  | {
+      type: "room_state"
+      duelId: string
+      status: "PENDING" | "ACTIVE" | "COMPLETE"
+      cardsRevealed: boolean
+      cardCount: number
+      settledCount: number
+      p0Score: string
+      p1Score: string
+      creator: string
+      challenger: string
+      stakeCoinType: string
+    }
+  | { type: "room_settled"; duelId: string; winner: string; payoutTo: string }
+  | {
+      type: "peer_left"
+      duelId: string
+      address: string
+      gracePeriodMs: number
+    }
+  | { type: "peer_rejoined"; duelId: string; address: string }
+  | { type: "peer_forfeit"; duelId: string; address: string }
+  | {
+      type: "practice_session"
+      cards: Array<{ oracle_id: string; strike: string; expiry: string }>
+      botSwipes: boolean[]
+    }
+  | {
+      type: "chat_history"
+      messages: Array<{ id: number; from: string; text: string; timestampMs: number }>
+    }
+  | {
+      type: "chat_message"
+      id: number
+      from: string
+      text: string
+      timestampMs: number
+    }
+  | {
+      type: "chat_reaction"
+      duelId: string
+      from: string
+      emoji: string
+      timestampMs: number
+    }
+  | {
+      type: "oracle_tick"
+      oracleId: string
+      spot: string
+      forward: string
+      expiry: string
+      settled: boolean
+      timestampMs: number
+    }
+  | {
+      type: "match_tick"
+      duelId: string
+      serverNowMs: number
+      status: "PENDING" | "ACTIVE" | "COMPLETE"
+    }
+  | { type: "pong" }
+  | { type: "error"; code: string; message: string; detail?: unknown }
+
+export function parseClientMsg(raw: string): ClientMsg | null {
+  try {
+    const o = JSON.parse(raw) as Partial<ClientMsg>
+    if (!o || typeof o !== "object" || typeof o.type !== "string") return null
+    return o as ClientMsg
+  } catch {
+    return null
+  }
+}

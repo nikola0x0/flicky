@@ -18,9 +18,9 @@ Prediction markets are powerful but feel like trading terminals. Swipe-based mob
 
 1. **Sign in.** zkLogin via Enoki (Google / Apple OAuth → Sui address). The zkLogin address is the wallet — no separate in-app balance.
 2. **Predict Manager bootstrap.** A `PredictManager` is created for the player on first sign-in, sponsored by Flicky. The player never touches SUI for gas.
-3. **Practice Mode (optional).** Solo vs. a bot with virtual positions — no stake, no `predict::mint`. Full swipe + settle UX so the player learns the loop before risking dUSDC.
+3. **Practice Mode (optional).** Solo vs. a server-generated bot with virtual positions — no stake, no `predict::mint`, **no matchmaking queue**. Full swipe + settle UX so the player learns the loop before risking dUSDC. Practice Mode is the **only** path for solo play; the Staked queue is human-vs-human only.
 4. **Deposit / Swap.** To enter matching, the player tops up dUSDC. The in-app Deposit screen surfaces the player's Sui address + QR + copy, and includes a built-in **SUI ↔ dUSDC swap (1 SUI : 10 dUSDC)** so a player with only SUI can fund a stake without leaving the app.
-5. **Matching.** Player picks a stake tier — **1, 3, 5, or 10 dUSDC** — and joins the queue. Entry requires `PredictManager` balance **≥ 5 dUSDC** (the per-card mint budget: up to 1 dUSDC of Predict premium × 5 cards). MMR + bucketed per-tier matching; bot-fill on ~30 s queue timeout.
+5. **Matching.** Player picks a stake tier — **1, 3, 5, or 10 dUSDC** — and joins the queue. Entry requires `PredictManager` balance **≥ 5 dUSDC** (the per-card mint budget: up to 1 dUSDC of Predict premium × 5 cards). MMR + bucketed per-tier matching; queue is **human-vs-human only** — no bot-fill. Players who want solo play use Practice Mode (step 3).
 6. **Play (≤10 min).** Five cards are revealed. Each card is one binary digital tied to the next 5 nearest oracle resolutions that are **>10 min** out (each card has its own expiry). A swipe is a single player-signed PTB that atomically (a) mints YES or NO via `predict::mint` on the player's own `PredictManager` and (b) calls `duel::record_swipe` on the shared `Duel`. Five swipes → five real on-chain Predict positions.
 7. **Settlement.** Each card resolves at its own oracle tick. Per-card PnL = (Predict redeem value) − (premium paid). **Player score = Σ PnL across the 5 cards.** Higher total PnL wins the Duel side-pot. Tie → side-pot split.
 8. **Winner redeem.** Winner claims the dUSDC Duel Pot from the `Duel` escrow on settle, and (when they choose) redeems their own 5 Predict positions via `predict::redeem_permissionless` into their `PredictManager`.
@@ -43,12 +43,14 @@ Practice is a single-player on-ramp — it shares the swipe UI but does not ente
 
 | Tier | Stake | Pot (per duel) |
 | --- | --- | --- |
-| Practice queue | 1 dUSDC | 2 dUSDC |
+| Starter | 1 dUSDC | 2 dUSDC |
 | Casual | 3 dUSDC | 6 dUSDC |
 | Standard | 5 dUSDC | 10 dUSDC |
 | High Roller | 10 dUSDC | 20 dUSDC |
 
 All tiers require `PredictManager` balance ≥ 5 dUSDC before entering the queue, because each duel mints up to 5 dUSDC of Predict premium (5 cards × max 1 dUSDC per card) regardless of side-pot size.
+
+> **Practice Mode is separate, not a tier in this table.** It's a solo-vs-bot path with no stake, no chain commit, no queue — see §End-to-end player flow step 3.
 
 ### Match anatomy
 
@@ -93,7 +95,8 @@ The backend generates each duel's deck from the 5 nearest DeepBook Predict oracl
 ### Matchmaking
 
 - **Sync-only for MVP** — both players online and in-app at the same time. Shared swipe/watch phase is half the product magic; async kills it.
-- **Bot-fill on queue timeout** — if no human opponent in ~30 s, a bot with a fixed skill model fills in. Solves hackathon-scale liquidity.
+- **Human-vs-human queue only** — no bot-fill. If no human opponent is available, the player stays queued (or leaves manually). Solo play is handled by Practice Mode, not by injecting a bot opponent into the Staked queue, so the dUSDC pot is always real-vs-real money.
+- **MMR + bucketed per-tier matching** — queue is partitioned by stake tier; within a tier, server picks the closest-rated opponent inside a wait-expanding window (initial ±200 rating, +20 per second waiting). New players default to rating 1000; ratings update via standard ELO on `DuelFinalized`.
 - **Async mode (post-MVP)** — could be added as "Background Duel" if real-user liquidity proves insufficient.
 
 ### Anti-cheat / fairness
@@ -103,7 +106,19 @@ The backend generates each duel's deck from the 5 nearest DeepBook Predict oracl
 | Mark manipulation via whale side-trades | Scoring is the actual Predict redeem PnL. A whale's mark move does not change terminal settlement. |
 | Front-running deck with parallel positions | **Commit-reveal**: deck hash committed at match creation, revealed only at swipe-phase start. |
 | Two-account collusion to farm side-pot | MMR queue + zkLogin OAuth binding raises Sybil cost. Stake-locked entry, light proof-of-attention for ranked queue — post-MVP. |
-| Bot-driven swiping in PvP | Same 10-min window for both players; cards are freshly revealed. Optional human-only ranked queue with proof-of-attention — post-MVP. |
+| Bot-driven swiping in PvP | Same 10-min window for both players; cards are freshly revealed. Queue is human-vs-human (no bot opponents in Staked). Optional proof-of-attention for ranked queue — post-MVP. |
+
+### Social — Global Chat Room
+
+A single global chat channel sits across the whole app — lobby + watch + result screens. Goal is community feel during sync-matchmaking; it is not part of the duel scoring engine.
+
+- **Scope.** One global channel. All connected sockets receive every message. (Per-duel chat is intentionally NOT shipped MVP — players in a duel can use the global room or emoji reactions.)
+- **Emoji reactions (per-duel).** During the swipe + watch phases, players in a duel room can fire emoji reactions that broadcast to the other player only. Reactions are ephemeral (not stored).
+- **Persistence.** Recent N messages stored server-side so a freshly-connected tab gets the last few minutes of context. Auto-pruned to a rolling cap.
+- **Rate limit.** Token bucket per address: ~1 message / 1.5 s with small burst. Same for reactions.
+- **Identity.** Sender = zkLogin address. No display names in MVP; UI can shorten the 0x… address for display.
+- **Moderation.** None in MVP. Length cap (256 chars) + rate limit are the only guards.
+- **Out of scope MVP.** DMs, mentions, mod tools, slow mode, content filtering, channel rooms, mute/block lists.
 
 ---
 
@@ -147,9 +162,11 @@ Flicky combines three previously-proposed Predict ideas plus the novel PvP layer
 ### Backend (`apps/server`, Bun)
 
 - **Card generation API.** Reads the upcoming oracle resolution schedule, picks the 5 nearest >10 min out, chooses strikes, returns the deck (with hash for commit-reveal).
-- **WebSocket matchmaking + game room.** Create room, join room, broadcast match clock — match timing is authoritative from the server, not the client.
-- **`Duel` indexer.** Watches Duel events (create, swipe, settle), maintains room state, fans state changes back to the WS clients.
+- **WebSocket matchmaking + game room.** Create room, join room, broadcast match clock — match timing is authoritative from the server, not the client. MMR-aware pair selection inside each tier (closest-rated opponent in an expanding window).
+- **Practice Mode handler.** Server-only path that returns a deck + pre-decided bot swipes so the client can simulate a duel without any chain interaction. Replaces "bot-fill in queue" as the solo-vs-bot route.
+- **`Duel` indexer.** Watches Duel events (create, swipe, settle), maintains room state, fans state changes back to the WS clients, and applies ELO updates on `DuelFinalized`.
 - **PnL & settle-price tracker.** Subscribes to Predict's settle events, computes per-card PnL for each player, triggers `duel::settle_duel` once all 5 cards in a duel have settled.
+- **Global chat + emoji reactions.** Broadcasts global chat messages to every connected socket; persists a rolling backlog so new tabs get context. Emoji reactions are room-scoped and ephemeral.
 - **Sponsored gas service.** Sponsors every player-signed PTB end-to-end.
 
 ### Frontend (`apps/web`, Vite + React)
@@ -174,8 +191,9 @@ Flicky combines three previously-proposed Predict ideas plus the novel PvP layer
 - Deposit screen + in-app SUI→dUSDC swap (1:10) as the money-in paths.
 - Settled-redeem keeper.
 - AI Deckmaster (open-source generator + on-chain seed + commit-reveal; Nautilus TEE attestation deferred).
-- Share-card image for virality (friend lists / chat / spectate deferred).
-- Sync-only matchmaking with bot-fill (async deferred).
+- Share-card image for virality (friend lists / spectate deferred).
+- Global chat room + per-duel emoji reactions.
+- Sync-only matchmaking, **human-vs-human queue** (Practice Mode handles solo-vs-bot; async deferred).
 - Sabotage skills, streaks, ladder cosmetics — all deferred.
 
 ## Deferred (post-MVP)
