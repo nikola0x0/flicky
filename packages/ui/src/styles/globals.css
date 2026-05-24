@@ -3,10 +3,292 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/inter";
 
+/*
+ * Custom typefaces.
+ *
+ * TTF files live in `apps/web/public/fonts/` and are served by Vite at
+ * the absolute URLs below. Drop your files there and either match the
+ * filenames or update the `src:` lines.
+ *
+ *   landing.ttf  → display font for the landing page (--font-display, font-display utility)
+ *   pixel.ttf    → in-game font for the mobile-frame game UI (--font-pixel, font-pixel utility)
+ */
+@font-face {
+  font-family: "Flicky Display";
+  src: url("/fonts/landing.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Flicky Pixel";
+  src: url("/fonts/pixel.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 @custom-variant dark (&:is(.dark *));
 @source "../../../apps/**/*.{ts,tsx}";
 @source "../../../components/**/*.{ts,tsx}";
 @source "../**/*.{ts,tsx}";
+
+/*
+ * Animated checker background for the game-page outer canvas.
+ *
+ * Uses the SidOfc 4-gradient trick (26%/75% breakpoints + half-tile-offset
+ * positions) to avoid the faint diagonal line artifact that pure
+ * repeating-conic-gradient shows on some browsers. Tile = 64px square.
+ *
+ * One animation cycle drifts by exactly one tile in each axis, so the
+ * loop is seamless. Tile size and offsets are coupled — if you change
+ * the size, the four positions in both the static rule and the keyframe
+ * must update too (size/2 for offset, full size for the end position).
+ */
+@keyframes checker-drift {
+  from {
+    background-position: 0 0, 64px 0, 64px -64px, 0 64px;
+  }
+  to {
+    background-position: 128px 128px, 192px 128px, 192px 64px, 128px 192px;
+  }
+}
+
+.bg-checker {
+  background-color: #fbfbfb;
+  background-image:
+    linear-gradient(45deg, #d4f6ff 26%, transparent 26%),
+    linear-gradient(135deg, #d4f6ff 26%, transparent 26%),
+    linear-gradient(45deg, transparent 75%, #d4f6ff 75%),
+    linear-gradient(135deg, transparent 75%, #d4f6ff 75%);
+  background-size: 128px 128px;
+  background-position: 0 0, 64px 0, 64px -64px, 0 64px;
+  animation: checker-drift 12s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-checker {
+    animation: none;
+  }
+}
+
+/*
+ * Pixel-cabinet frame treatment.
+ *
+ * Stacked box-shadows with zero blur radius give hard, stepped edges —
+ * the chunky retro look without needing a bitmap border-image. Layers:
+ *   1. 4px solid black ring around all four sides
+ *   2. Same shadow shifted down so the bottom edge reads thicker —
+ *      classic pixel-art "weight underneath" effect, no perspective trick
+ *      needed. Top/left/right stay at 4px; bottom becomes 4 + 8 = 12px.
+ */
+.pixel-frame {
+  box-shadow:
+    0 0 0 4px #000000,
+    0 8px 0 4px #000000;
+}
+
+/*
+ * Green JRPG-menu button.
+ *
+ * Pixel-art look = notched/stepped corners (4-px square cut at each
+ * corner via clip-path) + vertical gradient with darker bottom for
+ * visual weight + inset bevel (highlight on top, shadow on bottom).
+ * No outer border — the gradient + bevel carry the pixel-art read.
+ *
+ * Apply to any <button>. <MatchButton> handles the inner layout.
+ */
+.default-btn-green-container {
+  background: var(--btn-bg, #00ad45);
+  border-radius: 0;
+  /*
+   * 2-step staircase corners — 6×6 cut at each corner, made of two
+   * 3-px stair steps. More visible "jag" than a single-step notch.
+   */
+  clip-path: polygon(
+    6px 0,
+    calc(100% - 6px) 0,
+    calc(100% - 6px) 3px,
+    calc(100% - 3px) 3px,
+    calc(100% - 3px) 6px,
+    100% 6px,
+    100% calc(100% - 6px),
+    calc(100% - 3px) calc(100% - 6px),
+    calc(100% - 3px) calc(100% - 3px),
+    calc(100% - 6px) calc(100% - 3px),
+    calc(100% - 6px) 100%,
+    6px 100%,
+    6px calc(100% - 3px),
+    3px calc(100% - 3px),
+    3px calc(100% - 6px),
+    0 calc(100% - 6px),
+    0 6px,
+    3px 6px,
+    3px 3px,
+    6px 3px
+  );
+  box-shadow:
+    /* Top highlight: lighter color, opaque, 4px tall — sits as a hard
+       pixel-art "shine" stripe on the top edge without dividing the
+       main color into halves. Override via --btn-highlight per instance. */
+    inset 0 4px 0 var(--btn-highlight, #5de890),
+    inset 0 -5px 0 rgba(0, 0, 0, 0.35);
+  text-shadow: var(--btn-text-shadow, 0 1px 0 rgba(0, 0, 0, 0.4));
+  transition: filter 80ms linear;
+}
+
+.default-btn-green-container:hover {
+  filter: brightness(0.94) saturate(0.95);
+}
+
+.default-btn-green-container:disabled {
+  filter: grayscale(0.9);
+  cursor: not-allowed;
+}
+
+/*
+ * Bordered variant — adds a 2px hard black outline that follows the
+ * staircase clip-path. `box-shadow` is no good here because clip-path
+ * clips it; `filter: drop-shadow()` instead is applied to the rendered
+ * silhouette, so it traces the corner steps faithfully.
+ *
+ * Four chained drop-shadows (one per axis direction) approximate a
+ * uniform solid outline. Hover state must include the four drop-shadows
+ * too, otherwise CSS's filter rule replaces (doesn't merge) on hover.
+ */
+.default-btn-green-container.with-border {
+  filter:
+    drop-shadow(-2px 0 0 #000)
+    drop-shadow(2px 0 0 #000)
+    drop-shadow(0 -2px 0 #000)
+    drop-shadow(0 2px 0 #000);
+}
+
+.default-btn-green-container.with-border:hover {
+  filter:
+    drop-shadow(-2px 0 0 #000)
+    drop-shadow(2px 0 0 #000)
+    drop-shadow(0 -2px 0 #000)
+    drop-shadow(0 2px 0 #000)
+    brightness(0.94)
+    saturate(0.95);
+}
+
+.default-btn-green-container.with-border:disabled {
+  filter:
+    drop-shadow(-2px 0 0 #000)
+    drop-shadow(2px 0 0 #000)
+    drop-shadow(0 -2px 0 #000)
+    drop-shadow(0 2px 0 #000)
+    grayscale(0.9);
+}
+
+/*
+ * Featured nav tile (e.g. the central PvP button). Same pixel-art
+ * recipe as .default-btn-green-container — staircase-notched corners
+ * via clip-path, top highlight + bottom shadow via inset box-shadow —
+ * recolored as a blue interior with a 3-px gold outline traced around
+ * the silhouette via filter: drop-shadow.
+ */
+.featured-nav-tile {
+  background: #ffc629;
+  border-radius: 0;
+  clip-path: polygon(
+    6px 0,
+    calc(100% - 6px) 0,
+    calc(100% - 6px) 3px,
+    calc(100% - 3px) 3px,
+    calc(100% - 3px) 6px,
+    100% 6px,
+    100% calc(100% - 6px),
+    calc(100% - 3px) calc(100% - 6px),
+    calc(100% - 3px) calc(100% - 3px),
+    calc(100% - 6px) calc(100% - 3px),
+    calc(100% - 6px) 100%,
+    6px 100%,
+    6px calc(100% - 3px),
+    3px calc(100% - 3px),
+    3px calc(100% - 6px),
+    0 calc(100% - 6px),
+    0 6px,
+    3px 6px,
+    3px 3px,
+    6px 3px
+  );
+  box-shadow:
+    inset 0 4px 0 #ffe476,
+    inset 0 -5px 0 rgba(0, 0, 0, 0.35);
+  /*
+   * Dark-amber outline traced around the staircase silhouette + the
+   * "selected" brightness boost baked into the same filter chain so
+   * Tailwind brightness utilities don't replace and erase the outline.
+   */
+  filter:
+    drop-shadow(-3px 0 0 #7c4f08)
+    drop-shadow(3px 0 0 #7c4f08)
+    drop-shadow(0 -3px 0 #7c4f08)
+    drop-shadow(0 3px 0 #7c4f08)
+    brightness(1.05) saturate(1.05);
+}
+
+.featured-nav-tile.is-inactive {
+  filter:
+    drop-shadow(-3px 0 0 #4d3308)
+    drop-shadow(3px 0 0 #4d3308)
+    drop-shadow(0 -3px 0 #4d3308)
+    drop-shadow(0 3px 0 #4d3308)
+    brightness(0.78) saturate(0.85);
+}
+
+.featured-nav-tile.is-inactive:hover {
+  filter:
+    drop-shadow(-3px 0 0 #6b4408)
+    drop-shadow(3px 0 0 #6b4408)
+    drop-shadow(0 -3px 0 #6b4408)
+    drop-shadow(0 3px 0 #6b4408)
+    brightness(0.92) saturate(0.95);
+}
+
+/*
+ * Player avatar — staircase-notched square so the silhouette reads as
+ * pixel art (corners stepped, not rounded), with a 2px black outline
+ * traced around the silhouette via filter: drop-shadow. The gradient
+ * fill is supplied per-instance via inline style by <PlayerAvatar>.
+ *
+ * Notch dimensions (3px steps, 6px corner cut) match the green button
+ * and featured-nav-tile so all pixel-art surfaces share one corner
+ * vocabulary across the UI.
+ */
+.pixel-avatar {
+  clip-path: polygon(
+    6px 0,
+    calc(100% - 6px) 0,
+    calc(100% - 6px) 3px,
+    calc(100% - 3px) 3px,
+    calc(100% - 3px) 6px,
+    100% 6px,
+    100% calc(100% - 6px),
+    calc(100% - 3px) calc(100% - 6px),
+    calc(100% - 3px) calc(100% - 3px),
+    calc(100% - 6px) calc(100% - 3px),
+    calc(100% - 6px) 100%,
+    6px 100%,
+    6px calc(100% - 3px),
+    3px calc(100% - 3px),
+    3px calc(100% - 6px),
+    0 calc(100% - 6px),
+    0 6px,
+    3px 6px,
+    3px 3px,
+    6px 3px
+  );
+  filter:
+    drop-shadow(-2px 0 0 #000)
+    drop-shadow(2px 0 0 #000)
+    drop-shadow(0 -2px 0 #000)
+    drop-shadow(0 2px 0 #000);
+}
 
 /*
  * Linear-app-derived palette.
@@ -76,6 +358,8 @@
   --radius-4xl: 32px;
   --font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+  --font-display: "Flicky Display", "Inter Variable", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-pixel: "Flicky Pixel", ui-monospace, "SFMono-Regular", "Menlo", monospace;
 }
 
 /* Light mode — Linear inverse surfaces (less polished, dark is canonical). */
