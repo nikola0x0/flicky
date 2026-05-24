@@ -83,6 +83,16 @@ manually re-injects the latest deepbook address per network — see the
 > binding + one-package-per-address constraint) see the project root chat
 > log around "tại sao phải có deepbook_predict_min".
 
+## Swap Package (Standalone AMM)
+
+Located in [swap/](file:///Users/alvin/Developer/sui-flow/flicky/apps/contracts/swap/):
+A standalone Constant Product AMM pool package deployed to test swap operations between **SUI** and **dUSDC**.
+
+* **Testnet Package ID**: `0x51ea0f29321f3c25f8b2f530ecd3ed3dec569d954c8832d318de7e203653a936`
+* **Upgrade Capability**: `0x676dcb5f4a83791aed86c7a2f0488a75caa93aa49f90b22b98b30a17ebe8c178`
+
+For detailed usage instructions, functions, structures, and tests, see [swap/README.md](file:///Users/alvin/Developer/sui-flow/flicky/apps/contracts/swap/README.md).
+
 ## Why codegen + how to run it
 
 `@mysten/codegen` reads the Move package summaries and emits typed `moveCall`
