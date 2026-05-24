@@ -64,6 +64,13 @@ export type ServerMsg =
       creator: string
       challenger: string
       stakeCoinType: string
+      /** Per-card outcomes for settled cards (one entry per settledCount). */
+      cardOutcomes: Array<{
+        cardIdx: number
+        settlementPrice: string
+        p0CardScore: string
+        p1CardScore: string
+      }>
     }
   | { type: "room_settled"; duelId: string; winner: string; payoutTo: string }
   | {
@@ -104,6 +111,12 @@ export type ServerMsg =
       forward: string
       expiry: string
       settled: boolean
+      /**
+       * SVI parameters used by the on-chain `pricing::p_up` quoter.
+       * Optional — older OracleSVI snapshots may not surface them.
+       * Five-tuple in 1e9 fixed point: (a, b, rho, m, sigma).
+       */
+      svi?: { a: string; b: string; rho: string; m: string; sigma: string }
       timestampMs: number
     }
   | {

@@ -139,22 +139,48 @@ function isSettlementSet(v: unknown): boolean {
   return false
 }
 
-// ─── Deck construction (seeded PRG) ─────────────────────────────────────────
+// ─── Deck construction (seeded PRG + 2/2/1 difficulty mix) ──────────────────
+//
+// PRD §AI Deckmaster: "the generator chooses strike + side per card to
+// balance difficulty (mix of close-to-money hard calls and deep-OTM
+// gimmes/traps)." We implement this as a fixed 2/2/1 allocation across
+// three difficulty buckets — strike-offset relative to the oracle's
+// forward is the proxy for difficulty (close ≈ ~50% implied → coin
+// flip → hardest, far OTM ≈ ~5-15% implied → near-gimme).
+//
+// Buckets are PRG-ordered across the 5 oracles, and PRG also picks
+// which pct inside each bucket. The seed is deterministic — anyone
+// with `seed` can recompute the exact deck.
+
+/** Difficulty buckets — strike pct of forward. */
+const STRIKE_BUCKETS = {
+  /** Hard calls — close-to-money. */
+  close: [98n, 99n, 100n, 101n, 102n] as const,
+  /** Mid-difficulty — moderate offset. */
+  mid: [95n, 96n, 97n, 103n, 104n, 105n] as const,
+  /** Easy / gimmes / traps — deep-OTM. */
+  otm: [85n, 88n, 90n, 110n, 112n, 115n] as const,
+} as const
+
+type Difficulty = keyof typeof STRIKE_BUCKETS
 
 /**
- * Strike-offset pool (parts per 100, signed via `centered = pct - 100`).
- * The PRG draws one offset from this pool per card. Mix of close-to-money
- * (2%) and wide (10%) gives a difficulty spread without going as far as
- * an SVI-informed picker. PRD §AI Deckmaster targets a 2/2/1 split which
- * an SVI quoter can hit later — this is the deterministic placeholder
- * that doesn't bias toward either UP or DOWN.
+ * 2 close + 2 mid + 1 otm per deck. The order across the 5 oracles is
+ * PRG-shuffled so card index N isn't always the same difficulty.
  */
-const STRIKE_PCT_POOL = [98n, 102n, 95n, 105n, 100n, 99n, 101n, 97n, 103n, 90n, 110n] as const
+const DIFFICULTY_ALLOCATION: readonly Difficulty[] = [
+  "close",
+  "close",
+  "mid",
+  "mid",
+  "otm",
+] as const
 
-/** Stable seed derivation — 32 bytes from sha256(sender || asset || timestamp || nonce). */
+/** Stable seed derivation — 32 bytes from sha256(sender || asset || tier || timestamp || nonce). */
 export function deriveSeed(input: {
   sender?: string
   asset: string
+  tier?: string
   timestampMs: number
   nonceHex?: string
 }): Uint8Array {
@@ -162,6 +188,8 @@ export function deriveSeed(input: {
   if (input.sender) h.update(input.sender)
   h.update("|")
   h.update(input.asset)
+  h.update("|")
+  if (input.tier) h.update(input.tier)
   h.update("|")
   h.update(String(input.timestampMs))
   h.update("|")
@@ -171,10 +199,9 @@ export function deriveSeed(input: {
 
 /**
  * Tiny seeded PRG — sha256 in counter mode. Deterministic given the seed
- * so anyone with `seed` can recompute the exact strike sequence for a
- * given (oracle list, asset). Not cryptographically strong as a CSPRNG
- * for unbounded streams, but sufficient for picking 5 ints from a small
- * pool.
+ * so anyone with `seed` can recompute the exact strike sequence. Not a
+ * CSPRNG for unbounded streams, but sufficient for picking 5 ints from
+ * small pools.
  */
 function* prgStream(seed: Uint8Array): Generator<number, never> {
   let counter = 0
@@ -188,12 +215,31 @@ function* prgStream(seed: Uint8Array): Generator<number, never> {
   }
 }
 
-function pickStrikePct(stream: Generator<number, never>): bigint {
-  // Reject-sample to avoid modulo bias on the 11-element pool.
-  const cap = 256 - (256 % STRIKE_PCT_POOL.length)
+/** Fisher-Yates shuffle of `arr` using bytes from `stream`. Pure, returns new array. */
+function shuffle<T>(arr: readonly T[], stream: Generator<number, never>): T[] {
+  const out = arr.slice()
+  for (let i = out.length - 1; i > 0; i--) {
+    // Reject-sample to avoid modulo bias.
+    const cap = 256 - (256 % (i + 1))
+    let j: number
+    for (;;) {
+      const b = stream.next().value
+      if (b < cap) {
+        j = b % (i + 1)
+        break
+      }
+    }
+    ;[out[i], out[j]] = [out[j], out[i]]
+  }
+  return out
+}
+
+/** Pick one element from `pool` via PRG (reject-sample). */
+function pickFromPool<T>(pool: readonly T[], stream: Generator<number, never>): T {
+  const cap = 256 - (256 % pool.length)
   for (;;) {
     const b = stream.next().value
-    if (b < cap) return STRIKE_PCT_POOL[b % STRIKE_PCT_POOL.length]
+    if (b < cap) return pool[b % pool.length]
   }
 }
 
@@ -207,8 +253,12 @@ export function buildDeckFromOracles(
     )
   }
   const stream = prgStream(seed)
-  const cards: DeckCard[] = oracles.slice(0, 5).map((o) => {
-    const pct = pickStrikePct(stream)
+  // Step 1: shuffle the 2/2/1 difficulty allocation across the 5 oracles.
+  const difficulties = shuffle(DIFFICULTY_ALLOCATION, stream)
+  // Step 2: for each oracle, draw a pct from the chosen bucket.
+  const cards: DeckCard[] = oracles.slice(0, 5).map((o, i) => {
+    const bucket = STRIKE_BUCKETS[difficulties[i]]
+    const pct = pickFromPool(bucket, stream)
     return {
       oracle_id: normalizeSuiAddress(o.id),
       strike: (o.forward * pct) / 100n,
@@ -219,6 +269,22 @@ export function buildDeckFromOracles(
   ).toBytes()
   const hash = new Uint8Array(createHash("sha256").update(bytes).digest())
   return { cards, hash, hashHex: hashToHex(hash) }
+}
+
+/**
+ * Returns the strike pct (relative to forward) for `strike`. Useful for
+ * tests + debug ("which bucket did this strike come from").
+ */
+export function strikePctOf(forward: bigint, strike: bigint): bigint {
+  return (strike * 100n) / forward
+}
+
+/** Returns which difficulty bucket a pct falls into, or null if out-of-range. */
+export function difficultyOfPct(pct: bigint): Difficulty | null {
+  if ((STRIKE_BUCKETS.close as readonly bigint[]).includes(pct)) return "close"
+  if ((STRIKE_BUCKETS.mid as readonly bigint[]).includes(pct)) return "mid"
+  if ((STRIKE_BUCKETS.otm as readonly bigint[]).includes(pct)) return "otm"
+  return null
 }
 
 export function hashToHex(hash: Uint8Array): string {
@@ -343,10 +409,11 @@ export async function handleDeckmasterRequest(
       )
     }
     const body = (await req.json().catch(() => null)) as
-      | { asset?: string; sender?: string }
+      | { asset?: string; sender?: string; tier?: string }
       | null
     const asset = body?.asset ?? "BTC"
     const sender = body?.sender
+    const tier = body?.tier
     const client = getSuiClient()
     try {
       const oracles = await findDeckOracles(client, asset, 5)
@@ -367,6 +434,7 @@ export async function handleDeckmasterRequest(
       const seed = deriveSeed({
         sender,
         asset,
+        tier,
         timestampMs: Date.now(),
         nonceHex,
       })

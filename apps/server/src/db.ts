@@ -53,9 +53,19 @@ export function getDb(): Database {
         settled_count   INTEGER NOT NULL,
         p0_score        TEXT NOT NULL,           -- u64 as text
         p1_score        TEXT NOT NULL,
+        -- JSON array of per-card outcomes (one entry per settled card,
+        -- written incrementally by the indexer on CardSettled events).
+        -- See DuelRow.cardOutcomes for the shape.
+        card_outcomes   TEXT NOT NULL DEFAULT '[]',
         last_updated_ms INTEGER NOT NULL
       )
     `)
+    // Older deploys may have the table without card_outcomes — add it.
+    try {
+      _db.exec(`ALTER TABLE duel ADD COLUMN card_outcomes TEXT NOT NULL DEFAULT '[]'`)
+    } catch {
+      // ALTER fails if the column already exists (post-fresh-create) — that's the success case.
+    }
     _db.exec(`CREATE INDEX IF NOT EXISTS duel_status_updated
               ON duel (status, last_updated_ms DESC)`)
     _db.exec(`CREATE INDEX IF NOT EXISTS duel_creator
@@ -187,6 +197,13 @@ export function saveCursor(trackerId: string, cursor: EventCursor): void {
 
 // ─── Duel mirror ────────────────────────────────────────────────────────────
 
+export interface CardOutcome {
+  cardIdx: number
+  settlementPrice: string
+  p0CardScore: string
+  p1CardScore: string
+}
+
 export interface DuelRow {
   id: string
   status: "PENDING" | "ACTIVE" | "COMPLETE"
@@ -198,6 +215,7 @@ export interface DuelRow {
   settledCount: number
   p0Score: string
   p1Score: string
+  cardOutcomes: CardOutcome[]
   lastUpdatedMs: number
 }
 
@@ -207,8 +225,8 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
       .query(
         `INSERT INTO duel (id, status, stake_coin_type, creator, challenger,
                            cards_revealed, card_count, settled_count,
-                           p0_score, p1_score, last_updated_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           p0_score, p1_score, card_outcomes, last_updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status          = excluded.status,
            stake_coin_type = excluded.stake_coin_type,
@@ -219,6 +237,7 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
            settled_count   = excluded.settled_count,
            p0_score        = excluded.p0_score,
            p1_score        = excluded.p1_score,
+           card_outcomes   = excluded.card_outcomes,
            last_updated_ms = excluded.last_updated_ms`,
       )
       .run(
@@ -232,10 +251,51 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
         d.settledCount,
         d.p0Score,
         d.p1Score,
+        JSON.stringify(d.cardOutcomes),
         Date.now(),
       )
   } catch (e) {
     log.error(`upsertDuel(${d.id}): ${describeError(e)}`)
+    throw e
+  }
+}
+
+/**
+ * Merge a freshly-emitted CardSettled outcome into the duel's
+ * card_outcomes JSON array. Idempotent: if an outcome already exists
+ * for this card_idx it's overwritten (later event wins).
+ */
+export function mergeCardOutcome(duelId: string, outcome: CardOutcome): void {
+  try {
+    const row = getDb()
+      .query<{ card_outcomes: string }, [string]>(
+        "SELECT card_outcomes FROM duel WHERE id = ?",
+      )
+      .get(duelId)
+    let arr: CardOutcome[] = []
+    if (row) {
+      try {
+        arr = JSON.parse(row.card_outcomes) as CardOutcome[]
+      } catch {
+        arr = []
+      }
+    }
+    const i = arr.findIndex((o) => o.cardIdx === outcome.cardIdx)
+    if (i >= 0) arr[i] = outcome
+    else arr.push(outcome)
+    arr.sort((a, b) => a.cardIdx - b.cardIdx)
+    if (row) {
+      getDb()
+        .query<unknown, [string, number, string]>(
+          "UPDATE duel SET card_outcomes = ?, last_updated_ms = ? WHERE id = ?",
+        )
+        .run(JSON.stringify(arr), Date.now(), duelId)
+    }
+    // If `row` is null the duel hasn't been mirrored yet — the next
+    // `upsertDuel` from the indexer's refresh path will include this
+    // outcome via a re-read from chain, so we just no-op here.
+  } catch (e) {
+    log.error(`mergeCardOutcome(${duelId}): ${describeError(e)}`)
     throw e
   }
 }
@@ -251,10 +311,17 @@ interface DuelRowRaw {
   settled_count: number
   p0_score: string
   p1_score: string
+  card_outcomes: string
   last_updated_ms: number
 }
 
 function rowToDuel(r: DuelRowRaw): DuelRow {
+  let outcomes: CardOutcome[] = []
+  try {
+    outcomes = JSON.parse(r.card_outcomes ?? "[]") as CardOutcome[]
+  } catch {
+    outcomes = []
+  }
   return {
     id: r.id,
     status: r.status as DuelRow["status"],
@@ -266,6 +333,7 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
     settledCount: r.settled_count,
     p0Score: r.p0_score,
     p1Score: r.p1_score,
+    cardOutcomes: outcomes,
     lastUpdatedMs: r.last_updated_ms,
   }
 }

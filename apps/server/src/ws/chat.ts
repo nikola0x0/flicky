@@ -15,10 +15,16 @@
  * global. They're not persisted — reactions are ephemeral.
  */
 import type { ServerWebSocket } from "bun"
-import { insertChatMessage, recentChatMessages, pruneChatMessages } from "../db"
+import { getDuel, insertChatMessage, recentChatMessages, pruneChatMessages } from "../db"
 import { env } from "../env"
 import { makeLogger, shortId } from "../log"
-import { broadcastAll, broadcastRoom, _sendInternal, type SocketState } from "./matchmaking"
+import {
+  broadcastAll,
+  broadcastRoom,
+  _sendInternal,
+  sendToAddresses,
+  type SocketState,
+} from "./matchmaking"
 
 const log = makeLogger("chat")
 
@@ -122,11 +128,23 @@ export function handleChatReact(ws: AnyWs, duelId: unknown, emoji: unknown): voi
     })
     return
   }
-  broadcastRoom(duelId, {
-    type: "chat_reaction",
+  const msg = {
+    type: "chat_reaction" as const,
     duelId,
     from: ws.data.address,
     emoji,
     timestampMs: Date.now(),
-  })
+  }
+  // PRD §Social: emoji reactions broadcast to "the other player only".
+  // Look up the duel mirror for creator + challenger. Fall back to
+  // room-broadcast if the duel hasn't been indexed yet (very early
+  // PENDING state before the indexer's first sweep) so the reaction
+  // still lands somewhere visible.
+  const duel = getDuel(duelId)
+  if (duel && duel.creator && duel.challenger) {
+    const audience = [duel.creator, duel.challenger]
+    sendToAddresses(audience, msg)
+    return
+  }
+  broadcastRoom(duelId, msg)
 }

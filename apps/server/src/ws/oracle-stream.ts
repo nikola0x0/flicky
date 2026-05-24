@@ -85,6 +85,37 @@ export function stopOracleStream(): void {
   }
 }
 
+interface SviParams {
+  a: string
+  b: string
+  rho: string
+  m: string
+  sigma: string
+}
+
+/**
+ * Best-effort SVI extraction. DeepBook's `OracleSVI` exposes the
+ * 5-tuple `(a, b, rho, m, sigma)` in 1e9 fixed point under one of two
+ * shapes depending on Move struct layout: either flat fields on the
+ * oracle, or nested under `svi` / `block_scholes_svi`. We try both.
+ * Returns null when the layout doesn't carry SVI.
+ */
+function parseSvi(fields: Record<string, unknown>): SviParams | null {
+  const candidates = [fields.svi, fields.block_scholes_svi, fields]
+  for (const c of candidates) {
+    if (!c || typeof c !== "object") continue
+    const f = (c as { fields?: Record<string, unknown> }).fields ?? (c as Record<string, unknown>)
+    const { a, b, rho, m, sigma } = f as Record<string, unknown>
+    if (
+      typeof a === "string" && typeof b === "string" && typeof rho === "string" &&
+      typeof m === "string" && typeof sigma === "string"
+    ) {
+      return { a, b, rho, m, sigma }
+    }
+  }
+  return null
+}
+
 async function tick(): Promise<void> {
   const ids = Array.from(oracleSubscribers.keys())
   if (ids.length === 0) return
@@ -108,9 +139,10 @@ async function tick(): Promise<void> {
         (typeof f.settlement_price === "object" &&
           ((f.settlement_price as { fields?: { vec?: unknown[] } }).fields?.vec ?? [])
             .length > 0))
+    const svi = parseSvi(obj.data.content.fields as Record<string, unknown>)
     const bucket = oracleSubscribers.get(id)
     if (!bucket || bucket.size === 0) continue
-    const msg = JSON.stringify({
+    const tickMsg: Record<string, unknown> = {
       type: "oracle_tick",
       oracleId: id,
       spot: f.prices.fields.spot,
@@ -118,10 +150,12 @@ async function tick(): Promise<void> {
       expiry: f.expiry,
       settled,
       timestampMs: now,
-    })
+    }
+    if (svi) tickMsg.svi = svi
+    const wire = JSON.stringify(tickMsg)
     for (const ws of bucket) {
       try {
-        ws.send(msg)
+        ws.send(wire)
       } catch {
         // close handler will clean up
       }

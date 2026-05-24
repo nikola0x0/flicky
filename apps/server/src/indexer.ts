@@ -24,7 +24,14 @@
 import type { SuiClient } from "@mysten/sui/client"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
-import { loadCursor, saveCursor, upsertDuel, type EventCursor } from "./db"
+import {
+  loadCursor,
+  mergeCardOutcome,
+  saveCursor,
+  upsertDuel,
+  type CardOutcome,
+  type EventCursor,
+} from "./db"
 import { makeLogger, shortId } from "./log"
 import { applyDuelOutcome } from "./mmr"
 import { broadcastRoom } from "./ws/matchmaking"
@@ -60,6 +67,7 @@ interface DuelLite {
   settledCount: number
   p0Score: bigint
   p1Score: bigint
+  cardOutcomes: CardOutcome[]
 }
 
 async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null> {
@@ -76,9 +84,28 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
     card_settlements: Array<string | null>
     p0_score: string
     p1_score: string
+    // Per-card scoring fields emitted by the contract on settle_card.
+    // The shape varies between contract revisions; older versions may
+    // omit per-card score vectors and only emit them via events.
+    p0_card_scores?: string[]
+    p1_card_scores?: string[]
   }
   const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
   const cards = Array.isArray(f.cards) ? f.cards : []
+  // Reconstruct per-card outcomes from the on-chain object. Each entry
+  // exists only for settled cards (card_settlements[i] != null).
+  const cardOutcomes: CardOutcome[] = []
+  const settlements = f.card_settlements ?? []
+  for (let i = 0; i < settlements.length; i++) {
+    const s = settlements[i]
+    if (s === null || s === undefined) continue
+    cardOutcomes.push({
+      cardIdx: i,
+      settlementPrice: String(s),
+      p0CardScore: String(f.p0_card_scores?.[i] ?? "0"),
+      p1CardScore: String(f.p1_card_scores?.[i] ?? "0"),
+    })
+  }
   return {
     id: normalizeSuiObjectId(id),
     status: STATUS_MAP[String(f.status)] ?? "PENDING",
@@ -87,9 +114,10 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
     challenger: f.challenger,
     cardsRevealed: cards.length > 0,
     cardCount: cards.length,
-    settledCount: (f.card_settlements ?? []).filter((s) => s !== null).length,
+    settledCount: settlements.filter((s) => s !== null).length,
     p0Score: BigInt(f.p0_score ?? "0"),
     p1Score: BigInt(f.p1_score ?? "0"),
+    cardOutcomes,
   }
 }
 
@@ -160,6 +188,35 @@ export class DuelIndexer {
         const p = e.parsedJson as Record<string, unknown> | undefined
         const id = p?.duel_id as string | undefined
         if (id) touched.add(normalizeSuiObjectId(id))
+        // CardSettled carries per-card outcome data — write it to the
+        // mirror immediately so /duels/{id} reflects it without waiting
+        // for the next refresh. The subsequent refreshDuel still runs
+        // and re-reads from chain, overwriting these with authoritative
+        // values (which should match).
+        if (eventType.endsWith("::CardSettled") && p && id) {
+          const duelId = normalizeSuiObjectId(id)
+          const cardIdxRaw = p.card_idx as string | number | undefined
+          const settlementPrice = p.settlement_price as string | undefined
+          const p0CardScore = p.p0_card_score as string | undefined
+          const p1CardScore = p.p1_card_score as string | undefined
+          if (
+            cardIdxRaw !== undefined &&
+            settlementPrice !== undefined &&
+            p0CardScore !== undefined &&
+            p1CardScore !== undefined
+          ) {
+            try {
+              mergeCardOutcome(duelId, {
+                cardIdx: Number(cardIdxRaw),
+                settlementPrice,
+                p0CardScore,
+                p1CardScore,
+              })
+            } catch {
+              // db error logged inside db.ts
+            }
+          }
+        }
         // DuelFinalized carries the scores + (creator, challenger) we
         // need for MMR. Surface it to the caller.
         if (eventType.endsWith("::DuelFinalized") && p) {
@@ -241,6 +298,7 @@ export class DuelIndexer {
         settledCount: d.settledCount,
         p0Score: d.p0Score.toString(),
         p1Score: d.p1Score.toString(),
+        cardOutcomes: d.cardOutcomes,
       })
     } catch {
       // db.ts already logged the error with context.
@@ -257,6 +315,7 @@ export class DuelIndexer {
       creator: d.creator,
       challenger: d.challenger,
       stakeCoinType: d.stakeCoinType,
+      cardOutcomes: d.cardOutcomes,
     })
   }
 

@@ -24,6 +24,7 @@ function toWire(d: DuelRow) {
     settledCount: d.settledCount,
     p0Score: d.p0Score,
     p1Score: d.p1Score,
+    cardOutcomes: d.cardOutcomes,
     lastUpdatedMs: d.lastUpdatedMs,
   }
 }

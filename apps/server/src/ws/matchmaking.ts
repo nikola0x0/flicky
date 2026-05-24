@@ -347,3 +347,30 @@ export function broadcastAll(msg: ServerMsg): void {
 export function subscribedRoomIds(): string[] {
   return Array.from(roomSubscribers.keys())
 }
+
+/** Live sockets bound to `address` (empty set if the user isn't connected). */
+export function socketsForAddress(address: string): Set<AnyWs> {
+  return socketsByAddress.get(address) ?? new Set()
+}
+
+/**
+ * Send a message to every live socket of `addresses`. Used by per-duel
+ * emoji reactions (filter to creator + challenger only per PRD §Social).
+ */
+export function sendToAddresses(addresses: string[], msg: ServerMsg): number {
+  const wire = JSON.stringify(msg)
+  let n = 0
+  for (const addr of addresses) {
+    const bucket = socketsByAddress.get(addr)
+    if (!bucket) continue
+    for (const ws of bucket) {
+      try {
+        ws.send(wire)
+        n++
+      } catch {
+        // close handler reaps dead sockets
+      }
+    }
+  }
+  return n
+}

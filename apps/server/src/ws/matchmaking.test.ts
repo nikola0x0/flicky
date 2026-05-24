@@ -220,7 +220,7 @@ describe("sync-only queue (no bot-fill — Practice Mode is the only bot path)",
     expect(ack.type).toBe("match_found")
     expect(ack.opponent).not.toBe("bot")
     expect("botFillInMs" in ack).toBe(false)
-    expect(["creator", "challenger"]).toContain(ack.role) // not "bot_target"
+    expect(["creator", "challenger"]).toContain(ack.role as string) // not "bot_target"
   })
 
   test("practice tier never enters the queue — directs to practice_start instead", () => {

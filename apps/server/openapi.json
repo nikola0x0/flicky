@@ -403,6 +403,19 @@
           "settledCount": { "type": "integer" },
           "p0Score": { "type": "string" },
           "p1Score": { "type": "string" },
+          "cardOutcomes": {
+            "type": "array",
+            "description": "Per-card outcomes for settled cards (length == settledCount)",
+            "items": {
+              "type": "object",
+              "properties": {
+                "cardIdx": { "type": "integer" },
+                "settlementPrice": { "type": "string" },
+                "p0CardScore": { "type": "string" },
+                "p1CardScore": { "type": "string" }
+              }
+            }
+          },
           "lastUpdatedMs": { "type": "integer" }
         }
       },

@@ -3,10 +3,12 @@ import { createHash } from "node:crypto"
 import { bcs } from "@mysten/sui/bcs"
 import {
   buildDeckFromOracles,
+  difficultyOfPct,
   fetchDeck,
   hashToHex,
   knownHashCount,
   rememberDeck,
+  strikePctOf,
   type OracleSnapshot,
 } from "./deckmaster"
 
@@ -40,13 +42,34 @@ describe("buildDeckFromOracles", () => {
     }
   })
 
-  test("strikes are drawn from STRIKE_PCT_POOL × forward / 100", () => {
-    const deck = buildDeckFromOracles(FIVE_ORACLES, SEED_A)
-    const POOL = [98n, 102n, 95n, 105n, 100n, 99n, 101n, 97n, 103n, 90n, 110n]
+  test("strikes follow a 2/2/1 difficulty mix (2 close + 2 mid + 1 otm)", () => {
+const deck = buildDeckFromOracles(FIVE_ORACLES, SEED_A)
+    const tally = { close: 0, mid: 0, otm: 0, null: 0 }
     for (let i = 0; i < 5; i++) {
-      const pct = (deck.cards[i].strike * 100n) / FIVE_ORACLES[i].forward
-      expect(POOL).toContain(pct)
+      const pct = strikePctOf(FIVE_ORACLES[i].forward, deck.cards[i].strike)
+      const d = difficultyOfPct(pct)
+      if (d === null) tally.null++
+      else tally[d]++
     }
+    expect(tally.close).toBe(2)
+    expect(tally.mid).toBe(2)
+    expect(tally.otm).toBe(1)
+    expect(tally.null).toBe(0)
+  })
+
+  test("difficulty allocation is shuffled per seed (not always same order)", () => {
+    // Build many decks with different seeds, collect the difficulty sequence.
+    // Expect to see at least 2 distinct orderings of the 5-card difficulty array.
+const seen = new Set<string>()
+    for (let s = 0; s < 20; s++) {
+      const seed = new Uint8Array(32).fill(s)
+      const deck = buildDeckFromOracles(FIVE_ORACLES, seed)
+      const seq = deck.cards
+        .map((c, i) => difficultyOfPct(strikePctOf(FIVE_ORACLES[i].forward, c.strike)))
+        .join(",")
+      seen.add(seq)
+    }
+    expect(seen.size).toBeGreaterThan(1)
   })
 
   test("different seed produces different cards (same oracles)", () => {

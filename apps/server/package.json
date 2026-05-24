@@ -7,7 +7,7 @@
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
-    "test": "bun test src/lib src/ws src/db.test.ts src/deckmaster.test.ts src/mmr.test.ts --timeout 5000",
+    "test": "bun test src/lib src/ws src/db.test.ts src/deckmaster.test.ts src/mmr.test.ts src/e2e-ws.test.ts --timeout 10000",
     "test:e2e": "bun test src/scripts/e2e.test.ts",
     "lint": "eslint",
     "format": "prettier --write \"**/*.ts\"",
