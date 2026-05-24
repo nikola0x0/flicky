@@ -78,6 +78,39 @@ interface CardRaw {
   fields?: { oracle_id?: string; strike?: string }
 }
 
+interface SwipeRaw {
+  fields?: { is_up?: boolean; quantity?: string; premium?: string }
+}
+
+function parseSwipeRaw(raw: unknown): { isUp: boolean; quantity: string; premium: string } | null {
+  if (raw === null || raw === undefined) return null
+  const s = raw as SwipeRaw
+  if (!s.fields || s.fields.is_up === undefined) return null
+  return {
+    isUp: !!s.fields.is_up,
+    quantity: String(s.fields.quantity ?? "0"),
+    premium: String(s.fields.premium ?? "0"),
+  }
+}
+
+/**
+ * Compute per-card real PnL for a player. Mirrors the contract's
+ * settle_card math: `payout = (correct ? quantity : 0); pnl = payout - premium`.
+ * Signed decimal string. Returns null if the player didn't swipe.
+ */
+function computePnl(
+  swipe: { isUp: boolean; quantity: string; premium: string } | null,
+  upWon: boolean,
+): string | null {
+  if (!swipe) return null
+  const q = BigInt(swipe.quantity)
+  const p = BigInt(swipe.premium)
+  const correct = swipe.isUp === upWon
+  const payout = correct ? q : 0n
+  const pnl = payout - p
+  return pnl.toString()
+}
+
 /**
  * Card settlements come back as either `string` (Some price), `null`
  * (None), or `{ fields: { vec: [price] } }` depending on how the Sui
@@ -114,24 +147,36 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
     p1_premium?: string
     started_at_ms?: string
     settled_count?: string
+    p0_swipes?: unknown[]
+    p1_swipes?: unknown[]
   }
   const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
   const cards = Array.isArray(f.cards) ? f.cards : []
   // Reconstruct per-card outcomes from the on-chain object. Cards in
   // the new contract carry `{oracle_id, strike}`; combined with the
-  // settlement_price we can compute `upWon` server-side so the UI
+  // settlement_price and each player's swipe (quantity + premium) we
+  // can compute UP-won + real per-card PnL server-side so the UI
   // doesn't have to.
   const cardOutcomes: CardOutcome[] = []
   const settlements = f.card_settlements ?? []
+  const p0SwipesRaw = f.p0_swipes ?? []
+  const p1SwipesRaw = f.p1_swipes ?? []
   for (let i = 0; i < settlements.length; i++) {
     const price = parseSettlement(settlements[i])
     if (price === null) continue
     const strike = cards[i]?.fields?.strike ?? "0"
+    const upWon = BigInt(price) > BigInt(strike)
+    const p0Swipe = parseSwipeRaw(p0SwipesRaw[i])
+    const p1Swipe = parseSwipeRaw(p1SwipesRaw[i])
     cardOutcomes.push({
       cardIdx: i,
       settlementPrice: price,
       strike,
-      upWon: BigInt(price) > BigInt(strike),
+      upWon,
+      p0Swipe,
+      p1Swipe,
+      p0Pnl: computePnl(p0Swipe, upWon),
+      p1Pnl: computePnl(p1Swipe, upWon),
     })
   }
   const settledCount =
@@ -243,6 +288,10 @@ export class DuelIndexer {
                 settlementPrice,
                 strike: "0",
                 upWon: false,
+                p0Pnl: null,
+                p1Pnl: null,
+                p0Swipe: null,
+                p1Swipe: null,
               })
             } catch {
               // db error logged inside db.ts

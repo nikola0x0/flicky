@@ -27,6 +27,12 @@ import { findManagerFor } from "./predict"
 
 const log = makeLogger("keeper")
 
+interface SwipeLite {
+  isUp: boolean
+  quantity: bigint
+  premium: bigint
+}
+
 interface DuelLite {
   id: string
   status: "PENDING" | "ACTIVE" | "COMPLETE"
@@ -38,8 +44,8 @@ interface DuelLite {
   p1Stake: bigint
   cards: Array<{ oracleId: string; strike: bigint }>
   cardSettlements: (bigint | null)[]
-  p0Swipes: (boolean | null)[]
-  p1Swipes: (boolean | null)[]
+  p0Swipes: (SwipeLite | null)[]
+  p1Swipes: (SwipeLite | null)[]
 }
 
 const STATUS_MAP: Record<string, "PENDING" | "ACTIVE" | "COMPLETE"> = {
@@ -48,23 +54,38 @@ const STATUS_MAP: Record<string, "PENDING" | "ACTIVE" | "COMPLETE"> = {
   "3": "COMPLETE",
 }
 
-function hexFromBytes(bytes: number[] | string): string {
+export function hexFromBytes(bytes: number[] | string): string {
   if (typeof bytes === "string")
     return bytes.startsWith("0x") ? bytes.toLowerCase() : "0x" + bytes
   return "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
 interface RawSwipe {
-  fields: { is_up: boolean; p_swiped: string; decide_time_ms: string }
+  fields: { is_up: boolean; quantity: string; premium: string }
 }
 
-async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null> {
-  const obj = await client.getObject({
-    id,
-    options: { showContent: true, showType: true },
-  })
-  if (obj.data?.content?.dataType !== "moveObject") return null
-  const f = obj.data.content.fields as {
+export function parseSwipe(raw: RawSwipe | null): SwipeLite | null {
+  if (raw === null) return null
+  return {
+    isUp: raw.fields.is_up,
+    quantity: BigInt(raw.fields.quantity),
+    premium: BigInt(raw.fields.premium),
+  }
+}
+
+/**
+ * Pure parser — extract a DuelLite from `obj.data.type` + `obj.data.content.fields`
+ * as returned by `SuiClient.getObject({ showContent: true, showType: true })`.
+ * Returns null if the input isn't a moveObject of the expected shape.
+ * Exposed so the keeper tests can exercise it without mocking the
+ * full client.
+ */
+export function parseDuelFromObject(
+  type: string | undefined,
+  fields: unknown,
+): DuelLite | null {
+  if (!fields || typeof fields !== "object") return null
+  const f = fields as {
     id: { id: string }
     status: string
     deck_hash: number[] | string
@@ -77,7 +98,8 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
     p0_swipes: Array<RawSwipe | null>
     p1_swipes: Array<RawSwipe | null>
   }
-  const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
+  if (!f.id?.id || f.status === undefined) return null
+  const typeMatch = type?.match(/Duel<(.+)>$/)
   const stakeCoinType = typeMatch?.[1] ?? "0x2::sui::SUI"
   const stakeValue = (b: { fields: { value: string } } | string): bigint =>
     typeof b === "string" ? BigInt(b) : BigInt(b.fields.value)
@@ -97,10 +119,21 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
     cardSettlements: f.card_settlements.map((s) =>
       s === null ? null : BigInt(s),
     ),
-    p0Swipes: f.p0_swipes.map((s) => (s === null ? null : s.fields.is_up)),
-    p1Swipes: f.p1_swipes.map((s) => (s === null ? null : s.fields.is_up)),
+    p0Swipes: f.p0_swipes.map(parseSwipe),
+    p1Swipes: f.p1_swipes.map(parseSwipe),
   }
 }
+
+async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null> {
+  const obj = await client.getObject({
+    id,
+    options: { showContent: true, showType: true },
+  })
+  if (obj.data?.content?.dataType !== "moveObject") return null
+  return parseDuelFromObject(obj.data.type ?? undefined, obj.data.content.fields)
+}
+
+export { type DuelLite, type SwipeLite }
 
 async function readOracleExpiry(
   client: SuiClient,
@@ -119,6 +152,14 @@ async function readOracleExpiry(
   }
 }
 
+/**
+ * PRD §Backend §PnL tracker says "Subscribes to Predict's settle events"
+ * but the on-chain `OracleSVI` doesn't emit one — settlement is a silent
+ * `settlement_price = Option::some(price)` field flip. We poll the field
+ * directly via getObject; the indexer's `KEEPER_POLL_INTERVAL_MS` bounds
+ * end-to-end latency. If DeepBook later adds a `Settled` event, hoist
+ * this into an event tracker in `indexer.ts` instead.
+ */
 async function readOracleSettled(
   client: SuiClient,
   oracleId: string,
@@ -247,34 +288,37 @@ export class Keeper {
           const e = await readOracleExpiry(this.client, oid)
           if (e !== null) expiryByOracle.set(oid, e)
         }
-        const p0Quantity = (duel.p0Stake * 2n) / 100n
-        const p1Quantity = (duel.p1Stake * 2n) / 100n
         const p0Manager = await findManagerFor(this.client, duel.creator)
         const p1Manager = await findManagerFor(this.client, duel.challenger)
+        // PER-SWIPE quantity from the new contract's `Swipe.quantity`
+        // field — replaces the legacy `(stake × 2) / 100` heuristic.
+        // Each swipe was authored by the player choosing how much to
+        // mint via `predict::mint`, so the keeper must redeem exactly
+        // that amount or DeepBook rejects.
         for (let i = 0; i < duel.cards.length; i++) {
           const card = duel.cards[i]
           const expiry = expiryByOracle.get(card.oracleId)
           if (expiry === undefined) continue
           const p0 = duel.p0Swipes[i]
-          if (p0 !== null && p0Manager && p0Quantity > 0n) {
+          if (p0 && p0Manager && p0.quantity > 0n) {
             redeems.push({
               managerId: p0Manager,
               oracleId: card.oracleId,
               oracleExpiry: expiry,
               strike: card.strike,
-              isUp: p0,
-              quantity: p0Quantity,
+              isUp: p0.isUp,
+              quantity: p0.quantity,
             })
           }
           const p1 = duel.p1Swipes[i]
-          if (p1 !== null && p1Manager && p1Quantity > 0n) {
+          if (p1 && p1Manager && p1.quantity > 0n) {
             redeems.push({
               managerId: p1Manager,
               oracleId: card.oracleId,
               oracleExpiry: expiry,
               strike: card.strike,
-              isUp: p1,
-              quantity: p1Quantity,
+              isUp: p1.isUp,
+              quantity: p1.quantity,
             })
           }
         }

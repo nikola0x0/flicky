@@ -415,7 +415,18 @@
                 "cardIdx": { "type": "integer" },
                 "settlementPrice": { "type": "string" },
                 "strike": { "type": "string" },
-                "upWon": { "type": "boolean", "description": "settlementPrice > strike" }
+                "upWon": { "type": "boolean", "description": "settlementPrice > strike" },
+                "p0Pnl": { "type": ["string", "null"], "description": "Signed real PnL: (won ? quantity : 0) - premium. Null if no swipe." },
+                "p1Pnl": { "type": ["string", "null"] },
+                "p0Swipe": {
+                  "type": ["object", "null"],
+                  "properties": {
+                    "isUp": { "type": "boolean" },
+                    "quantity": { "type": "string" },
+                    "premium": { "type": "string" }
+                  }
+                },
+                "p1Swipe": { "type": ["object", "null"] }
               }
             }
           },

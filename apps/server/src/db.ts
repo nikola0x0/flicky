@@ -218,6 +218,16 @@ export interface CardOutcome {
   strike: string
   /** `settlementPrice > strike` — UP side won this card. */
   upWon: boolean
+  /**
+   * Per-player real PnL for this card: `pnl = (won ? quantity : 0) - premium`.
+   * Signed decimal string (may start with '-'). null when the player
+   * didn't swipe this card.
+   */
+  p0Pnl: string | null
+  p1Pnl: string | null
+  /** Snapshot of each player's swipe (or null if they didn't swipe). */
+  p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
+  p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
 }
 
 export interface DuelRow {

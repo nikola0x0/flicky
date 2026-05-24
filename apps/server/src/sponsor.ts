@@ -56,21 +56,39 @@ const DEEPBOOK_PREDICT_FNS = [
 
 export type EnokiNetwork = "testnet" | "mainnet"
 
-const DEEPBOOK_PREDICT_PACKAGES: Record<EnokiNetwork, string> = {
-  testnet: env.deepbookPredictPackageId,
-  mainnet: "0x0",
+/**
+ * DeepBook Predict package ids per network. Testnet defaults to what
+ * `env.ts` exposes; mainnet is intentionally not baked in — set
+ * `DEEPBOOK_PREDICT_PACKAGE_MAINNET` (or the legacy single-name
+ * `DEEPBOOK_PREDICT_PACKAGE_ID` if you only target one network) at
+ * deploy time so a typo can't silently approve an attacker's package.
+ */
+function resolveDeepbookPackage(network: EnokiNetwork): string {
+  if (network === "testnet") return env.deepbookPredictPackageId
+  // network === "mainnet"
+  const mainnet =
+    process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET ??
+    (network === ("mainnet" as EnokiNetwork) ? null : null)
+  if (mainnet) return mainnet
+  throw new Error(
+    "DeepBook Predict mainnet package not configured. Set DEEPBOOK_PREDICT_PACKAGE_MAINNET " +
+      "in apps/server/.env before serving sponsored mainnet transactions.",
+  )
 }
 
 function resolveFlickyPackage(network: EnokiNetwork): string {
   const override = process.env[`FLICKY_PACKAGE_${network.toUpperCase()}`]
   if (override) return override
-  if (env.flickyPackageId) return env.flickyPackageId
-  throw new Error(`Cannot resolve flicky package for ${network}`)
+  if (network === "testnet" && env.flickyPackageId) return env.flickyPackageId
+  throw new Error(
+    `Cannot resolve flicky package for ${network} — set FLICKY_PACKAGE_${network.toUpperCase()} ` +
+      `(or publish via apps/contracts on testnet to populate deployed.json).`,
+  )
 }
 
 export function buildAllowedTargets(network: EnokiNetwork): string[] {
   const flicky = resolveFlickyPackage(network)
-  const deepbook = DEEPBOOK_PREDICT_PACKAGES[network]
+  const deepbook = resolveDeepbookPackage(network)
   return [
     ...FLICKY_FNS.map((fn) => `${flicky}::${fn}`),
     ...DEEPBOOK_PREDICT_FNS.map((fn) => `${deepbook}::${fn}`),
@@ -79,7 +97,7 @@ export function buildAllowedTargets(network: EnokiNetwork): string[] {
 
 // ─── CORS ───────────────────────────────────────────────────────────────────
 
-function sponsorCorsHeaders(reqOrigin: string | null): Record<string, string> {
+export function sponsorCorsHeaders(reqOrigin: string | null): Record<string, string> {
   const raw = env.allowedOrigin?.trim()
   if (!raw || raw === "*") {
     return {
@@ -104,7 +122,7 @@ function sponsorCorsHeaders(reqOrigin: string | null): Record<string, string> {
   }
 }
 
-function isSponsorOriginAllowed(reqOrigin: string | null): boolean {
+export function isSponsorOriginAllowed(reqOrigin: string | null): boolean {
   const raw = env.allowedOrigin?.trim()
   if (!raw || raw === "*") return true
   if (!reqOrigin) return false

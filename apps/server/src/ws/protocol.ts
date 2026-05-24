@@ -79,6 +79,11 @@ export type ServerMsg =
         settlementPrice: string
         strike: string
         upWon: boolean
+        /** Signed decimal real PnL = (won ? quantity : 0) - premium. Null if no swipe. */
+        p0Pnl: string | null
+        p1Pnl: string | null
+        p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
+        p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
       }>
     }
   | { type: "room_settled"; duelId: string; winner: string; payoutTo: string }

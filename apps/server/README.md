@@ -92,17 +92,19 @@ Single JSON channel. Server is authoritative for matchmaking, rooms, chat histor
 | `queue_status` | `tier, size, waitMs` |
 | `queue_left` | — |
 | `match_found` | `tier, role: creator\|challenger, opponent` (MMR-paired) |
-| `room_state` | indexer-fed: `status, cardsRevealed, cardCount, settledCount, p0Score, p1Score, creator, challenger, stakeCoinType` |
+| `room_state` | indexer-fed: `status, cardsRevealed, cardCount, settledCount, p0Payout, p0Premium, p1Payout, p1Premium, startedAtMs, creator, challenger, stakeCoinType, cardOutcomes[]` |
 | `room_settled` | `winner, payoutTo` |
 | `peer_left` / `peer_rejoined` / `peer_forfeit` | `duelId, address, gracePeriodMs?` |
 | `practice_session` | `cards[], botSwipes[]` |
 | `chat_history` | last `CHAT_HISTORY_LIMIT` messages |
 | `chat_message` | `id, from, text, timestampMs` (global broadcast) |
-| `chat_reaction` | `duelId, from, emoji, timestampMs` (room broadcast) |
-| `oracle_tick` | `oracleId, spot, forward, expiry, settled, timestampMs` |
+| `chat_reaction` | `duelId, from, emoji, timestampMs` (sent only to creator + challenger sockets) |
+| `oracle_tick` | `oracleId, spot, forward, expiry, settled, svi?, timestampMs` |
 | `match_tick` | `duelId, serverNowMs, status` (every 1 s for active rooms) |
 | `pong` | — |
 | `error` | `code, message, detail?` |
+
+`cardOutcomes[]` entries (per settled card) carry: `{cardIdx, settlementPrice, strike, upWon, p0Pnl, p1Pnl, p0Swipe, p1Swipe}` — server pre-computes `upWon = settlementPrice > strike` and signed per-card real PnL `(won ? quantity : 0) - premium` so the UI doesn't have to.
 
 See `src/ws/protocol.ts` for exact TypeScript types.
 
@@ -143,4 +145,18 @@ bun --filter server demo:duel          # end-to-end DeepBook-backed duel demo
 
 ## Env
 
-Copy `.env.example` → `.env` and fill what your local run needs. Minimum to boot the HTTP+WS layer: nothing required (sponsor returns 503, keeper logs a warning and stays disabled). For the keeper to settle: `KEEPER_SECRET_KEY` (falls back to `BOT_SECRET_KEY`). For sponsored gas: `ENOKI_PRIVATE_KEY`. Default network is `testnet`; DeepBook + dUSDC ids are baked into `env.ts` defaults so `.env` only carries overrides.
+Copy `.env.example` → `.env` and fill what your local run needs. Minimum to boot the HTTP+WS layer: nothing required (sponsor returns 503, keeper logs a warning and stays disabled). For the keeper to settle: `KEEPER_SECRET_KEY` (falls back to `BOT_SECRET_KEY`). For sponsored gas: `ENOKI_PRIVATE_KEY`. Default network is `testnet`; DeepBook + dUSDC ids are baked into `env.ts` defaults so `.env` only carries overrides. To serve mainnet sponsored gas you must also set `FLICKY_PACKAGE_MAINNET` + `DEEPBOOK_PREDICT_PACKAGE_MAINNET` — sponsor throws a clear error rather than approve `0x0` placeholders.
+
+## Deploy
+
+`apps/server/Dockerfile` builds a Bun runtime image. Build from the monorepo root:
+
+```bash
+docker build -f apps/server/Dockerfile -t flicky-server .
+docker run -d --name flicky-server -p 3001:3001 \
+  --env-file apps/server/.env \
+  -v flicky-data:/app/apps/server/.data \
+  flicky-server
+```
+
+`HEALTHCHECK` polls `/health`. Mount the volume on `.data` so SQLite + the deckmaster plaintext store persist across container restarts.
