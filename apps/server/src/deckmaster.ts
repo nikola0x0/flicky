@@ -19,6 +19,7 @@
  *     plaintext on demand.
  */
 import { bcs } from "@mysten/sui/bcs"
+import { Transaction } from "@mysten/sui/transactions"
 import { normalizeSuiAddress, normalizeSuiObjectId } from "@mysten/sui/utils"
 import type { SuiClient } from "@mysten/sui/client"
 import { createHash } from "node:crypto"
@@ -47,6 +48,28 @@ export interface OracleSnapshot {
   expiry: bigint
   spot: bigint
   forward: bigint
+  /**
+   * Strike grid parameters from `OracleCreated`. The chain validates
+   * `strike % tick_size == 0 && strike >= min_strike` inside
+   * `oracle_config::assert_valid_strike` (abort code 2) — we must snap
+   * raw price-derived strikes to this grid before committing them.
+   */
+  minStrike: bigint
+  tickSize: bigint
+}
+
+/**
+ * Snap a raw strike to the oracle's grid: `min_strike + n × tick_size`,
+ * clamped at `min_strike`. Matches `oracle_config::assert_valid_strike`.
+ */
+export function snapToTick(
+  strike: bigint,
+  minStrike: bigint,
+  tickSize: bigint,
+): bigint {
+  if (tickSize <= 0n) return strike
+  if (strike < minStrike) return minStrike
+  return minStrike + ((strike - minStrike) / tickSize) * tickSize
 }
 
 // ─── BCS shape that matches flicky::duel::Card on chain ─────────────────────
@@ -87,11 +110,28 @@ export async function findDeckOracles(
     order: "descending",
   })
 
+  // `min_strike` + `tick_size` aren't stored on the OracleSVI object —
+  // they live in the `OracleCreated` event payload. Capture them here
+  // so we can snap strikes to the grid the on-chain validator enforces.
   const candidates: string[] = []
+  const gridById = new Map<string, { minStrike: bigint; tickSize: bigint }>()
   for (const e of evts.data) {
-    const p = e.parsedJson as { oracle_id: string; underlying_asset: string }
+    const p = e.parsedJson as {
+      oracle_id: string
+      underlying_asset: string
+      min_strike?: string
+      tick_size?: string
+    }
     if (p.underlying_asset !== asset) continue
-    candidates.push(normalizeSuiObjectId(p.oracle_id))
+    const id = normalizeSuiObjectId(p.oracle_id)
+    candidates.push(id)
+    gridById.set(id, {
+      minStrike: BigInt(p.min_strike ?? "0"),
+      // Defensive default — if the event ever lacks tick_size, treat
+      // each unit as a tick (no snapping). On real testnet oracles
+      // tick_size is always present.
+      tickSize: BigInt(p.tick_size ?? "1"),
+    })
     if (candidates.length >= 20) break
   }
   if (candidates.length === 0) return []
@@ -117,11 +157,15 @@ export async function findDeckOracles(
     const spot = BigInt(f.prices.fields.spot)
     const forward = BigInt(f.prices.fields.forward)
     if (spot === 0n || forward === 0n) continue
+    const id = normalizeSuiObjectId(obj.data.objectId)
+    const grid = gridById.get(id) ?? { minStrike: 0n, tickSize: 1n }
     eligible.push({
-      id: normalizeSuiObjectId(obj.data.objectId),
+      id,
       expiry,
       spot,
       forward,
+      minStrike: grid.minStrike,
+      tickSize: grid.tickSize,
     })
   }
 
@@ -152,14 +196,25 @@ function isSettlementSet(v: unknown): boolean {
 // which pct inside each bucket. The seed is deterministic — anyone
 // with `seed` can recompute the exact deck.
 
-/** Difficulty buckets — strike pct of forward. */
+/**
+ * Difficulty buckets — strike pct of forward.
+ *
+ * These are *target* offsets only. The on-chain pricing engine
+ * (`pricing_config::quote_spread_from_fair_price`) requires the binary
+ * fair-price to satisfy `0 < p < 1.0` in 1e9 fixed point; for low-vol
+ * short-dated oracles even a 3% offset can round p to a bound and
+ * abort the mint. Each generated card is dev_inspect-probed (see
+ * `probeCard`) and silently degraded to ATM (100%) if the chosen
+ * offset would abort. That way we get variety when SVI cooperates
+ * and a safe ATM card when it doesn't.
+ */
 const STRIKE_BUCKETS = {
   /** Hard calls — close-to-money. */
-  close: [98n, 99n, 100n, 101n, 102n] as const,
+  close: [99n, 100n, 101n] as const,
   /** Mid-difficulty — moderate offset. */
-  mid: [95n, 96n, 97n, 103n, 104n, 105n] as const,
-  /** Easy / gimmes / traps — deep-OTM. */
-  otm: [85n, 88n, 90n, 110n, 112n, 115n] as const,
+  mid: [97n, 98n, 102n, 103n] as const,
+  /** Easy / gimmes / traps — wider OTM. */
+  otm: [94n, 95n, 105n, 106n] as const,
 } as const
 
 type Difficulty = keyof typeof STRIKE_BUCKETS
@@ -243,6 +298,149 @@ function pickFromPool<T>(pool: readonly T[], stream: Generator<number, never>): 
   }
 }
 
+/** Decode an 8-byte little-endian u64 buffer to bigint. */
+function readU64LE(bytes: number[]): bigint {
+  let v = 0n
+  for (let i = 0; i < 8; i++) {
+    v |= BigInt(bytes[i] ?? 0) << BigInt(i * 8)
+  }
+  return v
+}
+
+/**
+ * dev_inspect a candidate (oracle, strike, direction) tuple. Returns
+ * `true` only if the inspect succeeds AND the resulting ask lies in
+ * the protocol's ask bounds for BOTH UP and DOWN — that's everything
+ * the actual `predict::mint` checks before it touches the manager.
+ *
+ * Catches two distinct aborts the player would otherwise hit:
+ *   - `pricing_config::quote_spread_from_fair_price` code 1
+ *     `EFairPriceAlreadySettled` — fair_price rounds to 0 or 1e9.
+ *     Surfaces as a non-success status from dev_inspect because
+ *     `get_trade_amounts` calls `trade_prices` which calls quote_spread.
+ *   - `predict::assert_mintable_ask` code 7 `EAskPriceOutOfBounds` —
+ *     ask < min_ask (1%) or > max_ask (99%). `get_trade_amounts`
+ *     happily returns the bad ask without checking bounds, so we
+ *     call `ask_bounds` in the same tx and compare manually.
+ *
+ * Quantity is fixed at FLOAT_SCALING (1e9) so `math::mul(ask, qty)`
+ * returns the raw ask price directly.
+ */
+export async function probeCard(
+  client: SuiClient,
+  oracle: OracleSnapshot,
+  strike: bigint,
+): Promise<boolean> {
+  const pkg = env.deepbookPredictPackageId
+  const FLOAT_SCALING = 1_000_000_000n
+  for (const dir of ["up", "down"] as const) {
+    const tx = new Transaction()
+    const mk = tx.moveCall({
+      target: `${pkg}::market_key::${dir}`,
+      arguments: [
+        tx.pure.id(oracle.id),
+        tx.pure.u64(oracle.expiry),
+        tx.pure.u64(strike),
+      ],
+    })
+    // Command 1: (ask, bid) at quantity=FLOAT_SCALING → raw prices.
+    tx.moveCall({
+      target: `${pkg}::predict::get_trade_amounts`,
+      arguments: [
+        tx.object(env.deepbookPredictObjectId),
+        tx.object(oracle.id),
+        mk,
+        tx.pure.u64(FLOAT_SCALING),
+        tx.object("0x6"),
+      ],
+    })
+    // Command 2: (min_ask, max_ask) for this oracle.
+    tx.moveCall({
+      target: `${pkg}::predict::ask_bounds`,
+      arguments: [
+        tx.object(env.deepbookPredictObjectId),
+        tx.pure.id(oracle.id),
+      ],
+    })
+    let r
+    try {
+      r = await client.devInspectTransactionBlock({
+        transactionBlock: tx,
+        // dev_inspect is read-only; sender just needs to be a
+        // syntactically valid address.
+        sender:
+          "0x0000000000000000000000000000000000000000000000000000000000000001",
+      })
+    } catch {
+      return false
+    }
+    if (r.effects.status.status !== "success") return false
+    // results[0] is the market_key call (no public return), results[1] is
+    // get_trade_amounts returning (ask_qty, bid_qty), results[2] is
+    // ask_bounds returning (min, max). returnValues entry shape:
+    // [ [bytes[], "u64"], ... ]
+    const trade = r.results?.[1]?.returnValues
+    const bounds = r.results?.[2]?.returnValues
+    if (!trade || !bounds || trade.length < 1 || bounds.length < 2) {
+      return false
+    }
+    const ask = readU64LE(trade[0][0])
+    const minAsk = readU64LE(bounds[0][0])
+    const maxAsk = readU64LE(bounds[1][0])
+    if (ask < minAsk || ask > maxAsk) return false
+  }
+  return true
+}
+
+/**
+ * Generate a deck, then probe each card on chain. Cards whose
+ * PRG-chosen strike fails the probe are silently swapped to ATM
+ * (snapped forward). The hash is computed AFTER the fixup so
+ * `reveal_deck` matches the on-chain ground truth.
+ *
+ * `probeQuantity` should match what swipes actually mint (the probe
+ * exercises the same pricing path); default 20_000n matches
+ * E2EFlowPanel's MINT_QUANTITY.
+ */
+export async function buildAndProbeDeck(
+  client: SuiClient,
+  oracles: OracleSnapshot[],
+  seed: Uint8Array,
+): Promise<GeneratedDeck> {
+  const initial = buildDeckFromOracles(oracles, seed)
+  const fixedCards: DeckCard[] = []
+  for (let i = 0; i < initial.cards.length; i++) {
+    const o = oracles[i]
+    const card = initial.cards[i]
+    const ok = await probeCard(client, o, card.strike)
+    if (ok) {
+      fixedCards.push(card)
+      continue
+    }
+    // Fall back to ATM (snapped forward). If even ATM fails, surface a
+    // hard error — that means the oracle itself is unusable.
+    const atm = snapToTick(o.forward, o.minStrike, o.tickSize)
+    const atmOk = await probeCard(client, o, atm)
+    if (!atmOk) {
+      throw new Error(
+        `oracle ${o.id} pricing rejects both PRG strike (${card.strike}) and ATM (${atm}) — pricing config may be unset`,
+      )
+    }
+    log.warn(
+      `card ${i}: PRG strike ${card.strike} rejected by pricing/ask-bounds, falling back to ATM ${atm}`,
+    )
+    fixedCards.push({ oracle_id: card.oracle_id, strike: atm })
+  }
+  const bytes = DeckBcs.serialize(
+    fixedCards.map((c) => ({
+      oracle_id: c.oracle_id,
+      strike: c.strike.toString(),
+    })),
+  ).toBytes()
+  const hash = new Uint8Array(createHash("sha256").update(bytes).digest())
+  return { cards: fixedCards, hash, hashHex: hashToHex(hash) }
+}
+
 export function buildDeckFromOracles(
   oracles: OracleSnapshot[],
   seed: Uint8Array,
@@ -255,13 +453,18 @@ export function buildDeckFromOracles(
   const stream = prgStream(seed)
   // Step 1: shuffle the 2/2/1 difficulty allocation across the 5 oracles.
   const difficulties = shuffle(DIFFICULTY_ALLOCATION, stream)
-  // Step 2: for each oracle, draw a pct from the chosen bucket.
+  // Step 2: for each oracle, draw a pct from the chosen bucket, then
+  // snap the raw strike to the oracle's (min_strike, tick_size) grid.
+  // The chain enforces strike % tick_size == 0 inside
+  // oracle_config::assert_valid_strike (abort code 2) — unaligned
+  // strikes will fail at predict::mint resolution.
   const cards: DeckCard[] = oracles.slice(0, 5).map((o, i) => {
     const bucket = STRIKE_BUCKETS[difficulties[i]]
     const pct = pickFromPool(bucket, stream)
+    const raw = (o.forward * pct) / 100n
     return {
       oracle_id: normalizeSuiAddress(o.id),
-      strike: (o.forward * pct) / 100n,
+      strike: snapToTick(raw, o.minStrike, o.tickSize),
     }
   })
   const bytes = DeckBcs.serialize(
@@ -438,7 +641,7 @@ export async function handleDeckmasterRequest(
         timestampMs: Date.now(),
         nonceHex,
       })
-      const deck = buildDeckFromOracles(oracles, seed)
+      const deck = await buildAndProbeDeck(client, oracles, seed)
       rememberDeck(deck.hash, deck.cards, seed)
       return json({
         cards: deck.cards.map((c, i) => ({

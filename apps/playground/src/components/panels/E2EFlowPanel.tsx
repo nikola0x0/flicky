@@ -92,6 +92,17 @@ interface RoomState {
     upWon: boolean
     p0Pnl: string | null
     p1Pnl: string | null
+    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+  }>
+  /**
+   * Per-card swipes (settled or not). One entry per card slot with
+   * at least one swipe. Source of truth for running PnL + F5 recovery.
+   */
+  swipes: Array<{
+    cardIdx: number
+    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
   }>
 }
 
@@ -166,6 +177,41 @@ function fmtPnl(pnl: string | null): string {
   if (pnl === null) return '—'
   const n = Number(pnl) / 1_000_000
   return (n >= 0 ? '+' : '') + n.toFixed(4) + ' dUSDC'
+}
+
+/**
+ * Premium "paid so far" for the given side — settled premium (from the
+ * cumulative duel field) plus pending premium from any swipes that
+ * haven't been settled yet. Returns a base-10 string so downstream
+ * formatters can reuse the same BigInt math.
+ *
+ * Without this combined view, the running-PnL display would show 0
+ * premium until the keeper (or a manual settle) actually catches up
+ * — defeating the point of "real-time" updates.
+ */
+function runningPremium(
+  rs: {
+    p0Premium: string
+    p1Premium: string
+    cardOutcomes: Array<{ cardIdx: number }>
+    swipes: Array<{
+      cardIdx: number
+      p0Swipe: { premium: string } | null
+      p1Swipe: { premium: string } | null
+    }>
+  },
+  side: 'p0' | 'p1',
+): string {
+  const settledIdx = new Set(rs.cardOutcomes.map((o) => o.cardIdx))
+  const settled =
+    side === 'p0' ? BigInt(rs.p0Premium) : BigInt(rs.p1Premium)
+  let pending = 0n
+  for (const s of rs.swipes) {
+    if (settledIdx.has(s.cardIdx)) continue
+    const swipe = side === 'p0' ? s.p0Swipe : s.p1Swipe
+    if (swipe) pending += BigInt(swipe.premium)
+  }
+  return (settled + pending).toString()
 }
 
 /**
@@ -1038,6 +1084,80 @@ export default function E2EFlowPanel({ onOutput }: Props) {
     [account, deck, tier, runStep, signAndExecute, setStatus, onOutput],
   )
 
+  // ─── Manual settle + finalize (fallback when backend keeper is disabled) ─
+  //
+  // `duel::settle_card(duel, oracle, card_idx)` is permissionless on chain
+  // — it just asserts the oracle has produced a settlement_price. Once
+  // all 5 cards are settled, `duel::finalize(duel)` pays out the side
+  // pot to the winner. We expose both as buttons so the demo doesn't
+  // need the backend keeper running.
+  const stepManualSettle = useCallback(
+    (cardIdx: number) =>
+      runStep('result', async () => {
+        if (!duelId || !deck) throw new Error('no duel/deck')
+        const card = deck.cards[cardIdx]
+        if (!card) throw new Error('cardIdx out of range')
+        const tx = new Transaction()
+        tx.moveCall({
+          target: `${CONFIG.flickyPackageId}::duel::settle_card`,
+          typeArguments: [DUSDC_COIN_TYPE],
+          arguments: [
+            tx.object(duelId),
+            tx.object(card.oracle_id),
+            tx.pure.u64(BigInt(cardIdx)),
+          ],
+        })
+        const res = await signAndExecute({ transaction: tx })
+        await client.waitForTransaction({ digest: res.digest })
+        onOutput({
+          type: 'success',
+          title: `duel::settle_card #${cardIdx}`,
+          data: 'oracle settlement recorded on duel',
+          txDigest: res.digest,
+        })
+        // Refresh room_state so settledCount + cardOutcomes flip
+        try {
+          const r = await fetch(
+            `${CONFIG.serverHttpUrl}/duels/${encodeURIComponent(duelId)}`,
+          )
+          if (r.ok) setRoomState((await r.json()) as RoomState)
+        } catch {
+          // WS will catch up on the next indexer tick
+        }
+      }),
+    [duelId, deck, runStep, signAndExecute, onOutput],
+  )
+
+  const stepManualFinalize = useCallback(
+    () =>
+      runStep('result', async () => {
+        if (!duelId) throw new Error('no duel')
+        const tx = new Transaction()
+        tx.moveCall({
+          target: `${CONFIG.flickyPackageId}::duel::finalize`,
+          typeArguments: [DUSDC_COIN_TYPE],
+          arguments: [tx.object(duelId)],
+        })
+        const res = await signAndExecute({ transaction: tx })
+        await client.waitForTransaction({ digest: res.digest })
+        onOutput({
+          type: 'success',
+          title: 'duel::finalize',
+          data: 'side-pot paid to winner',
+          txDigest: res.digest,
+        })
+        try {
+          const r = await fetch(
+            `${CONFIG.serverHttpUrl}/duels/${encodeURIComponent(duelId)}`,
+          )
+          if (r.ok) setRoomState((await r.json()) as RoomState)
+        } catch {
+          // ignore
+        }
+      }),
+    [duelId, runStep, signAndExecute, onOutput],
+  )
+
   const stepSwipe = useCallback(
     (cardIdx: number, isUp: boolean) =>
       runStep('swipe', async () => {
@@ -1048,10 +1168,18 @@ export default function E2EFlowPanel({ onOutput }: Props) {
         const card = deck.cards[cardIdx]
         const tx = new Transaction()
         // Build market_key for the chosen direction.
+        //
+        // `market_key::up(oracle_id: ID, expiry: u64, strike: u64)` takes
+        // the oracle as a *pure* ID (address bytes), NOT an object ref.
+        // Passing `tx.object(card.oracle_id)` here would also cause the
+        // SDK to register the oracle as an Object input, then later
+        // `predict::mint` (which wants `&OracleSVI`) would fail with
+        // `arg_idx: 2, InvalidUsageOfPureArg` because the dedup
+        // promoted the shared input to pure.
         const mk = tx.moveCall({
           target: `${DEEPBOOK_PKG}::market_key::${isUp ? 'up' : 'down'}`,
           arguments: [
-            tx.object(card.oracle_id),
+            tx.pure.id(card.oracle_id),
             tx.pure.u64(BigInt(card.expiry)),
             tx.pure.u64(BigInt(card.strike)),
           ],
@@ -1107,6 +1235,38 @@ export default function E2EFlowPanel({ onOutput }: Props) {
     if (roomState.challenger === account.address) return 'challenger'
     return null
   }, [roomState, account])
+
+  // ─── Hydrate swipeResults from chain (F5 recovery + opponent sync) ──
+  //
+  // On refresh, `swipeResults` (local state) is empty even though the
+  // player may have already landed swipes on chain. The backend
+  // exposes them in `roomState.swipes` (sourced from the duel object).
+  // When new chain-swipes arrive that aren't in `swipeResults` yet,
+  // backfill so the PnL display + nextSwipeIdx counter line up.
+  useEffect(() => {
+    if (!roomState || !account || !myRole) return
+    if (!roomState.swipes || roomState.swipes.length === 0) return
+    const myKey: 'p0Swipe' | 'p1Swipe' =
+      myRole === 'creator' ? 'p0Swipe' : 'p1Swipe'
+    setSwipeResults((prev) => {
+      const knownIdx = new Set(prev.map((s) => s.cardIdx))
+      const additions: SwipeResult[] = []
+      for (const s of roomState.swipes) {
+        const mine = s[myKey]
+        if (!mine) continue
+        if (knownIdx.has(s.cardIdx)) continue
+        additions.push({
+          cardIdx: s.cardIdx,
+          isUp: mine.isUp,
+          // chain doesn't expose the originating tx digest — mark
+          // hydrated entries so we don't lie about provenance.
+          digest: '__hydrated__',
+        })
+      }
+      if (additions.length === 0) return prev
+      return [...prev, ...additions].sort((a, b) => a.cardIdx - b.cardIdx)
+    })
+  }, [roomState, account, myRole])
 
   const nextSwipeIdx = swipeResults.length
 
@@ -1790,70 +1950,144 @@ export default function E2EFlowPanel({ onOutput }: Props) {
         {roomState ? (
           <div className="space-y-2 text-xs">
             {roomState.status !== 'COMPLETE' && (
-              <div className="text-gray-400">
-                Cards settled:{' '}
-                <span className="text-gray-200">
-                  {roomState.settledCount} / {roomState.cardCount}
-                </span>{' '}
-                <span className="animate-pulse text-blue-400">⏳ keeper polling oracles…</span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-gray-400">
+                  Cards settled:{' '}
+                  <span className="text-gray-200">
+                    {roomState.settledCount} / {roomState.cardCount}
+                  </span>
+                  {roomState.settledCount < roomState.cardCount && (
+                    <span className="ml-2 animate-pulse text-blue-400">
+                      ⏳ keeper polling oracles…
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={refreshDuelState}
+                  className="rounded border border-gray-700 bg-gray-850 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-800"
+                >
+                  🔄 Refresh
+                </button>
               </div>
             )}
-            {roomState.cardOutcomes.length > 0 && (
-              <div className="space-y-0.5">
-                {roomState.cardOutcomes.map((o) => {
-                  const mySwipe = swipeResults.find((s) => s.cardIdx === o.cardIdx)
-                  const myPnl = myRole === 'creator' ? o.p0Pnl : o.p1Pnl
-                  return (
-                    <div
-                      key={o.cardIdx}
-                      className="grid grid-cols-12 items-center gap-2 rounded bg-gray-950 px-2 py-1.5"
-                    >
-                      <span className="col-span-1 font-mono text-gray-500">#{o.cardIdx}</span>
-                      <span className="col-span-3 text-gray-400">
-                        strike ${(Number(o.strike) / 1e9).toFixed(0)}
-                      </span>
-                      <span className="col-span-3 text-gray-300">
-                        settled ${(Number(o.settlementPrice) / 1e9).toFixed(0)}
-                      </span>
-                      <span className="col-span-2">
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${
-                            o.upWon
-                              ? 'bg-emerald-800 text-emerald-100'
-                              : 'bg-red-900 text-red-100'
-                          }`}
-                        >
-                          {o.upWon ? 'UP won' : 'DOWN won'}
-                        </span>
-                      </span>
-                      <span className="col-span-3 text-right">
-                        {mySwipe && (
-                          <span className="mr-1 text-gray-500">
-                            you: {mySwipe.isUp ? '⬆' : '⬇'}
-                          </span>
-                        )}
-                        <span
-                          className={
-                            myPnl && BigInt(myPnl) > 0n
-                              ? 'text-emerald-300'
-                              : myPnl && BigInt(myPnl) < 0n
-                                ? 'text-red-300'
-                                : 'text-gray-500'
-                          }
-                        >
-                          {fmtPnl(myPnl)}
-                        </span>
-                      </span>
-                    </div>
-                  )
-                })}
+
+            {/* Running PnL totals — settled payouts + pending premiums per side.
+                Settled payouts/premiums come from `pX_payout/premium` (only
+                updated by settle_card). For unsettled cards we add each
+                committed swipe's premium so the "paid so far" total
+                refreshes the instant a swipe lands on chain. */}
+            {(roomState.cardOutcomes.length > 0 ||
+              roomState.swipes.length > 0) && (
+              <div className="grid grid-cols-2 gap-2 rounded border border-gray-800 bg-gray-950 p-2 text-[11px]">
+                <PnlSummary
+                  label={
+                    myRole === 'creator'
+                      ? 'You (creator)'
+                      : myRole === 'challenger'
+                        ? 'You (challenger)'
+                        : 'Creator'
+                  }
+                  payout={
+                    myRole === 'challenger'
+                      ? roomState.p1Payout
+                      : roomState.p0Payout
+                  }
+                  premium={runningPremium(
+                    roomState,
+                    myRole === 'challenger' ? 'p1' : 'p0',
+                  )}
+                  highlight
+                />
+                <PnlSummary
+                  label="Opponent"
+                  payout={
+                    myRole === 'challenger'
+                      ? roomState.p0Payout
+                      : roomState.p1Payout
+                  }
+                  premium={runningPremium(
+                    roomState,
+                    myRole === 'challenger' ? 'p0' : 'p1',
+                  )}
+                />
               </div>
             )}
+
+            {/* Per-card breakdown: show all 5 slots whether settled yet or not.
+                For unsettled slots we still pull both players' swipes
+                (incl. opponent's, real-time) from roomState.swipes. */}
+            <div className="space-y-0.5">
+              {Array.from({ length: roomState.cardCount }).map((_, cardIdx) => {
+                const outcome = roomState.cardOutcomes.find(
+                  (o) => o.cardIdx === cardIdx,
+                )
+                const pending = roomState.swipes.find(
+                  (s) => s.cardIdx === cardIdx,
+                )
+                const meKey = myRole === 'challenger' ? 'p1' : 'p0'
+                const oppKey = myRole === 'challenger' ? 'p0' : 'p1'
+                const myKeyFull = `${meKey}Swipe` as 'p0Swipe' | 'p1Swipe'
+                const oppKeyFull = `${oppKey}Swipe` as 'p0Swipe' | 'p1Swipe'
+                const mySwipeOnChain =
+                  (outcome && outcome[myKeyFull]) ||
+                  (pending && pending[myKeyFull]) ||
+                  null
+                const oppSwipeOnChain =
+                  (outcome && outcome[oppKeyFull]) ||
+                  (pending && pending[oppKeyFull]) ||
+                  null
+                const mySwipeLocal = swipeResults.find(
+                  (s) => s.cardIdx === cardIdx,
+                )
+                const myPnl = outcome
+                  ? meKey === 'p0'
+                    ? outcome.p0Pnl
+                    : outcome.p1Pnl
+                  : null
+                const oppPnl = outcome
+                  ? oppKey === 'p0'
+                    ? outcome.p0Pnl
+                    : outcome.p1Pnl
+                  : null
+                return (
+                  <CardRow
+                    key={cardIdx}
+                    cardIdx={cardIdx}
+                    outcome={outcome ?? null}
+                    mySwipeLocal={mySwipeLocal ?? null}
+                    mySwipeOnChain={mySwipeOnChain}
+                    oppSwipeOnChain={oppSwipeOnChain}
+                    myPnl={myPnl}
+                    oppPnl={oppPnl}
+                    onSettle={() => stepManualSettle(cardIdx)}
+                    settling={busyStep === 'result'}
+                  />
+                )
+              })}
+            </div>
+
+            {/* Manual settle / finalize controls (keeper bypass). */}
+            {roomState.status !== 'COMPLETE' && (
+              <div className="space-y-1 rounded border border-gray-800 bg-gray-950 p-2 text-[10px] text-gray-400">
+                <div>
+                  <strong className="text-gray-300">Keeper not running?</strong> Once
+                  an oracle resolves, click <em>Settle</em> on its card. After all
+                  5 cards are settled, finalize to pay out the pot.
+                </div>
+                {roomState.settledCount === roomState.cardCount && (
+                  <button
+                    onClick={stepManualFinalize}
+                    disabled={busyStep === 'result'}
+                    className="mt-1 rounded bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-40"
+                  >
+                    {busyStep === 'result' ? 'Finalizing…' : '🏁 Finalize duel'}
+                  </button>
+                )}
+              </div>
+            )}
+
             {roomState.status === 'COMPLETE' && (
-              <ResultBanner
-                roomState={roomState}
-                myRole={myRole}
-              />
+              <ResultBanner roomState={roomState} myRole={myRole} />
             )}
           </div>
         ) : (
@@ -2095,6 +2329,136 @@ function SwipeTile({
         </div>
       ) : (
         <div className="mt-1 text-gray-600">—</div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Compact PnL card — shows a player's real PnL net (payout from won
+ * cards − premium paid on lost cards), all in dUSDC.
+ */
+function PnlSummary({
+  label,
+  payout,
+  premium,
+  highlight,
+}: {
+  label: string
+  payout: string
+  premium: string
+  highlight?: boolean
+}) {
+  const payoutN = BigInt(payout)
+  const premiumN = BigInt(premium)
+  const net = payoutN - premiumN
+  return (
+    <div
+      className={`rounded p-2 ${highlight ? 'border border-indigo-700 bg-indigo-950/30' : 'bg-gray-900'}`}
+    >
+      <div className="text-[10px] uppercase tracking-wide text-gray-500">
+        {label}
+      </div>
+      <div
+        className={`mt-1 font-mono text-base font-bold ${net > 0n ? 'text-emerald-300' : net < 0n ? 'text-red-300' : 'text-gray-300'}`}
+      >
+        {net >= 0n ? '+' : ''}
+        {(Number(net) / 1_000_000).toFixed(4)} dUSDC
+      </div>
+      <div className="mt-0.5 text-[10px] text-gray-500">
+        won {fmtDusdc(payoutN)} · paid {fmtDusdc(premiumN)}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Per-card row inside the settlement table. Renders three states:
+ *   - awaiting settlement (no outcome on chain yet) — shows my swipe
+ *     direction (from local state), plus a "Settle" button if oracle
+ *     may have resolved.
+ *   - settled — shows strike, settlement price, who won, both players'
+ *     swipe directions, and both players' PnL.
+ */
+function CardRow({
+  cardIdx,
+  outcome,
+  mySwipeLocal,
+  mySwipeOnChain,
+  oppSwipeOnChain,
+  myPnl,
+  oppPnl,
+  onSettle,
+  settling,
+}: {
+  cardIdx: number
+  outcome: RoomState['cardOutcomes'][number] | null
+  mySwipeLocal: { isUp: boolean } | null
+  mySwipeOnChain: { isUp: boolean; quantity: string; premium: string } | null
+  oppSwipeOnChain: { isUp: boolean; quantity: string; premium: string } | null
+  myPnl: string | null
+  oppPnl: string | null
+  onSettle: () => void
+  settling: boolean
+}) {
+  const settled = outcome !== null
+  const arrowOf = (isUp: boolean | undefined) =>
+    isUp === undefined ? '—' : isUp ? '⬆' : '⬇'
+  const myArrow = arrowOf(
+    mySwipeOnChain ? mySwipeOnChain.isUp : mySwipeLocal?.isUp,
+  )
+  const oppArrow = arrowOf(oppSwipeOnChain?.isUp)
+  const pnlClass = (p: string | null) =>
+    p && BigInt(p) > 0n
+      ? 'text-emerald-300'
+      : p && BigInt(p) < 0n
+        ? 'text-red-300'
+        : 'text-gray-500'
+  return (
+    <div className="grid grid-cols-12 items-center gap-2 rounded bg-gray-950 px-2 py-1.5 text-[11px]">
+      <span className="col-span-1 font-mono text-gray-500">#{cardIdx}</span>
+      {settled ? (
+        <>
+          <span className="col-span-2 text-gray-400">
+            ${(Number(outcome.strike) / 1e9).toFixed(0)}
+          </span>
+          <span className="col-span-2 text-gray-300">
+            → ${(Number(outcome.settlementPrice) / 1e9).toFixed(0)}
+          </span>
+          <span className="col-span-2">
+            <span
+              className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${outcome.upWon ? 'bg-emerald-800 text-emerald-100' : 'bg-red-900 text-red-100'}`}
+            >
+              {outcome.upWon ? 'UP' : 'DOWN'}
+            </span>
+          </span>
+          <span className="col-span-2 text-right">
+            <span className="text-gray-500">you {myArrow} </span>
+            <span className={pnlClass(myPnl)}>{fmtPnl(myPnl)}</span>
+          </span>
+          <span className="col-span-3 text-right">
+            <span className="text-gray-500">opp {oppArrow} </span>
+            <span className={pnlClass(oppPnl)}>{fmtPnl(oppPnl)}</span>
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="col-span-4 text-gray-500">
+            {mySwipeLocal ? `your swipe: ${myArrow}` : 'awaiting swipe'}
+          </span>
+          <span className="col-span-3 text-gray-600 italic">
+            opponent: {oppArrow === '—' ? 'private until settle' : oppArrow}
+          </span>
+          <span className="col-span-4 text-right">
+            <button
+              onClick={onSettle}
+              disabled={settling}
+              className="rounded bg-indigo-700 px-2 py-1 text-[10px] font-semibold text-white hover:bg-indigo-600 disabled:opacity-40"
+            >
+              {settling ? '…' : 'Settle'}
+            </button>
+          </span>
+        </>
       )}
     </div>
   )

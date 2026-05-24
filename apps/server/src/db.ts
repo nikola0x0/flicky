@@ -61,6 +61,10 @@ export function getDb(): Database {
         -- JSON array of per-card outcomes (one entry per settled card,
         -- written incrementally by the indexer on CardSettled events).
         card_outcomes   TEXT NOT NULL DEFAULT '[]',
+        -- JSON array of per-card swipes (settled or not). Populated by
+        -- the indexer's refreshDuel pass so the UI can render running
+        -- PnL and recover state after F5 from the mirror alone.
+        swipes          TEXT NOT NULL DEFAULT '[]',
         last_updated_ms INTEGER NOT NULL
       )
     `)
@@ -73,6 +77,7 @@ export function getDb(): Database {
       `ALTER TABLE duel ADD COLUMN p1_payout TEXT NOT NULL DEFAULT '0'`,
       `ALTER TABLE duel ADD COLUMN p1_premium TEXT NOT NULL DEFAULT '0'`,
       `ALTER TABLE duel ADD COLUMN started_at_ms INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE duel ADD COLUMN swipes TEXT NOT NULL DEFAULT '[]'`,
     ]) {
       try {
         _db.exec(stmt)
@@ -247,7 +252,14 @@ export interface DuelRow {
   /** Clock timestamp when the duel went ACTIVE (set in `join_duel`). 0 while PENDING. */
   startedAtMs: number
   cardOutcomes: CardOutcome[]
+  swipes: PendingSwipe[]
   lastUpdatedMs: number
+}
+
+export interface PendingSwipe {
+  cardIdx: number
+  p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
+  p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
 }
 
 export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
@@ -257,8 +269,8 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
         `INSERT INTO duel (id, status, stake_coin_type, creator, challenger,
                            cards_revealed, card_count, settled_count,
                            p0_payout, p0_premium, p1_payout, p1_premium,
-                           started_at_ms, card_outcomes, last_updated_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           started_at_ms, card_outcomes, swipes, last_updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status          = excluded.status,
            stake_coin_type = excluded.stake_coin_type,
@@ -273,6 +285,7 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
            p1_premium      = excluded.p1_premium,
            started_at_ms   = excluded.started_at_ms,
            card_outcomes   = excluded.card_outcomes,
+           swipes          = excluded.swipes,
            last_updated_ms = excluded.last_updated_ms`,
       )
       .run(
@@ -290,6 +303,7 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
         d.p1Premium,
         d.startedAtMs,
         JSON.stringify(d.cardOutcomes),
+        JSON.stringify(d.swipes),
         Date.now(),
       )
   } catch (e) {
@@ -353,6 +367,7 @@ interface DuelRowRaw {
   p1_premium: string
   started_at_ms: number
   card_outcomes: string
+  swipes: string
   last_updated_ms: number
 }
 
@@ -362,6 +377,12 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
     outcomes = JSON.parse(r.card_outcomes ?? "[]") as CardOutcome[]
   } catch {
     outcomes = []
+  }
+  let swipes: PendingSwipe[] = []
+  try {
+    swipes = JSON.parse(r.swipes ?? "[]") as PendingSwipe[]
+  } catch {
+    swipes = []
   }
   return {
     id: r.id,
@@ -378,6 +399,7 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
     p1Premium: r.p1_premium,
     startedAtMs: r.started_at_ms,
     cardOutcomes: outcomes,
+    swipes,
     lastUpdatedMs: r.last_updated_ms,
   }
 }

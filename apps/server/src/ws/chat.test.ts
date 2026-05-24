@@ -130,6 +130,7 @@ describe("handleChatReact — filters to creator + challenger (PRD §Social)", (
       p1Premium: "0",
       startedAtMs: 0,
       cardOutcomes: [],
+      swipes: [],
     })
   }
 

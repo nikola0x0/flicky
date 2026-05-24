@@ -28,6 +28,7 @@ function toWire(d: DuelRow) {
     p1Premium: d.p1Premium,
     startedAtMs: d.startedAtMs,
     cardOutcomes: d.cardOutcomes,
+    swipes: d.swipes,
     lastUpdatedMs: d.lastUpdatedMs,
   }
 }
