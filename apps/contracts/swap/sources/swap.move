@@ -1,7 +1,7 @@
 // Copyright (c) Flicky Labs
 // SPDX-License-Identifier: Apache-2.0
 
-module flicky::swap;
+module swap::swap;
 
 use sui::coin::{Self, Coin};
 use sui::balance::{Self, Balance, Supply};
