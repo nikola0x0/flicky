@@ -53,6 +53,16 @@ export type ServerMsg =
       opponent: string
     }
   | {
+      /**
+       * Pushed to a matched challenger the moment the indexer sees
+       * their creator's `DuelCreated` event on chain — saves a polling
+       * roundtrip vs hitting `/duels/recent` every couple seconds.
+       */
+      type: "duel_assigned"
+      duelId: string
+      creator: string
+    }
+  | {
       type: "room_state"
       duelId: string
       status: "PENDING" | "ACTIVE" | "COMPLETE"

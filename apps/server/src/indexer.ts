@@ -35,7 +35,11 @@ import {
 } from "./db"
 import { makeLogger, shortId } from "./log"
 import { applyDuelOutcome } from "./mmr"
-import { broadcastRoom } from "./ws/matchmaking"
+import {
+  broadcastRoom,
+  sendToAddresses,
+  takeMatchedPair,
+} from "./ws/matchmaking"
 
 const log = makeLogger("indexer")
 
@@ -268,6 +272,26 @@ export class DuelIndexer {
         const p = e.parsedJson as Record<string, unknown> | undefined
         const id = p?.duel_id as string | undefined
         if (id) touched.add(normalizeSuiObjectId(id))
+        // DuelCreated → look up the matched pair and push the duel id
+        // to the challenger so they can immediately call join_duel
+        // without waiting for an HTTP poll.
+        if (eventType.endsWith("::DuelCreated") && p && id) {
+          const duelId = normalizeSuiObjectId(id)
+          const creator = p.creator as string | undefined
+          if (creator) {
+            const challengerAddr = takeMatchedPair(creator)
+            if (challengerAddr) {
+              sendToAddresses([challengerAddr], {
+                type: "duel_assigned",
+                duelId,
+                creator,
+              })
+              log.info(
+                `duel_assigned → ${shortId(challengerAddr)} duel=${shortId(duelId)}`,
+              )
+            }
+          }
+        }
         // CardSettled (new contract) emits just `settlement_price` —
         // per-card scores are no longer in the event. We still mirror
         // the outcome eagerly using the strike from the duel's mirror

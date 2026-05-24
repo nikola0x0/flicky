@@ -67,6 +67,13 @@ const queues = new Map<Tier, AnyWs[]>()
 const roomSubscribers = new Map<string, Set<AnyWs>>()
 /** `${duelId}|${address}` → forfeit-grace timer. */
 const forfeitTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/**
+ * Matched-but-not-yet-on-chain pairs. Set by `matchPair` immediately
+ * after `match_found` fires; consumed by `indexer.ts::drainTracker` when
+ * it sees the creator's `DuelCreated` event so it can push the new
+ * duel id to the matched challenger's sockets without any client polling.
+ */
+const pendingPairs = new Map<string, string>() // creator_addr → challenger_addr
 
 function send(ws: AnyWs, msg: ServerMsg): void {
   try {
@@ -171,21 +178,40 @@ export function leaveQueue(ws: AnyWs): void {
 function matchPair(creator: AnyWs, challenger: AnyWs, tier: Tier): void {
   creator.data.queuedTier = null
   challenger.data.queuedTier = null
+  const creatorAddr = creator.data.address
+  const challengerAddr = challenger.data.address
   log.info(
-    `match ${tier}: creator=${shortId(creator.data.address ?? "?")} vs challenger=${shortId(challenger.data.address ?? "?")}`,
+    `match ${tier}: creator=${shortId(creatorAddr ?? "?")} vs challenger=${shortId(challengerAddr ?? "?")}`,
   )
+  // Remember the pairing so the indexer can push `duel_assigned` to the
+  // challenger the moment the creator's `DuelCreated` event surfaces.
+  if (creatorAddr && challengerAddr) {
+    pendingPairs.set(creatorAddr, challengerAddr)
+  }
   send(creator, {
     type: "match_found",
     tier,
     role: "creator",
-    opponent: challenger.data.address ?? "",
+    opponent: challengerAddr ?? "",
   })
   send(challenger, {
     type: "match_found",
     tier,
     role: "challenger",
-    opponent: creator.data.address ?? "",
+    opponent: creatorAddr ?? "",
   })
+}
+
+/**
+ * Pop the challenger matched with `creatorAddr` (if any). Called by the
+ * indexer when it sees a `DuelCreated` event for that creator — we then
+ * push `duel_assigned` to the challenger's sockets. Returns null when no
+ * pair is pending (server restart, queue cleared, etc.).
+ */
+export function takeMatchedPair(creatorAddr: string): string | null {
+  const challenger = pendingPairs.get(creatorAddr)
+  if (challenger) pendingPairs.delete(creatorAddr)
+  return challenger ?? null
 }
 
 // ─── Rooms ──────────────────────────────────────────────────────────────────
@@ -322,6 +348,7 @@ export function __resetForTests(): void {
   socketsByAddress.clear()
   queues.clear()
   roomSubscribers.clear()
+  pendingPairs.clear()
 }
 
 /** Internal — exposed for the `practice_start` handler to send back the deck. */
