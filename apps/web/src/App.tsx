@@ -1565,6 +1565,13 @@ function SwipingView({
           if (!oracle) {
             throw new Error("Oracle not loaded")
           }
+          // TODO: query `pricing::p_up(oracle, strike)` via devInspect
+          // and set premium = quote × quantity. For now we use a
+          // placeholder of `quantity / 2n` (≈ 50/50 implied mark) — the
+          // contract just enforces `premium > 0` and stores the value
+          // for PnL display; the actual mint cost is computed by
+          // DeepBook independently inside `predict::mint`.
+          const premium = mintQuantity / 2n > 0n ? mintQuantity / 2n : 1n
           tx = buildStakedSwipeTx({
             duelId,
             oracleSviId: card.oracleId,
@@ -1573,16 +1580,25 @@ function SwipingView({
             strike: card.strike,
             isUp,
             quantity: mintQuantity,
+            premium,
             cardIdx: myNextIdx,
           })
         } else {
-          tx = buildSwipeTx(
+          // Legacy non-staked path (free/SUI duels) — PRD has
+          // replaced this with Practice Mode (server-only). The
+          // builder needs a manager + quantity + premium for the
+          // new contract; this branch is effectively dead code in
+          // the staked-only world.
+          tx = buildSwipeTx({
             duelId,
-            card.oracleId,
-            myNextIdx,
+            managerId: managerQuery.data?.id ?? "0x0",
+            oracleId: card.oracleId,
+            cardIdx: myNextIdx,
             isUp,
-            duel.stakeCoinType,
-          )
+            quantity: 1n,
+            premium: 1n,
+            stakeCoinType: duel.stakeCoinType,
+          })
         }
         await signAndExec({ transaction: tx })
         queryClient.invalidateQueries({ queryKey: ["duel", duelId] })

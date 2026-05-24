@@ -33,7 +33,7 @@ afterAll(() => {
 describe("buildAllowedTargets", () => {
   test("testnet — covers every flicky duel entry + every DeepBook fn", () => {
     const targets = sponsor.buildAllowedTargets("testnet")
-    // flicky duel functions (with swap)
+    // flicky duel functions (swap is a separate package — checked below)
     const expectedFlickyFns = [
       "duel::new_card",
       "duel::create_duel",
@@ -42,13 +42,18 @@ describe("buildAllowedTargets", () => {
       "duel::record_swipe",
       "duel::settle_card",
       "duel::finalize",
-      "swap::sui_to_dusdc",
-      "swap::dusdc_to_sui",
     ]
     for (const fn of expectedFlickyFns) {
       const matching = targets.filter((t) => t.endsWith(`::${fn}`))
       expect(matching).toHaveLength(1)
     }
+    // Swap functions allowlisted under the SEPARATE swap package.
+    const swapTargets = targets.filter(
+      (t) => t.includes("::swap::") && t.startsWith("0x51ea0f29"),
+    )
+    expect(swapTargets.map((t) => t.split("::").slice(1).join("::"))).toEqual(
+      expect.arrayContaining(["swap::swap_x_for_y", "swap::swap_y_for_x"]),
+    )
     // DeepBook Predict functions
     const expectedDeepbookFns = [
       "predict::create_manager",

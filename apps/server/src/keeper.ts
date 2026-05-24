@@ -272,8 +272,11 @@ export class Keeper {
       }
       if (![...settledMap.values()].every(Boolean)) return
 
-      // dUSDC: also redeem each player's Predict position into their
-      // PredictManager. Free/SUI duels skip the mint, so no redeem.
+      // Build the per-swipe redeem list. Predict positions are always
+      // dUSDC regardless of the Duel<T> stake type — `record_swipe`
+      // takes a `&PredictManager` (dUSDC-backed) and stores the mint
+      // quantity in the Swipe struct. So we redeem dUSDC for every
+      // recorded swipe across both players, independent of stakeCoinType.
       const redeems: Array<{
         managerId: string
         oracleId: string
@@ -282,7 +285,10 @@ export class Keeper {
         isUp: boolean
         quantity: bigint
       }> = []
-      if (duel.stakeCoinType === env.dusdcCoinType) {
+      const hasAnySwipe =
+        duel.p0Swipes.some((s) => s && s.quantity > 0n) ||
+        duel.p1Swipes.some((s) => s && s.quantity > 0n)
+      if (hasAnySwipe) {
         const expiryByOracle = new Map<string, bigint>()
         for (const oid of uniqueOracleIds) {
           const e = await readOracleExpiry(this.client, oid)

@@ -30,6 +30,11 @@ const log = makeLogger("sponsor")
 
 // ─── Allowlist of MoveCall targets ──────────────────────────────────────────
 
+/**
+ * Functions sponsored from the **flicky duel package** (the one in
+ * `apps/contracts/sources/duel.move`). The swap module is published
+ * SEPARATELY (`apps/contracts/swap/`) — see SWAP_FNS below.
+ */
 const FLICKY_FNS = [
   "duel::new_card",
   "duel::create_duel",
@@ -38,9 +43,20 @@ const FLICKY_FNS = [
   "duel::record_swipe",
   "duel::settle_card",
   "duel::finalize",
-  // Swap module — backs the in-app SUI ↔ dUSDC top-up screen.
-  "swap::sui_to_dusdc",
-  "swap::dusdc_to_sui",
+]
+
+/**
+ * Player-facing AMM swap functions (separate package).
+ *
+ * The swap module is a generic `Pool<X, Y>` AMM — `swap_x_for_y` /
+ * `swap_y_for_x` are the two directions a player calls for SUI↔dUSDC
+ * top-up. Pool admin (`create_pool`, `add_liquidity`, `remove_liquidity`)
+ * is intentionally NOT in this list — only treasury wallets do that and
+ * they don't need sponsored gas.
+ */
+const SWAP_FNS = [
+  "swap::swap_x_for_y",
+  "swap::swap_y_for_x",
 ]
 
 const DEEPBOOK_PREDICT_FNS = [
@@ -86,13 +102,25 @@ function resolveFlickyPackage(network: EnokiNetwork): string {
   )
 }
 
+function resolveSwapPackage(network: EnokiNetwork): string | null {
+  const override = process.env[`SWAP_PACKAGE_${network.toUpperCase()}`]
+  if (override) return override
+  if (network === "testnet") return env.swapPackageId
+  // Mainnet swap pkg not configured yet — return null and just skip
+  // allowlisting swap so a typo can't approve a wrong package.
+  return null
+}
+
 export function buildAllowedTargets(network: EnokiNetwork): string[] {
   const flicky = resolveFlickyPackage(network)
   const deepbook = resolveDeepbookPackage(network)
-  return [
+  const swap = resolveSwapPackage(network)
+  const targets = [
     ...FLICKY_FNS.map((fn) => `${flicky}::${fn}`),
     ...DEEPBOOK_PREDICT_FNS.map((fn) => `${deepbook}::${fn}`),
   ]
+  if (swap) targets.push(...SWAP_FNS.map((fn) => `${swap}::${fn}`))
+  return targets
 }
 
 // ─── CORS ───────────────────────────────────────────────────────────────────

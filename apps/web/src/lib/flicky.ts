@@ -261,20 +261,41 @@ export function buildJoinDuelTx(
   return tx
 }
 
-/** Record a single swipe on the next card in the player's sequence. */
-export function buildSwipeTx(
-  duelId: string,
-  oracleId: string,
-  cardIdx: number,
-  isUp: boolean,
-  stakeCoinType: string = CONFIG.stakeType,
-): Transaction {
+/**
+ * Record a single swipe on the next card in the player's sequence.
+ *
+ * The new contract requires the player to already hold a Predict
+ * position at `manager` for the (oracle, strike, is_up) combination —
+ * `record_swipe` verifies `position(manager, key) >= quantity`. In
+ * practice this is wired by `buildStakedSwipeTx` in `lib/deepbook.ts`
+ * which bundles `predict::mint` + `duel::record_swipe` in one PTB. This
+ * standalone helper is for tests / scripts that want just the swipe
+ * step against a manager that already has the position.
+ */
+export function buildSwipeTx(args: {
+  duelId: string
+  managerId: string
+  oracleId: string
+  cardIdx: number
+  isUp: boolean
+  quantity: bigint
+  premium: bigint
+  stakeCoinType?: string
+}): Transaction {
   const tx = new Transaction()
   tx.add(
     duelGen.recordSwipe({
       package: packageId,
-      arguments: [duelId, oracleId, cardIdx, isUp],
-      typeArguments: [stakeCoinType],
+      arguments: [
+        args.duelId,
+        args.managerId,
+        args.oracleId,
+        args.cardIdx,
+        args.isUp,
+        args.quantity,
+        args.premium,
+      ],
+      typeArguments: [args.stakeCoinType ?? CONFIG.stakeType],
     }),
   )
   return tx

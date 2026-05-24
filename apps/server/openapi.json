@@ -334,6 +334,14 @@
                 "ageMs": { "type": "integer" }
               }
             }
+          },
+          "oracleStream": {
+            "type": "object",
+            "description": "Live oracle tick streaming subsystem stats — how many distinct oracles + sockets are currently subscribed.",
+            "properties": {
+              "oracles": { "type": "integer" },
+              "sockets": { "type": "integer" }
+            }
           }
         }
       },

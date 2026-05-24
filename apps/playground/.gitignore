@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+.env.local
+
+# Defensive — tsconfig has `noEmit: true` so tsc should never emit
+# these next to sources, but in case someone accidentally runs `tsc`
+# with a different config / overrides emit, keep them out of git.
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
+src/**/*.d.ts.map

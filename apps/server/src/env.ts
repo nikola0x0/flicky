@@ -48,6 +48,14 @@ export const env = {
     process.env.DUSDC_COIN_TYPE ??
     "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC",
 
+  // SUI ↔ dUSDC AMM swap module (separate package from flicky duel —
+  // published from apps/contracts/swap/). Sponsor allowlists the two
+  // player-facing AMM functions (swap_x_for_y / swap_y_for_x); the
+  // pool / liquidity admin functions are NOT sponsored.
+  swapPackageId:
+    process.env.SWAP_PACKAGE_ID ??
+    "0x51ea0f29321f3c25f8b2f530ecd3ed3dec569d954c8832d318de7e203653a936",
+
   // Deckmaster: minimum headroom each card's oracle must clear at the
   // moment of duel creation. PRD: 5 nearest oracles strictly >10 min out.
   deckCardMinHeadroomMs: Number(
