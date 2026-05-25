@@ -67,8 +67,21 @@
   animation: checker-drift 12s linear infinite;
 }
 
+.bg-checker-dark {
+  background-color: #131a36;
+  background-image:
+    linear-gradient(45deg, #243364 26%, transparent 26%),
+    linear-gradient(135deg, #243364 26%, transparent 26%),
+    linear-gradient(45deg, transparent 75%, #243364 75%),
+    linear-gradient(135deg, transparent 75%, #243364 75%);
+  background-size: 128px 128px;
+  background-position: 0 0, 64px 0, 64px -64px, 0 64px;
+  animation: checker-drift 12s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .bg-checker {
+  .bg-checker,
+  .bg-checker-dark {
     animation: none;
   }
 }
@@ -472,4 +485,32 @@
   [role="button"]:not(:disabled) {
     cursor: pointer;
   }
+}
+
+/* ─── Route transitions ───────────────────────────────────────────── */
+@keyframes route-swipe-from-right {
+  from {
+    transform: translate3d(100%, 0, 0);
+    opacity: 0.35;
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+}
+@keyframes route-swipe-from-left {
+  from {
+    transform: translate3d(-100%, 0, 0);
+    opacity: 0.35;
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+}
+.route-swipe-from-right {
+  animation: route-swipe-from-right 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.route-swipe-from-left {
+  animation: route-swipe-from-left 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
