@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import type { CSSProperties, ReactNode } from "react"
 
 import { PixelButton } from "@/components/pixel-button"
 
@@ -15,6 +15,7 @@ export function MatchButton({
   disabled,
   variant = "default",
   className = "",
+  style,
 }: {
   label: ReactNode
   stake?: ReactNode
@@ -22,12 +23,14 @@ export function MatchButton({
   disabled?: boolean
   variant?: "default" | "bordered"
   className?: string
+  style?: CSSProperties
 }) {
   return (
     <PixelButton
       variant={variant}
       onClick={onClick}
       disabled={disabled}
+      style={style}
       className={`h-14 w-full ${className}`}
     >
       <span className="flex w-full items-center">

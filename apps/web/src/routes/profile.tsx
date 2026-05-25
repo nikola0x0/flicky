@@ -1,11 +1,17 @@
+import { useState } from "react"
 import type { CSSProperties } from "react"
 import { Link, useNavigate } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { BalanceChip } from "@/components/balance-chip"
+import { DepositModal } from "@/components/deposit-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
+import {
+  useDusdcBalance,
+  useSuiBalance,
+} from "@/hooks/use-wallet-balances"
 
 const BLUE_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -23,6 +29,9 @@ const BLUE_BRAND_STYLE = {
 export default function Profile() {
   const account = useCurrentAccount()
   const navigate = useNavigate()
+  const { data: suiBalance = 0 } = useSuiBalance()
+  const { data: dusdcBalance = 0 } = useDusdcBalance()
+  const [depositOpen, setDepositOpen] = useState(false)
 
   // Signed out — bounce back to /game/home where they can sign in.
   if (!account) {
@@ -39,7 +48,10 @@ export default function Profile() {
   return (
     <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
       <div className="pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl bg-[#1b2548] font-pixel text-white sm:max-h-[900px]">
-        <ProfileHeader onBack={() => navigate(-1)} />
+        <ProfileHeader
+          onBack={() => navigate(-1)}
+          dusdc={dusdcBalance}
+        />
 
         <main className="flex-1 overflow-y-auto px-4 pb-6">
           <section className="flex items-start gap-4 pt-2">
@@ -88,19 +100,42 @@ export default function Profile() {
           <div className="my-5 h-px bg-white/10" />
 
           <section className="grid grid-cols-2 gap-3 text-center">
-            <Stat icon="/tokens/usdc-icon.png" label="wallet" value="0.00" />
+            <Stat
+              icon="/tokens/usdc-icon.png"
+              label="dusdc"
+              value={dusdcBalance.toFixed(2)}
+            />
             <Stat
               icon="/tokens/manager-usdc.png"
-              label="predict manager"
+              label="manager dusdc"
               value="0.00"
             />
+          </section>
+
+          <section className="mt-3">
+            <div className="flex items-center justify-between rounded-2xl bg-white/5 px-5 py-4">
+              <div className="flex items-center gap-3">
+                <img
+                  src="/tokens/sui.png"
+                  alt=""
+                  aria-hidden
+                  className="size-10 [image-rendering:pixelated]"
+                />
+                <span className="text-lg tracking-[0.18em] text-white/55 uppercase">
+                  sui
+                </span>
+              </div>
+              <span className="text-3xl text-white tabular-nums">
+                {suiBalance.toFixed(4)}
+              </span>
+            </div>
           </section>
 
           <section className="mt-5 grid grid-cols-3 gap-2">
             <ActionTile
               label="deposit"
               icon="/icons/disk_save.png"
-              onClick={() => {}}
+              onClick={() => setDepositOpen(true)}
             />
             <ActionTile
               label="withdraw"
@@ -138,11 +173,23 @@ export default function Profile() {
           </section>
         </main>
       </div>
+
+      <DepositModal
+        open={depositOpen}
+        address={address}
+        onClose={() => setDepositOpen(false)}
+      />
     </div>
   )
 }
 
-function ProfileHeader({ onBack }: { onBack: () => void }) {
+function ProfileHeader({
+  onBack,
+  dusdc,
+}: {
+  onBack: () => void
+  dusdc: number
+}) {
   return (
     <header className="flex items-center justify-between gap-2 px-3 py-3">
       <div className="flex items-center gap-5">
@@ -164,7 +211,7 @@ function ProfileHeader({ onBack }: { onBack: () => void }) {
         <div className="flex items-center gap-4">
           <BalanceChip
             icon="/tokens/usdc-icon.png"
-            amount="0.00"
+            amount={dusdc.toFixed(2)}
             label="wallet"
             to="/game/shop"
           />
@@ -198,10 +245,10 @@ function Stat({
         aria-hidden
         className="size-8 [image-rendering:pixelated]"
       />
-      <span className="text-xs tracking-wider text-white/55 uppercase">
+      <span className="text-sm tracking-wider text-white/55 uppercase">
         {label}
       </span>
-      <span className="text-2xl tabular-nums">{value}</span>
+      <span className="text-3xl tabular-nums">{value}</span>
     </div>
   )
 }

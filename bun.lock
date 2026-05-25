@@ -48,10 +48,12 @@
       "dependencies": {
         "@mysten/dapp-kit": "latest",
         "@mysten/enoki": "^1.0.8",
+        "@mysten/payment-kit": "^0.1.11",
         "@mysten/sui": "^2",
         "@tanstack/react-query": "^5.100.10",
         "@workspace/ui": "workspace:*",
         "html-to-image": "^1.11",
+        "qr-code-styling": "^1.9.2",
         "react": "^19.2.4",
         "react-dom": "^19.2.4",
         "react-router": "^7",
@@ -338,6 +340,8 @@
     "@mysten/dapp-kit": ["@mysten/dapp-kit@1.0.6", "", { "dependencies": { "@mysten/slush-wallet": "^1.0.5", "@mysten/utils": "^0.3.3", "@mysten/wallet-standard": "^0.20.3", "@radix-ui/react-dialog": "^1.1.15", "@radix-ui/react-dropdown-menu": "^2.1.16", "@radix-ui/react-slot": "^1.2.4", "@vanilla-extract/css": "^1.18.0", "@vanilla-extract/dynamic": "^2.1.5", "@vanilla-extract/recipes": "^0.5.7", "clsx": "^2.1.1", "zustand": "^5.0.10" }, "peerDependencies": { "@mysten/sui": "^2.16.2", "@tanstack/react-query": "^5.0.0", "react": "*" } }, "sha512-cdTK3G1FSED/c8zhzPVkeKC72HGib1DO55UXobddVUKDXOow4YeTEKYaxHFqc5wOcCGbZVg1rmmSR75w1Ul41w=="],
 
     "@mysten/enoki": ["@mysten/enoki@1.0.8", "", { "dependencies": { "@mysten/utils": "^0.3.3", "@mysten/wallet-standard": "^0.20.3", "@mysten/webcrypto-signer": "^0.1.2", "@nanostores/react": "^1.0.0", "@wallet-standard/ui": "^1.0.1", "idb-keyval": "^6.2.2", "nanostores": "^1.1.0" }, "peerDependencies": { "@mysten/sui": "^2.16.3", "@types/react": ">=17.0.0", "react": ">=17.0.0" }, "optionalPeers": ["@types/react", "react"] }, "sha512-ZFWAnLavMEroBzZyiBNawAttkSLlpKgTTK3/irQW5jSNEP/G9U8+ZGeLpTnt78761b+9r13IEWmWbVlHx3hCuA=="],
+
+    "@mysten/payment-kit": ["@mysten/payment-kit@0.1.11", "", { "dependencies": { "@mysten/bcs": "^2.0.5" }, "peerDependencies": { "@mysten/sui": "^2.16.2" } }, "sha512-Pp5Vhgrdp6SOyBbAtgMPl45IhsQueZEEIDU1mSRHNjVwV0FpwV/pbMYeQk+htVtaEogsJRDZWkiAYlkTxuzwfQ=="],
 
     "@mysten/slush-wallet": ["@mysten/slush-wallet@1.0.5", "", { "dependencies": { "@mysten/utils": "^0.3.3", "@mysten/wallet-standard": "^0.20.3", "@mysten/window-wallet-core": "^0.1.6", "valibot": "^1.2.0" }, "peerDependencies": { "@mysten/sui": "^2.16.2" } }, "sha512-soP0eZW4uP2S2z5YH7eg0dZQZ7hZyY6F7D2H0Wv93wjFz9DSHlOf1b9mY+2kzH1oO7nSnpdRdL15v8+X3X7f6w=="],
 
@@ -1272,6 +1276,10 @@
     "proxy-addr": ["proxy-addr@2.0.7", "", { "dependencies": { "forwarded": "0.2.0", "ipaddr.js": "1.9.1" } }, "sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg=="],
 
     "punycode": ["punycode@2.3.1", "", {}, "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg=="],
+
+    "qr-code-styling": ["qr-code-styling@1.9.2", "", { "dependencies": { "qrcode-generator": "^1.4.4" } }, "sha512-RgJaZJ1/RrXJ6N0j7a+pdw3zMBmzZU4VN2dtAZf8ZggCfRB5stEQ3IoDNGaNhYY3nnZKYlYSLl5YkfWN5dPutg=="],
+
+    "qrcode-generator": ["qrcode-generator@1.5.2", "", {}, "sha512-pItrW0Z9HnDBnFmgiNrY1uxRdri32Uh9EjNYLPVC2zZ3ZRIIEqBoDgm4DkvDwNNDHTK7FNkmr8zAa77BYc9xNw=="],
 
     "qs": ["qs@6.15.1", "", { "dependencies": { "side-channel": "^1.1.0" } }, "sha512-6YHEFRL9mfgcAvql/XhwTvf5jKcOiiupt2FiJxHkiX1z4j7WL8J/jRHYLluORvc1XxB5rV20KoeK00gVJamspg=="],
 

@@ -67,8 +67,21 @@
   animation: checker-drift 12s linear infinite;
 }
 
+.bg-checker-dark {
+  background-color: #131a36;
+  background-image:
+    linear-gradient(45deg, #243364 26%, transparent 26%),
+    linear-gradient(135deg, #243364 26%, transparent 26%),
+    linear-gradient(45deg, transparent 75%, #243364 75%),
+    linear-gradient(135deg, transparent 75%, #243364 75%);
+  background-size: 128px 128px;
+  background-position: 0 0, 64px 0, 64px -64px, 0 64px;
+  animation: checker-drift 12s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .bg-checker {
+  .bg-checker,
+  .bg-checker-dark {
     animation: none;
   }
 }

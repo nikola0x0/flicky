@@ -8,6 +8,7 @@ import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
+import { useDusdcBalance } from "@/hooks/use-wallet-balances"
 
 const SIGN_IN_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -23,7 +24,7 @@ const NAV_TABS = [
     icon: "/icons/swords.png",
     featured: true,
   },
-  { to: "/game/shop", label: "shop", icon: "/icons/package.png" },
+  { to: "/game/shop", label: "shop", icon: "/icons/coins.png" },
   { to: "/game/inventory", label: "inv", icon: "/icons/inventory.png" },
 ] as const
 
@@ -37,23 +38,14 @@ const BEVEL_GRADIENT =
  */
 export default function GameLayout() {
   const [loginOpen, setLoginOpen] = useState(false)
+  const location = useLocation()
+  const isPvp = location.pathname === "/game/pvp"
 
   return (
     <>
-      <div
-        className="
-          bg-checker
-          flex min-h-dvh w-full items-center justify-center
-          px-3 py-1 sm:px-6
-        "
-      >
+      <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
         <div
-          className="
-            pixel-frame
-            flex w-full max-w-[440px] flex-col overflow-hidden
-            rounded-3xl bg-[#1b2548] font-pixel text-white
-            h-[calc(100dvh-0.5rem)] sm:max-h-[900px]
-          "
+          className={`pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl font-pixel text-white sm:max-h-[900px] ${isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}`}
         >
           <FrameHeader onSignInClick={() => setLoginOpen(true)} />
           <main className="flex-1 overflow-hidden">
@@ -80,11 +72,8 @@ function GameOutletTransition() {
   const location = useLocation()
   const prevPathRef = useRef<string | null>(null)
 
-  const tabIndex = (path: string) =>
-    NAV_TABS.findIndex((t) => t.to === path)
-  const prevIdx = prevPathRef.current
-    ? tabIndex(prevPathRef.current)
-    : -1
+  const tabIndex = (path: string) => NAV_TABS.findIndex((t) => t.to === path)
+  const prevIdx = prevPathRef.current ? tabIndex(prevPathRef.current) : -1
   const currIdx = tabIndex(location.pathname)
 
   let animClass = ""
@@ -113,31 +102,19 @@ function GameOutletTransition() {
 
 function FrameHeader({ onSignInClick }: { onSignInClick: () => void }) {
   const account = useCurrentAccount()
+  const location = useLocation()
+  const isShop = location.pathname === "/game/shop"
 
   return (
-    <header className="flex items-center justify-between gap-2 px-3 py-3">
+    <header
+      className={`flex justify-between gap-2 px-3 py-3 ${
+        isShop
+          ? "min-h-[128px] items-start bg-[url('/decorations/top-decor.png')] bg-[length:auto_100%] bg-repeat-x [image-rendering:pixelated]"
+          : "items-center"
+      } `}
+    >
       {account ? (
-        <Link
-          to="/profile"
-          aria-label="open profile"
-          className="flex items-center gap-5 transition-opacity hover:opacity-85"
-        >
-          <PlayerAvatar address={account.address} size={56} />
-          <div className="flex items-center gap-4">
-            <BalanceChip
-              icon="/tokens/usdc-icon.png"
-              amount="0.00"
-              label="wallet"
-              to="/game/shop"
-            />
-            <BalanceChip
-              icon="/tokens/manager-usdc.png"
-              amount="0.00"
-              label="manager"
-              to="/game/shop"
-            />
-          </div>
-        </Link>
+        <HeaderBalances address={account.address} />
       ) : (
         <PixelButton
           onClick={onSignInClick}
@@ -155,13 +132,39 @@ function FrameHeader({ onSignInClick }: { onSignInClick: () => void }) {
           </span>
         </PixelButton>
       )}
-      <MenuButton />
+      {!isShop && <MenuButton />}
     </header>
   )
 }
 
-
-
+function HeaderBalances({ address }: { address: string }) {
+  const { data: dusdc } = useDusdcBalance()
+  return (
+    <div className="flex items-center gap-5">
+      <Link
+        to="/profile"
+        aria-label="open profile"
+        className="transition-opacity hover:opacity-85"
+      >
+        <PlayerAvatar address={address} size={56} />
+      </Link>
+      <div className="flex items-center gap-4">
+        <BalanceChip
+          icon="/tokens/usdc-icon.png"
+          amount={(dusdc ?? 0).toFixed(2)}
+          label="wallet"
+          to="/game/shop"
+        />
+        <BalanceChip
+          icon="/tokens/manager-usdc.png"
+          amount="0.00"
+          label="manager"
+          to="/game/shop"
+        />
+      </div>
+    </div>
+  )
+}
 
 function FrameBottomNav() {
   return (
@@ -173,17 +176,10 @@ function FrameBottomNav() {
         {NAV_TABS.map((tab, i) => (
           <Fragment key={tab.to}>
             {i > 0 && (
-              <div
-                aria-hidden
-                className="w-px self-stretch bg-black/40"
-              />
+              <div aria-hidden className="w-px self-stretch bg-black/40" />
             )}
             {"featured" in tab && tab.featured ? (
-              <FeaturedNavTab
-                to={tab.to}
-                label={tab.label}
-                icon={tab.icon}
-              />
+              <FeaturedNavTab to={tab.to} label={tab.label} icon={tab.icon} />
             ) : (
               <NavTab to={tab.to} label={tab.label} icon={tab.icon} />
             )}
@@ -224,7 +220,7 @@ function NavTab({
           <img
             src={icon}
             alt={label}
-            className={`size-12 [image-rendering:pixelated] transition-transform duration-100 ${
+            className={`size-12 transition-transform duration-100 [image-rendering:pixelated] ${
               isActive ? "-translate-y-1" : ""
             }`}
           />
@@ -260,12 +256,7 @@ function FeaturedNavTab({
     >
       {({ isActive }) => (
         <div
-          className={`
-            featured-nav-tile
-            flex size-16 items-center justify-center
-            transition-transform duration-150
-            ${isActive ? "-translate-y-5" : "is-inactive -translate-y-2"}
-          `}
+          className={`featured-nav-tile flex size-16 items-center justify-center transition-transform duration-150 ${isActive ? "-translate-y-5" : "is-inactive -translate-y-2"} `}
         >
           <img
             src={icon}
