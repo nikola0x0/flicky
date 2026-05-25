@@ -42,8 +42,14 @@ export function handleDuelsRequest(req: Request, url: URL): Response | null {
       statusRaw === "PENDING" || statusRaw === "ACTIVE" || statusRaw === "COMPLETE"
         ? statusRaw
         : undefined
+    // `player` returns only duels where the address is creator OR
+    // challenger. Lets the UI build "My Duels" lists without pulling
+    // the global feed and filtering client-side.
+    const playerRaw = url.searchParams.get("player")
+    const player =
+      playerRaw && playerRaw.startsWith("0x") ? playerRaw : undefined
     try {
-      const duels = listRecentDuels(limit, status).map(toWire)
+      const duels = listRecentDuels(limit, status, player).map(toWire)
       return json({ duels })
     } catch (e) {
       return json(

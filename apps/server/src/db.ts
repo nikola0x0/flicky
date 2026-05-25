@@ -414,18 +414,28 @@ export function getDuel(id: string): DuelRow | null {
 export function listRecentDuels(
   limit: number,
   status?: DuelRow["status"],
+  player?: string,
 ): DuelRow[] {
-  const rows = status
-    ? getDb()
-        .query<DuelRowRaw, [string, number]>(
-          "SELECT * FROM duel WHERE status = ? ORDER BY last_updated_ms DESC LIMIT ?",
-        )
-        .all(status, limit)
-    : getDb()
-        .query<DuelRowRaw, [number]>(
-          "SELECT * FROM duel ORDER BY last_updated_ms DESC LIMIT ?",
-        )
-        .all(limit)
+  const db = getDb()
+  // Build the WHERE clause dynamically — both filters are optional and
+  // composable. `player` matches either side (creator OR challenger).
+  const where: string[] = []
+  const params: Array<string | number> = []
+  if (status) {
+    where.push("status = ?")
+    params.push(status)
+  }
+  if (player) {
+    where.push("(creator = ? OR challenger = ?)")
+    params.push(player, player)
+  }
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")} ` : ""
+  params.push(limit)
+  const rows = db
+    .query<DuelRowRaw, Array<string | number>>(
+      `SELECT * FROM duel ${whereSql}ORDER BY last_updated_ms DESC LIMIT ?`,
+    )
+    .all(...params)
   return rows.map(rowToDuel)
 }
 

@@ -2043,29 +2043,88 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                     if (!card) return false
                     return oracleTicks[card.oracle_id] !== undefined
                   }).length
+                const myPnl = runningPnl(roomState, meSide, deck, oracleTicks)
+                const oppPnl = runningPnl(roomState, oppSide, deck, oracleTicks)
+                const lead = myPnl - oppPnl
+                const isComplete = roomState.status === 'COMPLETE'
+                // Banner reflects the duel-relative comparison the
+                // contract uses to pick a winner: val0 vs val1 =
+                // myNet vs oppNet (since payout-premium = net).
+                const banner = (() => {
+                  if (lead > 0n)
+                    return {
+                      bg: 'border-emerald-700 bg-emerald-950/40',
+                      emoji: '🏆',
+                      label: isComplete
+                        ? 'You win the side-pot'
+                        : 'You are leading',
+                      sub: `+${(Number(lead) / 1_000_000).toFixed(4)} dUSDC ahead`,
+                    }
+                  if (lead < 0n)
+                    return {
+                      bg: 'border-red-700 bg-red-950/40',
+                      emoji: isComplete ? '💀' : '⚠️',
+                      label: isComplete
+                        ? 'Opponent wins the side-pot'
+                        : 'Opponent is leading',
+                      sub: `${(Number(lead) / 1_000_000).toFixed(4)} dUSDC behind`,
+                    }
+                  return {
+                    bg: 'border-yellow-700 bg-yellow-950/40',
+                    emoji: '🤝',
+                    label: isComplete
+                      ? 'Tie — stakes refunded'
+                      : 'Even — no lead yet',
+                    sub: 'Net PnL equal on both sides',
+                  }
+                })()
                 return (
-                  <div className="grid grid-cols-2 gap-2 rounded border border-gray-800 bg-gray-950 p-2 text-[11px]">
-                    <PnlSummary
-                      label={
-                        myRole === 'creator'
-                          ? 'You (creator)'
-                          : myRole === 'challenger'
-                            ? 'You (challenger)'
-                            : 'Creator'
-                      }
-                      pnl={runningPnl(roomState, meSide, deck, oracleTicks)}
-                      settledCount={roomState.settledCount}
-                      totalCards={roomState.cardCount}
-                      liveCount={liveCountFor(meSide)}
-                      highlight
-                    />
-                    <PnlSummary
-                      label="Opponent"
-                      pnl={runningPnl(roomState, oppSide, deck, oracleTicks)}
-                      settledCount={roomState.settledCount}
-                      totalCards={roomState.cardCount}
-                      liveCount={liveCountFor(oppSide)}
-                    />
+                  <div className="space-y-2">
+                    <div
+                      className={`flex items-center justify-between gap-3 rounded border ${banner.bg} px-3 py-2`}
+                    >
+                      <div>
+                        <div className="text-sm font-semibold text-gray-100">
+                          {banner.emoji} {banner.label}
+                        </div>
+                        <div className="text-[10px] text-gray-400">
+                          {banner.sub} ·{' '}
+                          {isComplete
+                            ? 'final result'
+                            : `${roomState.settledCount}/${roomState.cardCount} settled — score updates as cards settle`}
+                        </div>
+                      </div>
+                      <div className="text-right text-[10px] text-gray-500">
+                        decided by contract
+                        <br />
+                        val0 = p0_payout + p1_premium
+                        <br />
+                        val1 = p1_payout + p0_premium
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 rounded border border-gray-800 bg-gray-950 p-2 text-[11px]">
+                      <PnlSummary
+                        label={
+                          myRole === 'creator'
+                            ? 'You (creator)'
+                            : myRole === 'challenger'
+                              ? 'You (challenger)'
+                              : 'Creator'
+                        }
+                        pnl={myPnl}
+                        settledCount={roomState.settledCount}
+                        totalCards={roomState.cardCount}
+                        liveCount={liveCountFor(meSide)}
+                        highlight
+                      />
+                      <PnlSummary
+                        label="Opponent"
+                        pnl={oppPnl}
+                        settledCount={roomState.settledCount}
+                        totalCards={roomState.cardCount}
+                        liveCount={liveCountFor(oppSide)}
+                      />
+                    </div>
                   </div>
                 )
               })()}
