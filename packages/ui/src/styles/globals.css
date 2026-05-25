@@ -473,3 +473,31 @@
     cursor: pointer;
   }
 }
+
+/* ─── Route transitions ───────────────────────────────────────────── */
+@keyframes route-swipe-from-right {
+  from {
+    transform: translate3d(100%, 0, 0);
+    opacity: 0.35;
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+}
+@keyframes route-swipe-from-left {
+  from {
+    transform: translate3d(-100%, 0, 0);
+    opacity: 0.35;
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+}
+.route-swipe-from-right {
+  animation: route-swipe-from-right 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.route-swipe-from-left {
+  animation: route-swipe-from-left 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}

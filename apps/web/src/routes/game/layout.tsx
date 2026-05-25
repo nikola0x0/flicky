@@ -1,5 +1,5 @@
-import { Fragment, useState } from "react"
-import { Link, NavLink, Outlet } from "react-router"
+import { Fragment, useEffect, useRef, useState } from "react"
+import { Link, NavLink, Outlet, useLocation } from "react-router"
 import type { CSSProperties } from "react"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 
@@ -56,8 +56,8 @@ export default function GameLayout() {
           "
         >
           <FrameHeader onSignInClick={() => setLoginOpen(true)} />
-          <main className="flex-1 overflow-y-auto">
-            <Outlet />
+          <main className="flex-1 overflow-hidden">
+            <GameOutletTransition />
           </main>
           <FrameBottomNav />
         </div>
@@ -65,6 +65,49 @@ export default function GameLayout() {
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
     </>
+  )
+}
+
+/**
+ * Wraps the routed game-page <Outlet /> with a horizontal swipe
+ * transition. Direction is computed from NAV_TABS order: moving to a
+ * tab further right slides in from the right; moving left slides from
+ * the left. Tabs not in NAV_TABS (initial mount, deep links) get no
+ * transition. Inner div is keyed on pathname to force remount per
+ * navigation so the CSS keyframe replays.
+ */
+function GameOutletTransition() {
+  const location = useLocation()
+  const prevPathRef = useRef<string | null>(null)
+
+  const tabIndex = (path: string) =>
+    NAV_TABS.findIndex((t) => t.to === path)
+  const prevIdx = prevPathRef.current
+    ? tabIndex(prevPathRef.current)
+    : -1
+  const currIdx = tabIndex(location.pathname)
+
+  let animClass = ""
+  if (prevPathRef.current && prevIdx !== -1 && currIdx !== -1) {
+    animClass =
+      currIdx > prevIdx
+        ? "route-swipe-from-right"
+        : currIdx < prevIdx
+          ? "route-swipe-from-left"
+          : ""
+  }
+
+  useEffect(() => {
+    prevPathRef.current = location.pathname
+  }, [location.pathname])
+
+  return (
+    <div
+      key={location.pathname}
+      className={`h-full overflow-y-auto ${animClass}`}
+    >
+      <Outlet />
+    </div>
   )
 }
 

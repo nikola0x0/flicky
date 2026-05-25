@@ -26,7 +26,11 @@ export default function Profile() {
 
   // Signed out — bounce back to /game/home where they can sign in.
   if (!account) {
-    return <Link to="/game/home" className="text-white underline">go back</Link>
+    return (
+      <Link to="/game/home" className="text-white underline">
+        go back
+      </Link>
+    )
   }
 
   const address = account.address
@@ -34,7 +38,7 @@ export default function Profile() {
 
   return (
     <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
-      <div className="pixel-frame flex w-full max-w-[440px] flex-col overflow-hidden rounded-3xl bg-[#1b2548] font-pixel text-white h-[calc(100dvh-0.5rem)] sm:max-h-[900px]">
+      <div className="pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl bg-[#1b2548] font-pixel text-white sm:max-h-[900px]">
         <ProfileHeader onBack={() => navigate(-1)} />
 
         <main className="flex-1 overflow-y-auto px-4 pb-6">
@@ -44,7 +48,7 @@ export default function Profile() {
               <button
                 type="button"
                 aria-label="change avatar"
-                className="absolute -bottom-1 -right-1 grid size-8 place-items-center rounded-full bg-black text-white shadow-[0_0_0_2px_#1b2548]"
+                className="absolute -right-1 -bottom-1 grid size-8 place-items-center rounded-full bg-black text-white shadow-[0_0_0_2px_#1b2548]"
               >
                 <img
                   src="/icons/camera_edit.png"
@@ -75,27 +79,16 @@ export default function Profile() {
                 <span className="tabular-nums">{short}</span>
                 <span className="text-base">⎘</span>
               </button>
-              <p className="text-xs uppercase tracking-[0.18em] text-white/55">
+              <p className="text-xs tracking-[0.18em] text-white/55 uppercase">
                 connected via google
               </p>
-              <PixelButton
-                variant="bordered"
-                style={BLUE_BRAND_STYLE}
-                className="mt-2 h-10 self-start px-4 text-xs"
-              >
-                verify identity
-              </PixelButton>
             </div>
           </section>
 
           <div className="my-5 h-px bg-white/10" />
 
           <section className="grid grid-cols-2 gap-3 text-center">
-            <Stat
-              icon="/tokens/usdc-icon.png"
-              label="wallet"
-              value="0.00"
-            />
+            <Stat icon="/tokens/usdc-icon.png" label="wallet" value="0.00" />
             <Stat
               icon="/tokens/manager-usdc.png"
               label="predict manager"
@@ -125,7 +118,7 @@ export default function Profile() {
             <button
               type="button"
               style={BLUE_BRAND_STYLE}
-              className="default-btn-green-container flex w-full items-center justify-between px-4 py-3 text-base uppercase tracking-wider text-white"
+              className="default-btn-green-container flex w-full items-center justify-between px-4 py-3 text-base tracking-wider text-white uppercase"
             >
               <span className="flex items-center gap-2">
                 <img
@@ -134,7 +127,7 @@ export default function Profile() {
                   aria-hidden
                   className="size-5 [image-rendering:pixelated]"
                 />
-                1v1
+                PvP Match History
               </span>
               <span className="text-sm">▾</span>
             </button>
@@ -152,27 +145,36 @@ export default function Profile() {
 function ProfileHeader({ onBack }: { onBack: () => void }) {
   return (
     <header className="flex items-center justify-between gap-2 px-3 py-3">
-      <PixelButton
-        onClick={onBack}
-        style={BLUE_BRAND_STYLE}
-        aria-label="back"
-        className="size-10 !p-0"
-      >
-        <span className="text-base leading-none">←</span>
-      </PixelButton>
-      <div className="flex items-center gap-4">
-        <BalanceChip
-          icon="/tokens/usdc-icon.png"
-          amount="0.00"
-          label="wallet"
-          to="/game/shop"
-        />
-        <BalanceChip
-          icon="/tokens/manager-usdc.png"
-          amount="0.00"
-          label="manager"
-          to="/game/shop"
-        />
+      <div className="flex items-center gap-5">
+        <div className="flex size-14 items-center justify-center">
+          <PixelButton
+            onClick={onBack}
+            style={BLUE_BRAND_STYLE}
+            aria-label="back"
+            className="-ml-8 h-8 w-16 !p-0"
+          >
+            <img
+              src="/icons/arrow_blue_left.png"
+              alt=""
+              aria-hidden
+              className="size-5 [image-rendering:pixelated]"
+            />
+          </PixelButton>
+        </div>
+        <div className="flex items-center gap-4">
+          <BalanceChip
+            icon="/tokens/usdc-icon.png"
+            amount="0.00"
+            label="wallet"
+            to="/game/shop"
+          />
+          <BalanceChip
+            icon="/tokens/manager-usdc.png"
+            amount="0.00"
+            label="manager"
+            to="/game/shop"
+          />
+        </div>
       </div>
       <MenuButton />
     </header>
@@ -196,7 +198,7 @@ function Stat({
         aria-hidden
         className="size-8 [image-rendering:pixelated]"
       />
-      <span className="text-xs uppercase tracking-wider text-white/55">
+      <span className="text-xs tracking-wider text-white/55 uppercase">
         {label}
       </span>
       <span className="text-2xl tabular-nums">{value}</span>
@@ -218,7 +220,7 @@ function ActionTile({
       type="button"
       onClick={onClick}
       style={BLUE_BRAND_STYLE}
-      className="default-btn-green-container flex h-16 items-center justify-between gap-1 px-3 text-sm uppercase tracking-wider text-white"
+      className="default-btn-green-container flex h-16 items-center justify-between gap-1 px-3 text-sm tracking-wider text-white uppercase"
     >
       <span>{label}</span>
       <img
@@ -230,7 +232,6 @@ function ActionTile({
     </button>
   )
 }
-
 
 function shortAddress(addr: string) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`

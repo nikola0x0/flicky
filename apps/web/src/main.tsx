@@ -20,6 +20,7 @@ import GameLayout from "@/routes/game/layout.tsx"
 import GameHome from "@/routes/game/home.tsx"
 import GamePvp from "@/routes/game/pvp.tsx"
 import GameShop from "@/routes/game/shop.tsx"
+import GameComingSoon from "@/routes/game/coming-soon.tsx"
 
 const router = createBrowserRouter([
   { path: "/", element: <Landing /> },
@@ -33,8 +34,8 @@ const router = createBrowserRouter([
       { path: "home", element: <GameHome /> },
       { path: "pvp", element: <GamePvp /> },
       { path: "shop", element: <GameShop /> },
-      { path: "rank", element: <GameHome /> },
-      { path: "inventory", element: <GameHome /> },
+      { path: "rank", element: <GameComingSoon /> },
+      { path: "inventory", element: <GameComingSoon /> },
     ],
   },
 ])
