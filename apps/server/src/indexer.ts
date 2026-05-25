@@ -35,7 +35,11 @@ import {
 } from "./db"
 import { makeLogger, shortId } from "./log"
 import { applyDuelOutcome } from "./mmr"
-import { broadcastRoom } from "./ws/matchmaking"
+import {
+  broadcastRoom,
+  sendToAddresses,
+  takeMatchedPair,
+} from "./ws/matchmaking"
 
 const log = makeLogger("indexer")
 
@@ -72,6 +76,20 @@ interface DuelLite {
   p1Premium: bigint
   startedAtMs: bigint
   cardOutcomes: CardOutcome[]
+  /**
+   * Per-card swipes (settled or not). Exposed alongside `cardOutcomes`
+   * so the UI can render running PnL — premium paid so far + which
+   * direction each player swiped — without waiting for settlement,
+   * and so F5 hydrates the local view of "what have I swiped" from
+   * the chain. One entry per card slot that has at least one swipe.
+   */
+  swipes: PendingSwipe[]
+}
+
+interface PendingSwipe {
+  cardIdx: number
+  p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
+  p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
 }
 
 interface CardRaw {
@@ -161,6 +179,21 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
   const settlements = f.card_settlements ?? []
   const p0SwipesRaw = f.p0_swipes ?? []
   const p1SwipesRaw = f.p1_swipes ?? []
+  // All per-card swipes (settled or not). Powers running-PnL display
+  // and F5 hydration in the panel. Settled cards still appear here
+  // alongside the matching `cardOutcomes` entry — clients can join
+  // by cardIdx.
+  const swipes: PendingSwipe[] = []
+  const swipeSlotCount = Math.max(
+    p0SwipesRaw.length,
+    p1SwipesRaw.length,
+    cards.length,
+  )
+  for (let i = 0; i < swipeSlotCount; i++) {
+    const p0 = parseSwipeRaw(p0SwipesRaw[i])
+    const p1 = parseSwipeRaw(p1SwipesRaw[i])
+    if (p0 || p1) swipes.push({ cardIdx: i, p0Swipe: p0, p1Swipe: p1 })
+  }
   for (let i = 0; i < settlements.length; i++) {
     const price = parseSettlement(settlements[i])
     if (price === null) continue
@@ -198,6 +231,7 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
     p1Premium: BigInt(f.p1_premium ?? "0"),
     startedAtMs: BigInt(f.started_at_ms ?? "0"),
     cardOutcomes,
+    swipes,
   }
 }
 
@@ -268,6 +302,26 @@ export class DuelIndexer {
         const p = e.parsedJson as Record<string, unknown> | undefined
         const id = p?.duel_id as string | undefined
         if (id) touched.add(normalizeSuiObjectId(id))
+        // DuelCreated → look up the matched pair and push the duel id
+        // to the challenger so they can immediately call join_duel
+        // without waiting for an HTTP poll.
+        if (eventType.endsWith("::DuelCreated") && p && id) {
+          const duelId = normalizeSuiObjectId(id)
+          const creator = p.creator as string | undefined
+          if (creator) {
+            const challengerAddr = takeMatchedPair(creator)
+            if (challengerAddr) {
+              sendToAddresses([challengerAddr], {
+                type: "duel_assigned",
+                duelId,
+                creator,
+              })
+              log.info(
+                `duel_assigned → ${shortId(challengerAddr)} duel=${shortId(duelId)}`,
+              )
+            }
+          }
+        }
         // CardSettled (new contract) emits just `settlement_price` —
         // per-card scores are no longer in the event. We still mirror
         // the outcome eagerly using the strike from the duel's mirror
@@ -399,6 +453,7 @@ export class DuelIndexer {
         p1Premium: d.p1Premium.toString(),
         startedAtMs: Number(d.startedAtMs),
         cardOutcomes: d.cardOutcomes,
+        swipes: d.swipes,
       })
     } catch {
       // db.ts already logged the error with context.
@@ -419,6 +474,7 @@ export class DuelIndexer {
       challenger: d.challenger,
       stakeCoinType: d.stakeCoinType,
       cardOutcomes: d.cardOutcomes,
+      swipes: d.swipes,
     })
   }
 

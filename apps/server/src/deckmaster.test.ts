@@ -8,6 +8,7 @@ import {
   hashToHex,
   knownHashCount,
   rememberDeck,
+  snapToTick,
   strikePctOf,
   type OracleSnapshot,
 } from "./deckmaster"
@@ -21,12 +22,16 @@ function addr(suffix: string): string {
 const SEED_A = new Uint8Array(32).fill(0xa1)
 const SEED_B = new Uint8Array(32).fill(0xb2)
 
+// minStrike=0, tickSize=1 means snapToTick is a no-op for these fixtures,
+// so strike-bucket assertions (`strikePctOf` returning exactly 85/95/100…)
+// stay valid. The `snaps strikes to tick grid` test below covers the
+// real tick-snapping behavior.
 const FIVE_ORACLES: OracleSnapshot[] = [
-  { id: addr("01"), expiry: 1_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n },
-  { id: addr("02"), expiry: 2_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n },
-  { id: addr("03"), expiry: 3_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n },
-  { id: addr("04"), expiry: 4_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n },
-  { id: addr("05"), expiry: 5_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n },
+  { id: addr("01"), expiry: 1_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n, minStrike: 0n, tickSize: 1n },
+  { id: addr("02"), expiry: 2_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n, minStrike: 0n, tickSize: 1n },
+  { id: addr("03"), expiry: 3_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n, minStrike: 0n, tickSize: 1n },
+  { id: addr("04"), expiry: 4_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n, minStrike: 0n, tickSize: 1n },
+  { id: addr("05"), expiry: 5_000_000n, spot: 100_000_000_000n, forward: 100_000_000_000n, minStrike: 0n, tickSize: 1n },
 ]
 
 describe("buildDeckFromOracles", () => {
@@ -126,6 +131,48 @@ const seen = new Set<string>()
     ).toBytes()
     const expected = "0x" + createHash("sha256").update(expectedBytes).digest("hex")
     expect(deck.hashHex).toBe(expected)
+  })
+})
+
+describe("snapToTick", () => {
+  test("floors to nearest tick boundary above min_strike", () => {
+    // grid: 100, 105, 110, 115, … (min=100, tick=5)
+    expect(snapToTick(112n, 100n, 5n)).toBe(110n)
+    expect(snapToTick(115n, 100n, 5n)).toBe(115n)
+    expect(snapToTick(119n, 100n, 5n)).toBe(115n)
+  })
+
+  test("clamps strike below min_strike to min_strike", () => {
+    expect(snapToTick(50n, 100n, 5n)).toBe(100n)
+    expect(snapToTick(0n, 100n, 5n)).toBe(100n)
+  })
+
+  test("snapped output satisfies on-chain assert_valid_strike", () => {
+    // (strike - min) % tick == 0 && strike >= min
+    const min = 1_000_000n
+    const tick = 100_000n
+    for (const raw of [0n, 999_999n, 1_000_001n, 1_500_001n, 9_999_999n]) {
+      const snapped = snapToTick(raw, min, tick)
+      expect(snapped >= min).toBe(true)
+      expect((snapped - min) % tick).toBe(0n)
+    }
+  })
+
+  test("buildDeckFromOracles snaps strikes to oracle grid", () => {
+    // forward=100_000_000_000, pct ∈ {85, 95, 100, …, 115} all divisible by 100,
+    // so use a tickSize=137 (prime-ish) that never divides forward*pct/100 cleanly.
+    const tick = 137n
+    const min = 1_000n
+    const oracles: OracleSnapshot[] = FIVE_ORACLES.map((o) => ({
+      ...o,
+      minStrike: min,
+      tickSize: tick,
+    }))
+    const deck = buildDeckFromOracles(oracles, SEED_A)
+    for (const card of deck.cards) {
+      expect(card.strike >= min).toBe(true)
+      expect((card.strike - min) % tick).toBe(0n)
+    }
   })
 })
 

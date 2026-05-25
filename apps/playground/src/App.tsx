@@ -10,8 +10,10 @@ import OraclePanel from './components/panels/OraclePanel'
 import SwapPanel from './components/panels/SwapPanel'
 import DuelPanel from './components/panels/DuelPanel'
 import ChatPanel from './components/panels/ChatPanel'
+import E2EFlowPanel from './components/panels/E2EFlowPanel'
+import MyDuelsPanel from './components/panels/MyDuelsPanel'
 
-type Panel = 'manager' | 'trading' | 'lp' | 'keeper' | 'oracle' | 'swap' | 'chat'
+type Panel = 'e2e' | 'duels' | 'manager' | 'trading' | 'lp' | 'keeper' | 'oracle' | 'swap' | 'chat'
 
 interface PanelOutput {
   type: 'success' | 'error' | 'info'
@@ -22,7 +24,7 @@ interface PanelOutput {
 
 export default function App() {
   const account = useCurrentAccount()
-  const [activePanel, setActivePanel] = useState<Panel>('manager')
+  const [activePanel, setActivePanel] = useState<Panel>('e2e')
   const [output, setOutput] = useState<PanelOutput | null>(null)
 
   // Custom router state
@@ -42,6 +44,8 @@ export default function App() {
   }
 
   const panels: Record<Panel, { label: string; icon: string }> = {
+    e2e: { label: 'E2E Demo', icon: '🎯' },
+    duels: { label: 'My Duels', icon: '⚔️' },
     manager: { label: 'Manager', icon: '🗃️' },
     trading: { label: 'Trading', icon: '💹' },
     lp: { label: 'LP', icon: '💰' },
@@ -172,6 +176,8 @@ export default function App() {
             {activePanel === 'oracle' && <OraclePanel onOutput={setOutput} />}
             {activePanel === 'swap' && <SwapPanel onOutput={setOutput} />}
             {activePanel === 'chat' && <ChatPanel onOutput={setOutput} />}
+            {activePanel === 'e2e' && <E2EFlowPanel onOutput={setOutput} />}
+            {activePanel === 'duels' && <MyDuelsPanel onOutput={setOutput} />}
           </div>
 
           {/* Right Panel: Output */}

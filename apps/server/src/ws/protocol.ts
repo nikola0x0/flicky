@@ -53,6 +53,16 @@ export type ServerMsg =
       opponent: string
     }
   | {
+      /**
+       * Pushed to a matched challenger the moment the indexer sees
+       * their creator's `DuelCreated` event on chain — saves a polling
+       * roundtrip vs hitting `/duels/recent` every couple seconds.
+       */
+      type: "duel_assigned"
+      duelId: string
+      creator: string
+    }
+  | {
       type: "room_state"
       duelId: string
       status: "PENDING" | "ACTIVE" | "COMPLETE"
@@ -82,6 +92,17 @@ export type ServerMsg =
         /** Signed decimal real PnL = (won ? quantity : 0) - premium. Null if no swipe. */
         p0Pnl: string | null
         p1Pnl: string | null
+        p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
+        p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+      }>
+      /**
+       * Per-card swipes captured from chain — both settled and pending.
+       * The UI uses this to render running PnL (premium paid so far)
+       * and to rehydrate `swipeResults` after F5 without losing the
+       * "what have I swiped" memory.
+       */
+      swipes: Array<{
+        cardIdx: number
         p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
         p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
       }>

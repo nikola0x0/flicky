@@ -347,14 +347,23 @@ export class Keeper {
         }
       }
       for (const r of redeems) {
+        // `market_key::up/down(oracle_id: ID, expiry: u64, strike: u64)`
+        // — first arg is *pure* ID, not an object ref. Passing
+        // tx.object here would also cause the SDK to dedupe the
+        // oracle input with the &OracleSVI usage in redeem below
+        // and fail resolution with InvalidUsageOfPureArg.
         const mk = tx.moveCall({
           target: `${env.deepbookPredictPackageId}::market_key::${r.isUp ? "up" : "down"}`,
           arguments: [
-            tx.object(r.oracleId),
+            tx.pure.id(r.oracleId),
             tx.pure.u64(r.oracleExpiry),
             tx.pure.u64(r.strike),
           ],
         })
+        // `redeem_permissionless(Predict, Manager, &Oracle, MarketKey,
+        // quantity, &Clock, &mut TxContext)` — Clock is required; ctx
+        // is auto-injected. Missing the Clock trips "Incorrect number
+        // of arguments".
         tx.moveCall({
           target: `${env.deepbookPredictPackageId}::predict::redeem_permissionless`,
           typeArguments: [env.dusdcCoinType],
@@ -364,6 +373,7 @@ export class Keeper {
             tx.object(r.oracleId),
             mk,
             tx.pure.u64(r.quantity),
+            tx.object("0x6"),
           ],
         })
       }
