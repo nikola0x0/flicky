@@ -2028,13 +2028,13 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                 {nextSwipeIdx < 5 ? `#${nextSwipeIdx}` : '— done'}
               </span>
             </div>
-            <div className="grid grid-cols-5 gap-1.5">
+            <div className="space-y-2">
               {deck.cards.map((c, i) => {
-                const swipe = swipeResults[i]
+                const swipe = swipeResults.find((s) => s.cardIdx === i)
                 const outcome = roomState.cardOutcomes.find((o) => o.cardIdx === i)
                 const tick = oracleTicks[c.oracle_id]
                 return (
-                  <SwipeTile
+                  <SwipeRow
                     key={i}
                     idx={i}
                     card={c}
@@ -2492,11 +2492,18 @@ function CardTile({
 }
 
 /**
- * Card tile used during the swipe phase. Adds: status pill (Active/Pending/Settled),
- * settle price when known, the player's chosen direction (if swiped),
- * inline UP/DOWN buttons for the current card.
+ * Detailed per-card row used during the swipe phase — mirrors the
+ * "Deck Cards & Oracle Status" detail in DuelPanel: index badge, strike,
+ * a 3-state oracle status badge (Active / Awaiting settle / Settled) with
+ * the live spot or settlement price, the full oracle id, the live
+ * UP/DOWN leaning, and an "Expires in" countdown + absolute timestamp —
+ * plus the inline swipe controls / chosen-direction badge.
+ *
+ * Status is derived without an extra oracle read: `Settled` once the
+ * indexer has a cardOutcome, `Awaiting settle` once expiry passes with no
+ * outcome yet, else `Active`.
  */
-function SwipeTile({
+function SwipeRow({
   idx,
   card,
   swipe,
@@ -2521,85 +2528,131 @@ function SwipeTile({
 }) {
   const settled = !!outcome
   const remainingMs = card.expiry ? Number(card.expiry) - nowMs : 0
+  const expired = card.expiry ? remainingMs <= 0 : false
+  const strikeUsd = (Number(card.strike) / 1e9).toFixed(2)
+  const spotUsd = tick && tick.spot !== '0' ? (Number(tick.spot) / 1e9).toFixed(2) : null
+  const fwdUsd =
+    tick && tick.forward !== '0' ? (Number(tick.forward) / 1e9).toFixed(2) : spotUsd
+  // Live leaning: forward (fallback spot) vs strike.
+  const refRaw = tick
+    ? BigInt(tick.forward !== '0' ? tick.forward : tick.spot)
+    : null
+  const leaningUp = refRaw !== null ? refRaw > BigInt(card.strike) : null
+
+  const statusBadge = settled ? (
+    <span className="rounded border border-green-900 bg-green-950 px-1.5 py-0.5 text-[9px] font-mono text-green-400">
+      Settled (${(Number(outcome.settlementPrice) / 1e9).toFixed(2)}) ·{' '}
+      {outcome.upWon ? 'UP won' : 'DOWN won'}
+    </span>
+  ) : expired ? (
+    <span className="animate-pulse rounded border border-yellow-900 bg-yellow-950 px-1.5 py-0.5 text-[9px] font-mono text-yellow-400">
+      Awaiting settle{spotUsd ? ` (Spot: $${spotUsd})` : ''}
+    </span>
+  ) : (
+    <span className="rounded border border-blue-900 bg-blue-950 px-1.5 py-0.5 text-[9px] font-mono text-blue-400">
+      Active{spotUsd ? ` (Spot: $${spotUsd})` : ''}
+    </span>
+  )
+
+  const expiryTime = card.expiry
+    ? new Date(Number(card.expiry)).toLocaleString()
+    : '—'
   const countdownColor =
     remainingMs <= 0
-      ? 'text-red-400'
+      ? 'text-red-400 font-bold'
       : remainingMs < 60_000
-        ? 'text-yellow-400'
-        : 'text-gray-500'
-  const upMark = tick
-    ? BigInt(tick.spot) > BigInt(card.strike)
-      ? 'UP'
-      : 'DOWN'
-    : '—'
+        ? 'text-yellow-400 font-bold'
+        : 'text-gray-200'
+
   const border = settled
-    ? 'border-purple-700 bg-purple-950/30'
+    ? 'border-purple-800 bg-purple-950/20'
     : swipe
-      ? 'border-emerald-700 bg-emerald-950/30'
+      ? 'border-emerald-800 bg-emerald-950/20'
       : isCurrent
-        ? 'border-blue-600 bg-blue-950/30'
-        : 'border-gray-800 bg-gray-950'
+        ? 'border-blue-600 bg-blue-950/20'
+        : 'border-gray-800 bg-gray-950/40'
+
   return (
-    <div className={`rounded border ${border} p-2 text-center text-[10px]`}>
-      <div className="flex items-center justify-between">
-        <span className="text-gray-500">#{idx}</span>
-        {settled ? (
-          <span className="rounded bg-purple-800 px-1 py-px text-[8px] font-semibold text-purple-100">
-            SET
+    <div
+      className={`flex flex-col gap-2 rounded border ${border} p-2.5 sm:flex-row sm:items-center sm:justify-between`}
+    >
+      {/* Identity + status */}
+      <div className="flex items-start gap-3">
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-800 text-[10px] font-bold text-gray-300">
+          {idx}
+        </span>
+        <div className="space-y-0.5 text-left">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-gray-200">
+              Card {idx} · Strike ${strikeUsd}
+            </span>
+            {statusBadge}
+          </div>
+          <span
+            className="block max-w-[260px] truncate text-[10px] font-mono text-gray-500"
+            title={card.oracle_id}
+          >
+            Oracle: {card.oracle_id}
           </span>
+          {!settled && fwdUsd && leaningUp !== null && (
+            <span className="text-[10px]">
+              <span className="text-gray-500">live ${fwdUsd} → </span>
+              <span className={leaningUp ? 'text-emerald-400' : 'text-red-400'}>
+                {leaningUp ? '⬆ UP leading' : '⬇ DOWN leading'}
+              </span>
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Expiry countdown */}
+      <div className="text-left font-mono text-[10px] sm:text-right">
+        <span className="block text-[9px] uppercase tracking-wider text-gray-500">
+          Expires in
+        </span>
+        <span className={countdownColor}>{formatCountdown(remainingMs)}</span>
+        <span className="block text-[9px] text-gray-600" title={expiryTime}>
+          @ {expiryTime}
+        </span>
+      </div>
+
+      {/* Swipe action / chosen direction */}
+      <div className="shrink-0 sm:w-32">
+        {swipe ? (
+          <div
+            className={`rounded px-2 py-1.5 text-center text-xs font-semibold ${
+              swipe.isUp
+                ? 'bg-emerald-900/40 text-emerald-300'
+                : 'bg-red-900/40 text-red-300'
+            }`}
+          >
+            {swipe.isUp ? '⬆ UP' : '⬇ DOWN'} swiped
+          </div>
+        ) : isCurrent ? (
+          <div className="flex gap-1">
+            <button
+              onClick={onUp}
+              disabled={busy}
+              className="flex-1 rounded bg-emerald-700 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-40"
+              title="Predict UP"
+            >
+              ⬆ UP
+            </button>
+            <button
+              onClick={onDown}
+              disabled={busy}
+              className="flex-1 rounded bg-red-700 py-1.5 text-xs font-semibold text-white hover:bg-red-600 disabled:opacity-40"
+              title="Predict DOWN"
+            >
+              ⬇ DOWN
+            </button>
+          </div>
         ) : (
-          <span className="text-[8px] text-gray-500">live</span>
+          <div className="rounded bg-gray-900 px-2 py-1.5 text-center text-[10px] text-gray-600">
+            🔒 locked (swipe in order)
+          </div>
         )}
       </div>
-      <div className="mt-1 font-semibold text-gray-200">
-        ${(Number(card.strike) / 1e9).toFixed(0)}
-      </div>
-      {!settled && card.expiry && (
-        <div className={`text-[8px] ${countdownColor}`} title="oracle expiry">
-          ⏱ {formatCountdown(remainingMs)}
-        </div>
-      )}
-      {settled ? (
-        <div className="mt-0.5 text-[9px] text-purple-300">
-          @ ${(Number(outcome.settlementPrice) / 1e9).toFixed(0)}
-          <br />
-          <span className={outcome.upWon ? 'text-emerald-400' : 'text-red-400'}>
-            {outcome.upWon ? 'UP won' : 'DOWN won'}
-          </span>
-        </div>
-      ) : (
-        <div className="mt-0.5 text-[9px] text-gray-500">spot {upMark}</div>
-      )}
-      {swipe ? (
-        <div
-          className={`mt-1 text-[11px] font-semibold ${
-            swipe.isUp ? 'text-emerald-300' : 'text-red-300'
-          }`}
-        >
-          {swipe.isUp ? '⬆ UP' : '⬇ DOWN'}
-        </div>
-      ) : isCurrent ? (
-        <div className="mt-1 flex gap-0.5">
-          <button
-            onClick={onUp}
-            disabled={busy}
-            className="flex-1 rounded bg-emerald-700 py-1 text-white hover:bg-emerald-600 disabled:opacity-40"
-            title="Predict UP"
-          >
-            ⬆
-          </button>
-          <button
-            onClick={onDown}
-            disabled={busy}
-            className="flex-1 rounded bg-red-700 py-1 text-white hover:bg-red-600 disabled:opacity-40"
-            title="Predict DOWN"
-          >
-            ⬇
-          </button>
-        </div>
-      ) : (
-        <div className="mt-1 text-gray-600">—</div>
-      )}
     </div>
   )
 }
