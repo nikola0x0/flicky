@@ -46,6 +46,9 @@ interface DuelLite {
   cardSettlements: (bigint | null)[]
   p0Swipes: (SwipeLite | null)[]
   p1Swipes: (SwipeLite | null)[]
+  p0NextCardIdx: number
+  p1NextCardIdx: number
+  startedAtMs: bigint
 }
 
 const STATUS_MAP: Record<string, "PENDING" | "ACTIVE" | "COMPLETE"> = {
@@ -97,6 +100,9 @@ export function parseDuelFromObject(
     card_settlements: Array<string | null>
     p0_swipes: Array<RawSwipe | null>
     p1_swipes: Array<RawSwipe | null>
+    p0_next_card_idx: string | number
+    p1_next_card_idx: string | number
+    started_at_ms: string | number
   }
   if (!f.id?.id || f.status === undefined) return null
   const typeMatch = type?.match(/Duel<(.+)>$/)
@@ -121,6 +127,9 @@ export function parseDuelFromObject(
     ),
     p0Swipes: f.p0_swipes.map(parseSwipe),
     p1Swipes: f.p1_swipes.map(parseSwipe),
+    p0NextCardIdx: f.p0_next_card_idx !== undefined ? Number(f.p0_next_card_idx) : 0,
+    p1NextCardIdx: f.p1_next_card_idx !== undefined ? Number(f.p1_next_card_idx) : 0,
+    startedAtMs: f.started_at_ms !== undefined ? BigInt(f.started_at_ms) : 0n,
   }
 }
 
@@ -262,51 +271,56 @@ export class Keeper {
       await this.tryReveal(duel)
       if (duel.cards.length === 0) return
 
-      // Per-card oracle: each card may have its own oracle id.
-      const uniqueOracleIds = Array.from(
-        new Set(duel.cards.map((c) => c.oracleId)),
-      )
-      const settledMap = new Map<string, boolean>()
-      for (const oid of uniqueOracleIds) {
-        settledMap.set(oid, await readOracleSettled(this.client, oid))
-      }
-      if (![...settledMap.values()].every(Boolean)) return
+      const p0Count = duel.p0NextCardIdx
+      const p1Count = duel.p1NextCardIdx
+      const needsSettle = p0Count === 5 && p1Count === 5
 
-      // Build the per-swipe redeem list. Predict positions are always
-      // dUSDC regardless of the Duel<T> stake type — `record_swipe`
-      // takes a `&PredictManager` (dUSDC-backed) and stores the mint
-      // quantity in the Swipe struct. So we redeem dUSDC for every
-      // recorded swipe across both players, independent of stakeCoinType.
-      const redeems: Array<{
-        managerId: string
-        oracleId: string
-        oracleExpiry: bigint
-        strike: bigint
-        isUp: boolean
-        quantity: bigint
-      }> = []
-      const hasAnySwipe =
-        duel.p0Swipes.some((s) => s && s.quantity > 0n) ||
-        duel.p1Swipes.some((s) => s && s.quantity > 0n)
-      if (hasAnySwipe) {
+      const tx = new Transaction()
+      let pending = 0
+      let redeemsCount = 0
+
+      if (needsSettle) {
+        // Per-card oracle: each card may have its own oracle id.
+        const uniqueOracleIds = Array.from(
+          new Set(duel.cards.map((c) => c.oracleId)),
+        )
+        const settledMap = new Map<string, boolean>()
+        for (const oid of uniqueOracleIds) {
+          settledMap.set(oid, await readOracleSettled(this.client, oid))
+        }
+        if (![...settledMap.values()].every(Boolean)) return
+
+        const p0Manager = await findManagerFor(this.client, duel.creator)
+        const p1Manager = await findManagerFor(this.client, duel.challenger)
+        if (!p0Manager || !p1Manager) {
+          log.warn(`skip ${shortId(duelId)}: missing predict manager for p0 or p1`)
+          return
+        }
+
+        // Build the per-swipe redeem list. Predict positions are always
+        // dUSDC regardless of the Duel<T> stake type — `record_swipe`
+        // takes a `&PredictManager` (dUSDC-backed) and stores the mint
+        // quantity in the Swipe struct. So we redeem dUSDC for every
+        // recorded swipe across both players, independent of stakeCoinType.
+        const redeems: Array<{
+          managerId: string
+          oracleId: string
+          oracleExpiry: bigint
+          strike: bigint
+          isUp: boolean
+          quantity: bigint
+        }> = []
         const expiryByOracle = new Map<string, bigint>()
         for (const oid of uniqueOracleIds) {
           const e = await readOracleExpiry(this.client, oid)
           if (e !== null) expiryByOracle.set(oid, e)
         }
-        const p0Manager = await findManagerFor(this.client, duel.creator)
-        const p1Manager = await findManagerFor(this.client, duel.challenger)
-        // PER-SWIPE quantity from the new contract's `Swipe.quantity`
-        // field — replaces the legacy `(stake × 2) / 100` heuristic.
-        // Each swipe was authored by the player choosing how much to
-        // mint via `predict::mint`, so the keeper must redeem exactly
-        // that amount or DeepBook rejects.
         for (let i = 0; i < duel.cards.length; i++) {
           const card = duel.cards[i]
           const expiry = expiryByOracle.get(card.oracleId)
           if (expiry === undefined) continue
           const p0 = duel.p0Swipes[i]
-          if (p0 && p0Manager && p0.quantity > 0n) {
+          if (p0 && p0.quantity > 0n) {
             redeems.push({
               managerId: p0Manager,
               oracleId: card.oracleId,
@@ -317,7 +331,7 @@ export class Keeper {
             })
           }
           const p1 = duel.p1Swipes[i]
-          if (p1 && p1Manager && p1.quantity > 0n) {
+          if (p1 && p1.quantity > 0n) {
             redeems.push({
               managerId: p1Manager,
               oracleId: card.oracleId,
@@ -328,49 +342,56 @@ export class Keeper {
             })
           }
         }
-      }
 
-      const tx = new Transaction()
-      let pending = 0
-      for (let i = 0; i < duel.cardSettlements.length; i++) {
-        if (duel.cardSettlements[i] === null) {
-          tx.moveCall({
-            target: `${this.packageId}::duel::settle_card`,
-            typeArguments: [duel.stakeCoinType],
+        for (let i = 0; i < duel.cardSettlements.length; i++) {
+          if (duel.cardSettlements[i] === null) {
+            tx.moveCall({
+              target: `${this.packageId}::duel::settle_card_v2`,
+              typeArguments: [duel.stakeCoinType],
+              arguments: [
+                tx.object(duelId),
+                tx.object(p0Manager),
+                tx.object(p1Manager),
+                tx.object(duel.cards[i].oracleId),
+                tx.pure.u64(BigInt(i)),
+              ],
+            })
+            pending++
+          }
+        }
+        for (const r of redeems) {
+          const mk = tx.moveCall({
+            target: `${env.deepbookPredictPackageId}::market_key::${r.isUp ? "up" : "down"}`,
             arguments: [
-              tx.object(duelId),
-              tx.object(duel.cards[i].oracleId),
-              tx.pure.u64(BigInt(i)),
+              tx.object(r.oracleId),
+              tx.pure.u64(r.oracleExpiry),
+              tx.pure.u64(r.strike),
             ],
           })
-          pending++
+          tx.moveCall({
+            target: `${env.deepbookPredictPackageId}::predict::redeem_permissionless`,
+            typeArguments: [env.dusdcCoinType],
+            arguments: [
+              tx.object(env.deepbookPredictObjectId),
+              tx.object(r.managerId),
+              tx.object(r.oracleId),
+              mk,
+              tx.pure.u64(r.quantity),
+            ],
+          })
+          redeemsCount++
         }
+      } else {
+        // Forfeit or refund path. Requires timeout.
+        const now = Date.now()
+        const timeExpired = now > Number(duel.startedAtMs) + 600_000
+        if (!timeExpired) return
       }
-      for (const r of redeems) {
-        const mk = tx.moveCall({
-          target: `${env.deepbookPredictPackageId}::market_key::${r.isUp ? "up" : "down"}`,
-          arguments: [
-            tx.object(r.oracleId),
-            tx.pure.u64(r.oracleExpiry),
-            tx.pure.u64(r.strike),
-          ],
-        })
-        tx.moveCall({
-          target: `${env.deepbookPredictPackageId}::predict::redeem_permissionless`,
-          typeArguments: [env.dusdcCoinType],
-          arguments: [
-            tx.object(env.deepbookPredictObjectId),
-            tx.object(r.managerId),
-            tx.object(r.oracleId),
-            mk,
-            tx.pure.u64(r.quantity),
-          ],
-        })
-      }
+
       tx.moveCall({
-        target: `${this.packageId}::duel::finalize`,
+        target: `${this.packageId}::duel::finalize_v2`,
         typeArguments: [duel.stakeCoinType],
-        arguments: [tx.object(duelId)],
+        arguments: [tx.object(duelId), tx.object("0x6")],
       })
 
       const res = await this.client.signAndExecuteTransaction({
@@ -387,7 +408,7 @@ export class Keeper {
       this.finalized.add(duelId)
       log.info(
         `finalize ${shortId(duelId)} — ${pending} card(s)` +
-          (redeems.length ? ` + ${redeems.length} redeem(s)` : "") +
+          (redeemsCount ? ` + ${redeemsCount} redeem(s)` : "") +
           ` · ${shortId(res.digest)}`,
       )
     } catch (e) {

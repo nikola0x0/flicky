@@ -73,12 +73,60 @@ public fun settlement_price(market: &OracleSVI): Option<u64> {
     market.settlement_price
 }
 
+public fun spot_price(market: &OracleSVI): u64 {
+    market.prices.spot
+}
+
 public fun compute_price(market: &OracleSVI, _strike: u64): u64 {
     if (sui::dynamic_field::exists_(&market.id, b"test_price")) {
         *sui::dynamic_field::borrow(&market.id, b"test_price")
     } else {
         500_000_000
     }
+}
+
+// === Testnet admin (vendored stub only — DO NOT vendor onto mainnet) ===
+
+/// Create a new OracleSVI on testnet. The stub deliberately omits the real
+/// Predict cap-bearing constructor; this entry exists so the Flicky playground
+/// and dev scripts can mint usable oracles without owning a real admin cap.
+public fun new_market_oracle(expiry: u64, ctx: &mut TxContext): OracleSVI {
+    OracleSVI {
+        id: object::new(ctx),
+        authorized_caps: vec_set::empty(),
+        underlying_asset: std::string::utf8(b"USDC"),
+        expiry,
+        active: true,
+        prices: PriceData { spot: 0, forward: 0 },
+        svi: SVIParams {
+            a: 0,
+            b: 0,
+            rho: deepbook_predict::i64::zero(),
+            m: deepbook_predict::i64::zero(),
+            sigma: 0,
+        },
+        timestamp: 0,
+        settlement_price: option::none(),
+    }
+}
+
+public fun share(oracle: OracleSVI) {
+    transfer::share_object(oracle);
+}
+
+/// Set the price returned by `compute_price`. Stored in a dynamic field so we
+/// don't need to mutate the (private) `prices` struct directly.
+public fun set_compute_price(market: &mut OracleSVI, price: u64) {
+    if (sui::dynamic_field::exists_(&market.id, b"test_price")) {
+        let val: &mut u64 = sui::dynamic_field::borrow_mut(&mut market.id, b"test_price");
+        *val = price;
+    } else {
+        sui::dynamic_field::add(&mut market.id, b"test_price", price);
+    };
+}
+
+public fun settle_with(market: &mut OracleSVI, price: u64) {
+    market.settlement_price = option::some(price);
 }
 
 #[test_only]

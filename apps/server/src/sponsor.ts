@@ -43,6 +43,8 @@ const FLICKY_FNS = [
   "duel::record_swipe",
   "duel::settle_card",
   "duel::finalize",
+  "duel::settle_card_v2",
+  "duel::finalize_v2",
 ]
 
 /**

@@ -42,6 +42,8 @@ describe("buildAllowedTargets", () => {
       "duel::record_swipe",
       "duel::settle_card",
       "duel::finalize",
+      "duel::settle_card_v2",
+      "duel::finalize_v2",
     ]
     for (const fn of expectedFlickyFns) {
       const matching = targets.filter((t) => t.endsWith(`::${fn}`))
@@ -74,7 +76,7 @@ describe("buildAllowedTargets", () => {
   test("testnet — every target is fully-qualified 0x…::module::fn", () => {
     const targets = sponsor.buildAllowedTargets("testnet")
     for (const t of targets) {
-      expect(t).toMatch(/^0x[0-9a-fA-F]+::[a-z_]+::[a-z_]+$/)
+      expect(t).toMatch(/^0x[0-9a-fA-F]+::[a-z_0-9]+::[a-z_0-9]+$/)
     }
   })
 
