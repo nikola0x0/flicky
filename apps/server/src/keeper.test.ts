@@ -64,7 +64,6 @@ describe("parseDuelFromObject", () => {
         },
       },
     ],
-    card_settlements: [null, "75000000000000"] as Array<string | null>,
     p0_swipes: [
       { fields: { is_up: true, quantity: "100000", premium: "30000" } },
       null,
@@ -100,12 +99,6 @@ describe("parseDuelFromObject", () => {
     expect(d.cards).toHaveLength(2)
     expect(d.cards[0].strike).toBe(74_098_253_655_589n)
     expect(d.cards[0].oracleId).toBe(FRESH_DUEL_FIELDS.cards[0].fields.oracle_id)
-  })
-
-  test("card_settlements null/string handled", () => {
-    const d = parseDuelFromObject(undefined, FRESH_DUEL_FIELDS)!
-    expect(d.cardSettlements[0]).toBeNull()
-    expect(d.cardSettlements[1]).toBe(75_000_000_000_000n)
   })
 
   test("p0_swipes / p1_swipes parsed with quantity + premium (new contract shape)", () => {

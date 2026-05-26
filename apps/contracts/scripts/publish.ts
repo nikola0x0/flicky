@@ -176,6 +176,16 @@ async function main() {
         `deployed.json is the source of truth; update the toml manually if needed.`,
     );
   }
+
+  // Mirror packageId into apps/web/.env.local so Vite picks up the new id
+  try {
+    const envPath = resolve(import.meta.dir, "../../web/.env.local");
+    const envKey = `VITE_FLICKY_PACKAGE_ID_${NETWORK.toUpperCase()}`;
+    const wrote = upsertEnvVar(envPath, envKey, packageId);
+    console.log(`Wrote env:               ${envPath} :: ${envKey} (${wrote})`);
+  } catch (e) {
+    console.warn(`Failed to write env.local: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -199,6 +209,22 @@ function findObjectId(changes: any[], objectType: string): string | null {
     (c) => c.type === "created" && c.objectType === objectType,
   ) as { objectId: string } | undefined;
   return found?.objectId ?? null;
+}
+
+function upsertEnvVar(envPath: string, key: string, value: string): string {
+  if (!existsSync(envPath)) {
+    writeFileSync(envPath, `${key}=${value}\n`);
+    return "missing-file → created";
+  }
+  const original = readFileSync(envPath, "utf-8");
+  const re = new RegExp(`^${key}=.*$`, "m");
+  if (re.test(original)) {
+    writeFileSync(envPath, original.replace(re, `${key}=${value}`));
+    return "updated";
+  }
+  const suffix = original.endsWith("\n") ? "" : "\n";
+  writeFileSync(envPath, `${original}${suffix}${key}=${value}\n`);
+  return "appended";
 }
 
 // -----------------------------------------------------------------------------

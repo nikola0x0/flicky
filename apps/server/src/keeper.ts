@@ -8,8 +8,11 @@
  *      - If ACTIVE and not revealed, reveal the deck (deckmaster has
  *        the plaintext if anyone called /deckmaster/generate before
  *        the server restart).
- *      - If every card's oracle has a settlement_price, build a single
- *        PTB: settle_card × pending + redeem_permissionless × N + finalize.
+ *      - If both players finished 5/5 and every card's oracle has a
+ *        settlement_price, build a single PTB: finalize_multi (scores all
+ *        5 cards + pays the side-pot) followed by redeem_permissionless × N
+ *        (materializes each player's Predict payout). finalize runs first
+ *        so it reads live positions before redeem zeroes them.
  *   3. Remember finalized duel ids so we don't re-process.
  *
  * The keeper is permissionless on chain — it just needs gas (~0.01 SUI
@@ -43,9 +46,11 @@ interface DuelLite {
   p0Stake: bigint
   p1Stake: bigint
   cards: Array<{ oracleId: string; strike: bigint }>
-  cardSettlements: (bigint | null)[]
   p0Swipes: (SwipeLite | null)[]
   p1Swipes: (SwipeLite | null)[]
+  p0NextCardIdx: number
+  p1NextCardIdx: number
+  startedAtMs: bigint
 }
 
 const STATUS_MAP: Record<string, "PENDING" | "ACTIVE" | "COMPLETE"> = {
@@ -94,9 +99,11 @@ export function parseDuelFromObject(
     p0_stake: { fields: { value: string } } | string
     p1_stake: { fields: { value: string } } | string
     cards: Array<{ fields: { oracle_id: string; strike: string } }>
-    card_settlements: Array<string | null>
     p0_swipes: Array<RawSwipe | null>
     p1_swipes: Array<RawSwipe | null>
+    p0_next_card_idx: string | number
+    p1_next_card_idx: string | number
+    started_at_ms: string | number
   }
   if (!f.id?.id || f.status === undefined) return null
   const typeMatch = type?.match(/Duel<(.+)>$/)
@@ -116,11 +123,11 @@ export function parseDuelFromObject(
       oracleId: normalizeSuiObjectId(c.fields.oracle_id),
       strike: BigInt(c.fields.strike),
     })),
-    cardSettlements: f.card_settlements.map((s) =>
-      s === null ? null : BigInt(s),
-    ),
     p0Swipes: f.p0_swipes.map(parseSwipe),
     p1Swipes: f.p1_swipes.map(parseSwipe),
+    p0NextCardIdx: f.p0_next_card_idx !== undefined ? Number(f.p0_next_card_idx) : 0,
+    p1NextCardIdx: f.p1_next_card_idx !== undefined ? Number(f.p1_next_card_idx) : 0,
+    startedAtMs: f.started_at_ms !== undefined ? BigInt(f.started_at_ms) : 0n,
   }
 }
 
@@ -262,126 +269,97 @@ export class Keeper {
       await this.tryReveal(duel)
       if (duel.cards.length === 0) return
 
-      // Per-card oracle: each card may have its own oracle id.
+      // The new contract finalizes one-shot — no per-card settle. We only
+      // act on the happy path: both players completed all 5 swipes AND
+      // every oracle in the deck has settled (required by finalize_multi
+      // and redeem_permissionless alike). Stuck / partial duels are left
+      // to the players' own `refund_duel` (the server can't sign for them).
+      const bothDone = duel.p0NextCardIdx === 5 && duel.p1NextCardIdx === 5
+      if (!bothDone) return
+      if (duel.cards.length !== 5) return
+
       const uniqueOracleIds = Array.from(
         new Set(duel.cards.map((c) => c.oracleId)),
       )
-      const settledMap = new Map<string, boolean>()
       for (const oid of uniqueOracleIds) {
-        settledMap.set(oid, await readOracleSettled(this.client, oid))
+        if (!(await readOracleSettled(this.client, oid))) return
       }
-      if (![...settledMap.values()].every(Boolean)) return
 
-      // Build the per-swipe redeem list. Predict positions are always
-      // dUSDC regardless of the Duel<T> stake type — `record_swipe`
-      // takes a `&PredictManager` (dUSDC-backed) and stores the mint
-      // quantity in the Swipe struct. So we redeem dUSDC for every
-      // recorded swipe across both players, independent of stakeCoinType.
-      const redeems: Array<{
-        managerId: string
-        oracleId: string
-        oracleExpiry: bigint
-        strike: bigint
-        isUp: boolean
-        quantity: bigint
-      }> = []
-      const hasAnySwipe =
-        duel.p0Swipes.some((s) => s && s.quantity > 0n) ||
-        duel.p1Swipes.some((s) => s && s.quantity > 0n)
-      if (hasAnySwipe) {
-        const expiryByOracle = new Map<string, bigint>()
-        for (const oid of uniqueOracleIds) {
-          const e = await readOracleExpiry(this.client, oid)
-          if (e !== null) expiryByOracle.set(oid, e)
-        }
-        const p0Manager = await findManagerFor(this.client, duel.creator)
-        const p1Manager = await findManagerFor(this.client, duel.challenger)
-        // PER-SWIPE quantity from the new contract's `Swipe.quantity`
-        // field — replaces the legacy `(stake × 2) / 100` heuristic.
-        // Each swipe was authored by the player choosing how much to
-        // mint via `predict::mint`, so the keeper must redeem exactly
-        // that amount or DeepBook rejects.
-        for (let i = 0; i < duel.cards.length; i++) {
-          const card = duel.cards[i]
-          const expiry = expiryByOracle.get(card.oracleId)
-          if (expiry === undefined) continue
-          const p0 = duel.p0Swipes[i]
-          if (p0 && p0Manager && p0.quantity > 0n) {
-            redeems.push({
-              managerId: p0Manager,
-              oracleId: card.oracleId,
-              oracleExpiry: expiry,
-              strike: card.strike,
-              isUp: p0.isUp,
-              quantity: p0.quantity,
-            })
-          }
-          const p1 = duel.p1Swipes[i]
-          if (p1 && p1Manager && p1.quantity > 0n) {
-            redeems.push({
-              managerId: p1Manager,
-              oracleId: card.oracleId,
-              oracleExpiry: expiry,
-              strike: card.strike,
-              isUp: p1.isUp,
-              quantity: p1.quantity,
-            })
-          }
-        }
+      const p0Manager = await findManagerFor(this.client, duel.creator)
+      const p1Manager = await findManagerFor(this.client, duel.challenger)
+      if (!p0Manager || !p1Manager) {
+        log.warn(`skip ${shortId(duelId)}: missing predict manager for p0 or p1`)
+        return
+      }
+
+      const expiryByOracle = new Map<string, bigint>()
+      for (const oid of uniqueOracleIds) {
+        const e = await readOracleExpiry(this.client, oid)
+        if (e !== null) expiryByOracle.set(oid, e)
       }
 
       const tx = new Transaction()
-      let pending = 0
-      for (let i = 0; i < duel.cardSettlements.length; i++) {
-        if (duel.cardSettlements[i] === null) {
-          tx.moveCall({
-            target: `${this.packageId}::duel::settle_card`,
-            typeArguments: [duel.stakeCoinType],
+
+      // 1) Finalize FIRST. `finalize_multi` scores each card against its
+      //    own oracle's settlement_price and reads each player's LIVE
+      //    PredictManager position to flag early-redeemers. It must run
+      //    before any redeem in this PTB — redeeming first would zero the
+      //    positions and make every swipe score as "redeemed early".
+      //    oracle_i = cards[i].oracle (validated on-chain card-by-card).
+      tx.moveCall({
+        target: `${this.packageId}::duel::finalize_multi`,
+        typeArguments: [duel.stakeCoinType],
+        arguments: [
+          tx.object(duelId),
+          tx.object(p0Manager),
+          tx.object(p1Manager),
+          tx.object(duel.cards[0].oracleId),
+          tx.object(duel.cards[1].oracleId),
+          tx.object(duel.cards[2].oracleId),
+          tx.object(duel.cards[3].oracleId),
+          tx.object(duel.cards[4].oracleId),
+          tx.object("0x6"),
+        ],
+      })
+
+      // 2) Redeem every recorded position (both players) so their dUSDC
+      //    payout materializes in their PredictManager. Predict positions
+      //    are dUSDC regardless of the Duel<T> stake type. market_key takes
+      //    the oracle as a *pure* ID; redeem takes it as the &OracleSVI
+      //    object — different input kinds, so no dedup conflict.
+      let redeemsCount = 0
+      for (let i = 0; i < duel.cards.length; i++) {
+        const card = duel.cards[i]
+        const expiry = expiryByOracle.get(card.oracleId)
+        if (expiry === undefined) continue
+        for (const [mgr, swipe] of [
+          [p0Manager, duel.p0Swipes[i]] as const,
+          [p1Manager, duel.p1Swipes[i]] as const,
+        ]) {
+          if (!swipe || swipe.quantity <= 0n) continue
+          const mk = tx.moveCall({
+            target: `${env.deepbookPredictPackageId}::market_key::${swipe.isUp ? "up" : "down"}`,
             arguments: [
-              tx.object(duelId),
-              tx.object(duel.cards[i].oracleId),
-              tx.pure.u64(BigInt(i)),
+              tx.pure.id(card.oracleId),
+              tx.pure.u64(expiry),
+              tx.pure.u64(card.strike),
             ],
           })
-          pending++
+          tx.moveCall({
+            target: `${env.deepbookPredictPackageId}::predict::redeem_permissionless`,
+            typeArguments: [env.dusdcCoinType],
+            arguments: [
+              tx.object(env.deepbookPredictObjectId),
+              tx.object(mgr),
+              tx.object(card.oracleId),
+              mk,
+              tx.pure.u64(swipe.quantity),
+              tx.object("0x6"),
+            ],
+          })
+          redeemsCount++
         }
       }
-      for (const r of redeems) {
-        // `market_key::up/down(oracle_id: ID, expiry: u64, strike: u64)`
-        // — first arg is *pure* ID, not an object ref. Passing
-        // tx.object here would also cause the SDK to dedupe the
-        // oracle input with the &OracleSVI usage in redeem below
-        // and fail resolution with InvalidUsageOfPureArg.
-        const mk = tx.moveCall({
-          target: `${env.deepbookPredictPackageId}::market_key::${r.isUp ? "up" : "down"}`,
-          arguments: [
-            tx.pure.id(r.oracleId),
-            tx.pure.u64(r.oracleExpiry),
-            tx.pure.u64(r.strike),
-          ],
-        })
-        // `redeem_permissionless(Predict, Manager, &Oracle, MarketKey,
-        // quantity, &Clock, &mut TxContext)` — Clock is required; ctx
-        // is auto-injected. Missing the Clock trips "Incorrect number
-        // of arguments".
-        tx.moveCall({
-          target: `${env.deepbookPredictPackageId}::predict::redeem_permissionless`,
-          typeArguments: [env.dusdcCoinType],
-          arguments: [
-            tx.object(env.deepbookPredictObjectId),
-            tx.object(r.managerId),
-            tx.object(r.oracleId),
-            mk,
-            tx.pure.u64(r.quantity),
-            tx.object("0x6"),
-          ],
-        })
-      }
-      tx.moveCall({
-        target: `${this.packageId}::duel::finalize`,
-        typeArguments: [duel.stakeCoinType],
-        arguments: [tx.object(duelId)],
-      })
 
       const res = await this.client.signAndExecuteTransaction({
         transaction: tx,
@@ -396,17 +374,15 @@ export class Keeper {
       await this.client.waitForTransaction({ digest: res.digest })
       this.finalized.add(duelId)
       log.info(
-        `finalize ${shortId(duelId)} — ${pending} card(s)` +
-          (redeems.length ? ` + ${redeems.length} redeem(s)` : "") +
-          ` · ${shortId(res.digest)}`,
+        `finalize_multi ${shortId(duelId)}` +
+        (redeemsCount ? ` + ${redeemsCount} redeem(s)` : "") +
+        ` · ${shortId(res.digest)}`,
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      if (
-        msg.includes("EDuelNotActive") ||
-        msg.includes("ECardAlreadySettled") ||
-        /\b2\)|\b10\)/.test(msg)
-      ) {
+      // EDuelNotActive (code 2) means the duel already finalized/refunded
+      // out from under us — stop retrying it.
+      if (msg.includes("EDuelNotActive") || /\babort code: 2\b|\b2\)/.test(msg)) {
         this.finalized.add(duelId)
         return
       }

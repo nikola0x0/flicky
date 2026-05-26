@@ -37,11 +37,18 @@ describe("buildAllowedTargets", () => {
     const expectedFlickyFns = [
       "duel::new_card",
       "duel::create_duel",
+      "duel::create_duel_free",
       "duel::join_duel",
+      "duel::join_duel_free",
       "duel::reveal_deck",
       "duel::record_swipe",
-      "duel::settle_card",
+      "duel::record_swipe_free",
+      "duel::claim_reveal_timeout",
+      "duel::refund_duel",
       "duel::finalize",
+      "duel::finalize_multi",
+      "duel::finalize_test_one_oracle",
+      "duel::finalize_free",
     ]
     for (const fn of expectedFlickyFns) {
       const matching = targets.filter((t) => t.endsWith(`::${fn}`))
@@ -74,7 +81,7 @@ describe("buildAllowedTargets", () => {
   test("testnet — every target is fully-qualified 0x…::module::fn", () => {
     const targets = sponsor.buildAllowedTargets("testnet")
     for (const t of targets) {
-      expect(t).toMatch(/^0x[0-9a-fA-F]+::[a-z_]+::[a-z_]+$/)
+      expect(t).toMatch(/^0x[0-9a-fA-F]+::[a-z_0-9]+::[a-z_0-9]+$/)
     }
   })
 

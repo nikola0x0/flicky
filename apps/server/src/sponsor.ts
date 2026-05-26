@@ -38,11 +38,19 @@ const log = makeLogger("sponsor")
 const FLICKY_FNS = [
   "duel::new_card",
   "duel::create_duel",
+  "duel::create_duel_free",
   "duel::join_duel",
+  "duel::join_duel_free",
   "duel::reveal_deck",
   "duel::record_swipe",
-  "duel::settle_card",
+  "duel::record_swipe_free",
+  "duel::claim_reveal_timeout",
+  "duel::refund_duel",
+  // One-shot finalize family (no per-card settle in the current contract).
   "duel::finalize",
+  "duel::finalize_multi",
+  "duel::finalize_test_one_oracle",
+  "duel::finalize_free",
 ]
 
 /**

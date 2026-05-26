@@ -269,13 +269,6 @@ export function buildStakedSwipeTx(args: {
   strike: bigint
   isUp: boolean
   quantity: bigint
-  /**
-   * Premium paid for the Predict position, in dUSDC micro-units. The
-   * contract verifies `premium > 0` and the keeper redeems against this
-   * exact value, so the FE should pass what `predict::get_mint_amounts`
-   * (or `pricing::quote_*`) returned at quote time.
-   */
-  premium: bigint
   cardIdx: number
 }): Transaction {
   const tx = new Transaction()
@@ -309,20 +302,21 @@ export function buildStakedSwipeTx(args: {
   )
 
   // 3. Record the swipe in the Flicky duel — same OracleSVI, atomic.
-  // New contract signature: (duel, manager, oracle, card_idx, is_up,
-  // quantity, premium, clock, ctx). Clock + ctx are auto-injected by
-  // the codegen; we pass the other 7 in order.
+  // Contract signature: (duel, manager, predict, oracle, card_idx, is_up,
+  // quantity, clock, ctx). The contract snapshots premium + p_swiped
+  // on-chain via get_trade_amounts — no client-supplied premium. Clock +
+  // ctx are auto-injected by the codegen; we pass the other 7 in order.
   tx.add(
     duel.recordSwipe({
       package: CONFIG.packageId,
       arguments: [
         args.duelId,
         args.managerId,
+        DEEPBOOK.predictObject,
         args.oracleSviId,
         args.cardIdx,
         args.isUp,
         args.quantity,
-        args.premium,
       ],
       typeArguments: [DEEPBOOK.dusdcType],
     }),
