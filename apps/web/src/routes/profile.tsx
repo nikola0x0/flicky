@@ -8,10 +8,7 @@ import { DepositModal } from "@/components/deposit-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
-import {
-  useDusdcBalance,
-  useSuiBalance,
-} from "@/hooks/use-wallet-balances"
+import { useDusdcBalance, useSuiBalance } from "@/hooks/use-wallet-balances"
 
 const BLUE_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -48,10 +45,7 @@ export default function Profile() {
   return (
     <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
       <div className="pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl bg-[#1b2548] font-pixel text-white sm:max-h-[900px]">
-        <ProfileHeader
-          onBack={() => navigate(-1)}
-          dusdc={dusdcBalance}
-        />
+        <ProfileHeader onBack={() => navigate(-1)} dusdc={dusdcBalance} />
 
         <main className="flex-1 overflow-y-auto px-4 pb-6">
           <section className="flex items-start gap-4 pt-2">
@@ -73,7 +67,7 @@ export default function Profile() {
 
             <div className="flex flex-1 flex-col gap-2 pt-1">
               <div className="flex items-center gap-2">
-                <h1 className="text-lg tracking-wider">{short}</h1>
+                <h1 className="text-2xl tracking-wider">{short}</h1>
                 <button
                   type="button"
                   aria-label="info"
@@ -86,7 +80,7 @@ export default function Profile() {
                 type="button"
                 onClick={() => navigator.clipboard.writeText(address)}
                 aria-label="copy address"
-                className="inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white"
+                className="inline-flex items-center gap-1.5 text-lg text-white/70 hover:text-white"
               >
                 <span className="tabular-nums">{short}</span>
                 <span className="text-base">⎘</span>
@@ -153,7 +147,7 @@ export default function Profile() {
             <button
               type="button"
               style={BLUE_BRAND_STYLE}
-              className="default-btn-green-container flex w-full items-center justify-between px-4 py-3 text-base tracking-wider text-white uppercase"
+              className="default-btn-green-container flex w-full items-center justify-between px-4 py-3 text-base text-lg tracking-wider text-white uppercase"
             >
               <span className="flex items-center gap-2">
                 <img
@@ -162,7 +156,7 @@ export default function Profile() {
                   aria-hidden
                   className="size-5 [image-rendering:pixelated]"
                 />
-                PvP Match History
+                pvp history
               </span>
               <span className="text-sm">▾</span>
             </button>
@@ -245,7 +239,7 @@ function Stat({
         aria-hidden
         className="size-8 [image-rendering:pixelated]"
       />
-      <span className="text-sm tracking-wider text-white/55 uppercase">
+      <span className="text-lg tracking-wider text-white/55 uppercase">
         {label}
       </span>
       <span className="text-3xl tabular-nums">{value}</span>
@@ -267,7 +261,7 @@ function ActionTile({
       type="button"
       onClick={onClick}
       style={BLUE_BRAND_STYLE}
-      className="default-btn-green-container flex h-16 items-center justify-between gap-1 px-3 text-sm tracking-wider text-white uppercase"
+      className="default-btn-green-container flex h-16 items-center justify-between gap-1 px-3 text-lg tracking-wider text-white uppercase"
     >
       <span>{label}</span>
       <img

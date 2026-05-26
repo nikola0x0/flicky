@@ -33,6 +33,7 @@ const router = createBrowserRouter([
       { index: true, element: <Navigate to="/game/home" replace /> },
       { path: "home", element: <GameHome /> },
       { path: "pvp", element: <GamePvp /> },
+      { path: "practice", element: <GameComingSoon /> },
       { path: "shop", element: <GameShop /> },
       { path: "rank", element: <GameComingSoon /> },
       { path: "inventory", element: <GameComingSoon /> },

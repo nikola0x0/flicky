@@ -56,20 +56,20 @@ export function MenuModal({ open, onClose }: MenuModalProps) {
           type="button"
           onClick={onClose}
           aria-label="close"
-          className="absolute right-3 top-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
+          className="absolute top-3 right-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
         >
           ✕
         </button>
 
-        <header className="px-6 pb-3 pt-7 text-center">
-          <h2 id="menu-title" className="text-lg uppercase tracking-[0.18em]">
+        <header className="px-6 pt-7 pb-3 text-center">
+          <h2 id="menu-title" className="text-2xl tracking-[0.18em] uppercase">
             menu
           </h2>
         </header>
 
         <div className="flex flex-col gap-3 px-6 pb-6">
           <PixelButton onClick={handleLogout} className="h-12">
-            <span className="flex w-full items-center justify-center gap-2">
+            <span className="flex w-full items-center justify-center gap-2 text-2xl">
               <img
                 src="/icons/exit.png"
                 alt=""
@@ -82,6 +82,6 @@ export function MenuModal({ open, onClose }: MenuModalProps) {
         </div>
       </div>
     </div>,
-    document.body,
+    document.body
   )
 }

@@ -273,7 +273,8 @@
  * and featured-nav-tile so all pixel-art surfaces share one corner
  * vocabulary across the UI.
  */
-.pixel-avatar {
+.pixel-avatar,
+.pixel-tile {
   clip-path: polygon(
     6px 0,
     calc(100% - 6px) 0,
@@ -296,6 +297,32 @@
     3px 3px,
     6px 3px
   );
+  filter:
+    drop-shadow(-2px 0 0 #000)
+    drop-shadow(2px 0 0 #000)
+    drop-shadow(0 -2px 0 #000)
+    drop-shadow(0 2px 0 #000);
+}
+
+.pixel-tile:hover {
+  filter:
+    drop-shadow(-2px 0 0 #fff)
+    drop-shadow(2px 0 0 #fff)
+    drop-shadow(0 -2px 0 #fff)
+    drop-shadow(0 2px 0 #fff)
+    brightness(1.1);
+}
+
+.pixel-tile:active {
+  filter:
+    drop-shadow(-2px 0 0 #fff)
+    drop-shadow(2px 0 0 #fff)
+    drop-shadow(0 -2px 0 #fff)
+    drop-shadow(0 2px 0 #fff)
+    brightness(0.95);
+}
+
+.pixel-avatar {
   filter:
     drop-shadow(-2px 0 0 #000)
     drop-shadow(2px 0 0 #000)

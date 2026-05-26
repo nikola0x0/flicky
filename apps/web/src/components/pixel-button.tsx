@@ -18,8 +18,7 @@ type Variant = "default" | "bordered"
  * label + divider + stake chip layout, use <MatchButton> which wraps
  * this component.
  */
-export interface PixelButtonProps
-  extends ButtonHTMLAttributes<HTMLButtonElement> {
+export interface PixelButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant
   children: ReactNode
 }
@@ -39,13 +38,7 @@ export function PixelButton({
   return (
     <button
       type={type}
-      className={`
-        ${variantClass}
-        group inline-flex items-center justify-center
-        px-3 py-2 text-white uppercase
-        text-sm sm:text-base
-        ${className}
-      `}
+      className={` ${variantClass} group inline-flex items-center justify-center px-3 py-2 text-sm text-white uppercase sm:text-base ${className} `}
       {...rest}
     >
       {children}
