@@ -71,15 +71,17 @@ Preserve the established conventions. The playground's `tx*` / `read*` prefixes 
 
 ## Changes
 
-### 1. `lib/deepbook.ts` — add the one missing helper
+### 1. `lib/deepbook.ts` — add a UI-only swipe-cost quoter
 
-The only real gap the playground exposes is a way to **quote** the per-swipe premium. `buildStakedSwipeTx` requires a `premium > 0` argument that must match what the contract will compute internally; the keeper later redeems against this exact value.
+> **Contract change (2026-05-27):** the new `record_swipe` no longer takes a client-supplied `premium`. The contract snapshots `premium` and `p_swiped` itself by calling `predict::get_trade_amounts` inside the PTB. `buildStakedSwipeTx` in `lib/deepbook.ts` is already updated to the new signature (no `premium` arg; new `predict` shared object arg). README explicitly warns: *"Frontend must NEVER pre-compute `premium` client-side and pass it to the contract."*
 
-Add:
+So we don't need a premium quoter to satisfy the PTB. We DO still want one for the UI — players should see the swipe cost on the UP/DOWN buttons before they confirm, even though the contract will recompute it.
+
+Add a **display-only** helper:
 
 ```ts
 export interface SwipeQuote {
-  premium: bigint   // dUSDC micro-units; pass as `premium` to buildStakedSwipeTx
+  premium: bigint   // dUSDC micro-units — preview only; DO NOT pass to buildStakedSwipeTx
   pUp: bigint       // 1e9 fixed point; for UI implied-probability display
 }
 
@@ -97,7 +99,7 @@ export async function quoteSwipePremium(
 
 Implementation: devInspect `predict::get_trade_amounts` with a `MarketKey` built from `marketKey.up`/`marketKey.down` codegen. Parse the BCS return.
 
-This goes into `lib/deepbook.ts` (its only consumer is `buildStakedSwipeTx`, which lives there). **No new `lib/predict-txb.ts` file.**
+Caveat in the JSDoc: the contract will re-snapshot at swipe time so the actual on-chain `premium` may differ by a few atoms due to clock/SVI drift between quote and execute. UI displays the quote as an **estimate**, not a commitment. **No new `lib/predict-txb.ts` file.**
 
 ### 2. `hooks/use-flicky-socket.ts` — typed subscription pattern
 
@@ -174,7 +176,7 @@ Both substeps fire for both players. The WS push arrives in milliseconds; the ch
    - Render two buttons:
      - `UP` — labeled with `fmtDusdc(upQ.premium)` swipe cost + implied probability `upQ.pUp / 1e9`.
      - `DOWN` — labeled with `fmtDusdc(downQ.premium)` swipe cost + `1 - upQ.pUp`.
-   - On click: `buildStakedSwipeTx({ duelId, oracleSviId, managerId, oracleExpiry, strike, isUp, quantity, premium, cardIdx: i })` → sponsored sign → execute. Optimistically advance to card `i+1`.
+   - On click: `buildStakedSwipeTx({ duelId, oracleSviId, managerId, oracleExpiry, strike, isUp, quantity, cardIdx: i })` → sponsored sign → execute. **No `premium` passed** — contract snapshots it. Optimistically advance to card `i+1`.
 4. After all 5 swipes locally: transition to `AWAITING_SETTLEMENT`.
 
 Reconciliation: every `room_state` event re-derives the displayed card index from `swipes` (for _this_ address). Survives F5 because the server's `room_state` carries the full swipe log.
@@ -185,20 +187,43 @@ Live data: `oracle_tick` updates a `spot` display under the active card. No re-q
 
 #### Settlement (passive)
 
-- No `buildSettleAndFinalizeTx` call from the client. Keeper in `apps/server/src/keeper.ts` handles it.
-- UI shows "awaiting settlement" with a settled-card counter (`room_state.settledCount`/5).
-- When `room_state.status === "COMPLETE"`: compute winner from `(p0Payout + p1Premium) vs (p1Payout + p0Premium)`. Render a results screen with per-card outcomes from `room_state.cardOutcomes`.
+> **Contract change (2026-05-27):** settlement is now a **single** `finalize_multi` call (or `finalize` if all 5 cards share one oracle), not 5× `settle_card` + a separate `finalize`. The new `buildFinalizeTx` helper in `lib/flicky.ts` builds the PTB, but the web app does NOT call it — the keeper does, signed by the server admin key.
+
+- No client-side finalize call. Keeper in `apps/server/src/keeper.ts` waits until both players are 5/5 AND all relevant oracles have `settlement_price.is_some()`, then submits `finalize_multi(duel, p0_mgr, p1_mgr, oracle_0..oracle_4, clock)`.
+- UI shows "awaiting settlement" while watching `room_state`. With one-shot finalize, the displayed counter is no longer a 0→5 settled-card progress — it's "waiting for oracles to settle" (5 separate expiries), then a single chain confirmation flips the duel to COMPLETE.
+- The `room_state.settledCount` field (per current `protocol.ts`) is interpreted as "oracles with `settlement_price.is_some()`", climbing 0→5. UI displays "X / 5 oracles settled" until the keeper fires `finalize_multi`.
+- On `room_state.status === "COMPLETE"`: render winner from `room_state` payout fields. The `DuelFinalized` event also carries `oracle_id` + `settlement_price` as on-chain proof — server can include these in the room_state push for the results screen.
+- `finalize_test_one_oracle` (dev-mode finalize using spot price as fallback) is **out of scope** for the production game UI. The keeper picks the right finalize call.
 
 #### Disconnect/forfeit display only
 
 - `peer_left` → grey banner "opponent disconnected — N s grace".
 - `peer_forfeit` → declare you the winner-by-default; settlement still runs through the keeper.
 
-### 5. Files explicitly NOT created
+#### Contract-enforced timeouts (UI surfaces, doesn't trigger)
+
+The new contract has three timing constants the UI should reflect — but the chain enforces them; the web app only needs to display countdowns and react to the resulting events:
+
+| Constant | Value | UI behavior |
+|---|---|---|
+| `REVEAL_TIMEOUT_MS` | 5 min after `join_duel` | Server keeper reveals within ~1-3s in practice; this 5-min ceiling exists as a contract-level forfeit window. UI doesn't need a countdown; just handle `peer_forfeit` if the keeper ever fails to reveal. |
+| `SWIPE_WINDOW_MS` | 10 min after `join_duel` | Each `record_swipe` aborts with `ESwipeTimeout` after this. UI shows a small "swipe deadline" countdown during the swipe phase. If a player runs out, their remaining cards stay unswiped → keeper still calls `finalize_multi`; the player just forfeits the score on those cards. |
+| `REFUND_TIMEOUT_MS` | 1 h ACTIVE | Beyond this, either player can call `refund_duel` to reclaim stake. Not in the v1 UI; deferred. |
+
+### 5. `lib/config.ts` — bump the deployed package id
+
+Following the 2026-05-27 contract redeploy:
+
+- Current: `packageId` defaults to `0x505cdc...` (stale, pre-fix/contract).
+- Update to: `0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44` (current, per `apps/contracts/deployed.json`).
+- `VITE_FLICKY_PACKAGE_ID_TESTNET` in `apps/web/.env.local` should already be auto-written by `publish.ts`, but the in-code default needs to match for fresh checkouts.
+
+### 6. Files explicitly NOT created
 
 - ~~`apps/web/src/lib/duel-txb.ts`~~ — duplicates `lib/flicky.ts` with worse type safety.
 - ~~`apps/web/src/lib/predict-txb.ts`~~ — duplicates `lib/deepbook.ts`; range/LP/admin functions don't belong in the game UI.
-- ~~Any new `config.ts` env vars~~ — already present.
+- ~~Any new `config.ts` env vars~~ — already present (only the value updates).
+- ~~`finalize_test_one_oracle` UI button~~ — dev-only contract entry; keeper picks the right finalize call.
 
 ## Data flow summary
 
@@ -238,11 +263,14 @@ results screen ◀── room_state.cardOutcomes
 5. Verify both transition through: waiting → cards rendered (swipes disabled, "preparing chain") → swipes enabled → 5 swipes → awaiting settlement → results.
 6. Verify creator's wallet only shows a hash for the `create_duel` confirm dialog (no card content visible at sign time — no headstart).
 7. Verify both clients receive `deck_revealed` at effectively the same instant.
-8. Verify per-card UP/DOWN buttons show pre-computed swipe cost + implied probability.
-9. Verify `oracle_tick` updates the live spot under the active card.
-10. Verify `room_state` from server matches `fetchDuel` from chain (no protocol drift).
-11. Verify winner displayed matches `(p0Payout + p1Premium) vs (p1Payout + p0Premium)`.
-12. F5 mid-duel — UI rehydrates from `room_state.swipes`, doesn't double-swipe a card.
+8. Verify per-card UP/DOWN buttons show pre-computed swipe cost + implied probability, **and** that the on-chain `premium` in `SwipeRecorded` matches the UI estimate within drift tolerance (a few atoms).
+9. Verify swipe PTBs do NOT include a client-supplied `premium` arg (inspect `record_swipe` call args — should be 7 args, not 8).
+10. Verify `oracle_tick` updates the live spot under the active card.
+11. Verify `room_state` from server matches `fetchDuel` from chain (no protocol drift).
+12. Verify settlement is a SINGLE `finalize_multi` tx (one chain confirmation), not 5 settle_card txs.
+13. Verify winner displayed matches the `DuelFinalized` event payouts: `payout_to_p0` vs `payout_to_p1`.
+14. F5 mid-duel — UI rehydrates from `room_state.swipes`, doesn't double-swipe a card.
+15. Verify swipe-deadline countdown is visible during the swipe phase and approaches `joinedAt + 10 min`.
 
 ## Out-of-scope (explicit deferrals)
 
