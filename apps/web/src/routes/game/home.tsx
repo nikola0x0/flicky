@@ -3,7 +3,7 @@ import { MatchButton } from "@/components/match-button"
 export default function GameHome() {
   return (
     <div className="flex flex-col items-center gap-6 px-4 py-6">
-      <h2 className="text-xs uppercase tracking-widest text-white/60">home</h2>
+      <h2 className="text-sm uppercase tracking-widest text-white/60">home</h2>
       <div className="grid h-48 w-48 place-items-center rounded-2xl bg-amber-200/90 text-4xl text-amber-900">
         ☻
       </div>
@@ -12,10 +12,10 @@ export default function GameHome() {
           label="Find Match"
           stake={
             <>
-              <span className="text-[10px] font-black leading-none text-white">
+              <span className="text-xs font-black leading-none text-white">
                 $
               </span>
-              <span className="-translate-y-px text-sm font-black leading-none tabular-nums text-white">
+              <span className="-translate-y-px text-base font-black leading-none tabular-nums text-white">
                 3
               </span>
               <ChevronDown />

@@ -119,7 +119,7 @@ function FrameHeader({ onSignInClick }: { onSignInClick: () => void }) {
         <PixelButton
           onClick={onSignInClick}
           style={SIGN_IN_BRAND_STYLE}
-          className="h-10 px-3 text-xs"
+          className="h-10 px-3 text-sm"
         >
           <span className="flex items-center gap-2">
             <img

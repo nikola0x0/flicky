@@ -15,7 +15,7 @@ export default function ComingSoon() {
       <p className="text-xl tracking-[0.2em] text-white uppercase">
         coming soon
       </p>
-      <p className="text-sm text-white/55">check back later</p>
+      <p className="text-base text-white/55">check back later</p>
     </div>
   )
 }

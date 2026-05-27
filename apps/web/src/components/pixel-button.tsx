@@ -38,7 +38,7 @@ export function PixelButton({
   return (
     <button
       type={type}
-      className={` ${variantClass} group inline-flex items-center justify-center px-3 py-2 text-sm text-white uppercase sm:text-base ${className} `}
+      className={` ${variantClass} group inline-flex items-center justify-center px-3 py-2 text-base text-white uppercase sm:text-base ${className} `}
       {...rest}
     >
       {children}

@@ -140,7 +140,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         </h2>
 
         {phase.kind === "checking" && (
-          <p className="text-sm text-white/70">Checking your balances&hellip;</p>
+          <p className="text-base text-white/70">Checking your balances&hellip;</p>
         )}
 
         {phase.kind === "needs_wallet" && (
@@ -219,26 +219,26 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         )}
 
         {phase.kind === "ready" && (
-          <p className="text-sm text-green-400">
+          <p className="text-base text-green-400">
             Ready &mdash; joining queue&hellip;
           </p>
         )}
 
         {phase.kind === "error" && (
           <div className="space-y-2">
-            <p className="text-sm text-red-400">{phase.message}</p>
+            <p className="text-base text-red-400">{phase.message}</p>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => void recheck()}
-                className="rounded border border-white/30 bg-white/5 px-3 py-1 text-sm hover:bg-white/10"
+                className="rounded border border-white/30 bg-white/5 px-3 py-1 text-base hover:bg-white/10"
               >
                 Retry
               </button>
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded border border-white/30 bg-white/5 px-3 py-1 text-sm hover:bg-white/10"
+                className="rounded border border-white/30 bg-white/5 px-3 py-1 text-base hover:bg-white/10"
               >
                 Close
               </button>
@@ -273,7 +273,7 @@ function WalletToManagerFlow() {
           alt="dUSDC"
           className="size-10 [image-rendering:pixelated]"
         />
-        <span className="text-[9px] tracking-wider text-white/55 uppercase">
+        <span className="text-[10px] tracking-wider text-white/55 uppercase">
           wallet
         </span>
       </div>
@@ -284,7 +284,7 @@ function WalletToManagerFlow() {
           alt="manager dUSDC"
           className="size-10 [image-rendering:pixelated]"
         />
-        <span className="text-[9px] tracking-wider text-white/55 uppercase">
+        <span className="text-[10px] tracking-wider text-white/55 uppercase">
           manager
         </span>
       </div>
@@ -294,7 +294,7 @@ function WalletToManagerFlow() {
 
 function OneTimeNote() {
   return (
-    <p className="rounded bg-white/5 px-3 py-2 text-[10px] tracking-wider text-white/55 uppercase">
+    <p className="rounded bg-white/5 px-3 py-2 text-xs tracking-wider text-white/55 uppercase">
       one-time setup. withdraw from manager anytime via profile.
     </p>
   )
@@ -320,17 +320,17 @@ function NeedsWalletStep({
           alt="dUSDC"
           className="size-10 [image-rendering:pixelated]"
         />
-        <span className="text-[10px] tracking-wider text-white/55 uppercase">
+        <span className="text-xs tracking-wider text-white/55 uppercase">
           wallet dUSDC
         </span>
       </div>
-      <p className="text-sm text-white/80">
+      <p className="text-base text-white/80">
         Your wallet needs <strong>{fmtDusdc(needed)}</strong> total to play this
         stake: {fmtDusdc(stake)} for the duel escrow plus the manager top-up to
         {" "}
         {fmtDusdc(MIN_MANAGER_BALANCE)}.
       </p>
-      <p className="text-xs text-white/55">
+      <p className="text-sm text-white/55">
         Have: {fmtDusdc(current)} &nbsp;&middot;&nbsp; need {fmtDusdc(short)}{" "}
         more
       </p>
@@ -356,11 +356,11 @@ function NeedsManagerStep({
   return (
     <div className="space-y-3">
       <WalletToManagerFlow />
-      <p className="text-sm text-white/80">
+      <p className="text-base text-white/80">
         You need a Predict account to swipe. We&rsquo;ll create one, then
         deposit {fmtDusdc(MIN_MANAGER_BALANCE)} from your wallet.
       </p>
-      <p className="text-xs text-white/55">
+      <p className="text-sm text-white/55">
         Wallet balance: {fmtDusdc(walletDusdc)}
       </p>
       <OneTimeNote />
@@ -395,7 +395,7 @@ function NeedsDepositStep({
   return (
     <div className="space-y-3">
       <WalletToManagerFlow />
-      <p className="text-sm text-white/80">
+      <p className="text-base text-white/80">
         Your Predict account has {fmtDusdc(current)}. Depositing{" "}
         {fmtDusdc(needed)} brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} for the
         5-card duel.

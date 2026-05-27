@@ -269,12 +269,12 @@ export function ActiveDuel({
         <button
           type="button"
           onClick={onExit}
-          className="rounded border border-white/30 bg-white/5 px-3 py-1 text-sm hover:bg-white/10"
+          className="rounded border border-white/30 bg-white/5 px-3 py-1 text-base hover:bg-white/10"
         >
           Exit
         </button>
       </div>
-      <div className="text-xs text-white/55">
+      <div className="text-sm text-white/55">
         role: {role} &middot; tier: {tier} &middot; ws:{" "}
         {wsOpen ? "open" : "closed"}
       </div>
@@ -313,7 +313,7 @@ export function ActiveDuel({
         <PhaseComplete roomState={roomState} myAddress={account.address} />
       )}
       {phase.kind === "ERROR" && (
-        <p className="text-sm text-red-400">{phase.message}</p>
+        <p className="text-base text-red-400">{phase.message}</p>
       )}
     </div>
   )
@@ -322,7 +322,7 @@ export function ActiveDuel({
 function PhaseEntry({ reason }: { reason: string }) {
   return (
     <div className="rounded border border-white/10 bg-white/5 p-4">
-      <p className="text-sm text-white/70">{reason}</p>
+      <p className="text-base text-white/70">{reason}</p>
     </div>
   )
 }
@@ -336,10 +336,10 @@ function PhaseAwaitReveal({
 }) {
   return (
     <div className="rounded border border-white/10 bg-white/5 p-4">
-      <p className="text-sm text-white/70">
+      <p className="text-base text-white/70">
         Duel {duelId.slice(0, 10)}&hellip; preparing&hellip;
       </p>
-      <p className="mt-1 text-xs text-white/40">
+      <p className="mt-1 text-sm text-white/40">
         status: {roomState?.status ?? "—"} &middot; cards:{" "}
         {roomState?.cards.length ?? 0}/5
       </p>
@@ -424,7 +424,7 @@ function PhaseSwiping({
 
   if (!card || !expiry) {
     return (
-      <p className="text-sm text-white/55">Loading card {cardIdx + 1}…</p>
+      <p className="text-base text-white/55">Loading card {cardIdx + 1}…</p>
     )
   }
 
@@ -460,14 +460,14 @@ function PhaseSwiping({
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded border-2 border-black/55 bg-[#1b2548] p-4">
-        <p className="text-xs tracking-[0.2em] text-white/55 uppercase">
+        <p className="text-sm tracking-[0.2em] text-white/55 uppercase">
           card {cardIdx + 1} / 5
         </p>
         <p className="mt-1 text-xl font-bold">strike {card.strike}</p>
-        <p className="text-xs text-white/60">
+        <p className="text-sm text-white/60">
           oracle {card.oracle_id.slice(0, 10)}&hellip;
         </p>
-        <p className="mt-2 text-sm text-white/70">
+        <p className="mt-2 text-base text-white/70">
           spot {tick?.spot ?? "—"} &middot; forward {tick?.forward ?? "—"}
         </p>
       </div>
@@ -480,13 +480,13 @@ function PhaseSwiping({
           className="rounded-md bg-emerald-600 px-4 py-3 font-bold text-white disabled:opacity-40"
         >
           <div className="text-lg">UP</div>
-          <div className="text-xs opacity-80">
+          <div className="text-sm opacity-80">
             cost{" "}
             {quoteUp
               ? fmtDusdcSigned(-quoteUp.premium).trim()
               : "…"}
           </div>
-          <div className="text-xs opacity-60">
+          <div className="text-sm opacity-60">
             p {quoteUp ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(1)}%` : "…"}
           </div>
         </button>
@@ -497,23 +497,23 @@ function PhaseSwiping({
           className="rounded-md bg-rose-600 px-4 py-3 font-bold text-white disabled:opacity-40"
         >
           <div className="text-lg">DOWN</div>
-          <div className="text-xs opacity-80">
+          <div className="text-sm opacity-80">
             cost{" "}
             {quoteDown
               ? fmtDusdcSigned(-quoteDown.premium).trim()
               : "…"}
           </div>
-          <div className="text-xs opacity-60">
+          <div className="text-sm opacity-60">
             p {quoteDown ? `${(Number(quoteDown.pImplied) / 1e7).toFixed(1)}%` : "…"}
           </div>
         </button>
       </div>
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p className="text-base text-red-400">{error}</p>}
 
       <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
 
-      <div className="rounded border border-white/10 bg-white/5 p-3 text-sm">
+      <div className="rounded border border-white/10 bg-white/5 p-3 text-base">
         <div>you: {fmtDusdcSigned(myRunning)}</div>
         <div>opponent: {fmtDusdcSigned(oppRunning)}</div>
       </div>
@@ -539,7 +539,7 @@ function CardLedger({
     roomState.cardOutcomes.map((o) => [o.cardIdx, o]),
   )
   return (
-    <div className="rounded border border-white/10 bg-white/5 text-xs">
+    <div className="rounded border border-white/10 bg-white/5 text-sm">
       {roomState.cards.map((card, i) => {
         const settled = settledByIdx.get(i)
         const swipeSlot = roomState.swipes.find((s) => s.cardIdx === i)
@@ -596,7 +596,7 @@ function PhaseAwaitSettlement({
   const oppRunning = runningPnl(roomState, myIsP0 ? "p1" : "p0", deck, ticks)
   return (
     <div className="flex flex-col gap-3">
-      <div className="rounded border border-white/10 bg-white/5 p-3 text-sm">
+      <div className="rounded border border-white/10 bg-white/5 p-3 text-base">
         <p className="text-white/70">
           all swipes locked &middot; {roomState.settledCount} / 5 cards settled
         </p>
@@ -605,7 +605,7 @@ function PhaseAwaitSettlement({
         )}
       </div>
       <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
-      <div className="rounded border border-white/10 bg-white/5 p-3 text-sm">
+      <div className="rounded border border-white/10 bg-white/5 p-3 text-base">
         <div>you: {fmtDusdcSigned(myRunning)}</div>
         <div>opponent: {fmtDusdcSigned(oppRunning)}</div>
       </div>
@@ -635,7 +635,7 @@ function PhaseComplete({
         <h3 className="text-2xl tracking-[0.2em] uppercase">
           {tied ? "Tie" : youWon ? "Victory" : "Defeat"}
         </h3>
-        <p className="mt-2 text-sm text-white/70">
+        <p className="mt-2 text-base text-white/70">
           you {fmtDusdcSigned(myNet)} &middot; opponent{" "}
           {fmtDusdcSigned(oppNet)}
         </p>

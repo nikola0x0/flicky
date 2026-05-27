@@ -169,7 +169,7 @@ function WalletButton() {
         <Button
           size="sm"
           onClick={() => setModalOpen(true)}
-          className="h-9 px-4 text-sm font-medium tracking-[-0.005em]"
+          className="h-9 px-4 text-base font-medium tracking-[-0.005em]"
         >
           connect wallet
         </Button>
@@ -182,11 +182,11 @@ function WalletButton() {
     <div className="relative">
       <button
         onClick={() => setMenuOpen((v) => !v)}
-        className="border-hairline bg-surface-1 hover:bg-surface-2 flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium tracking-[-0.005em] transition"
+        className="border-hairline bg-surface-1 hover:bg-surface-2 flex h-9 items-center gap-2 rounded-md border px-3 text-base font-medium tracking-[-0.005em] transition"
       >
         <span className="bg-primary inline-block h-2 w-2 rounded-full" />
         <span className="font-mono text-[12px]">{shortId(account.address, 4)}</span>
-        <span className="text-ink-subtle text-[10px]">▾</span>
+        <span className="text-ink-subtle text-xs">▾</span>
       </button>
       {menuOpen && (
         <WalletMenu address={account.address} onClose={() => setMenuOpen(false)} />
@@ -245,7 +245,7 @@ function WalletModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         {wallets.length === 0 ? (
-          <p className="text-ink-subtle text-sm">
+          <p className="text-ink-subtle text-base">
             No Sui wallets detected. Install{" "}
             <a
               href="https://chromewebstore.google.com/detail/sui-wallet/opcgpfmipidbgpenhmajoajpbobppdil"
@@ -284,20 +284,20 @@ function WalletModal({ onClose }: { onClose: () => void }) {
                 ) : (
                   <div className="bg-surface-3 h-7 w-7 rounded-md" />
                 )}
-                <span className="flex-1 text-sm font-medium">{w.name}</span>
+                <span className="flex-1 text-base font-medium">{w.name}</span>
                 {busyWallet === w.name && (
-                  <span className="text-ink-subtle text-xs">connecting…</span>
+                  <span className="text-ink-subtle text-sm">connecting…</span>
                 )}
               </button>
             ))}
           </div>
         )}
         {error && (
-          <p className="mt-3 rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+          <p className="mt-3 rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-sm text-red-500">
             {error.message}
           </p>
         )}
-        <p className="text-ink-tertiary mt-4 text-[10px]">
+        <p className="text-ink-tertiary mt-4 text-xs">
           By connecting, you authorize this app to read your address. No
           transactions are sent until you confirm them.
         </p>
@@ -351,10 +351,10 @@ function WalletMenu({
       className="border-hairline bg-surface-1 absolute right-0 top-11 z-40 w-64 overflow-hidden rounded-lg border shadow-2xl"
     >
       <div className="border-hairline border-b px-3 py-2.5">
-        <div className="text-ink-subtle text-[10px] font-medium uppercase tracking-[0.06em]">
+        <div className="text-ink-subtle text-xs font-medium uppercase tracking-[0.06em]">
           Connected
         </div>
-        <code className="mt-1 block break-all font-mono text-[11px]">{address}</code>
+        <code className="mt-1 block break-all font-mono text-xs">{address}</code>
       </div>
       <div className="p-1">
         <MenuItem onClick={copy}>
@@ -366,7 +366,7 @@ function WalletMenu({
           target="_blank"
           rel="noreferrer"
           onClick={onClose}
-          className="hover:bg-surface-2 flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition"
+          className="hover:bg-surface-2 flex items-center gap-2.5 rounded-md px-2.5 py-2 text-base transition"
         >
           <span>🔍</span>
           <span>open in explorer</span>
@@ -398,7 +398,7 @@ function MenuItem({
   return (
     <button
       onClick={onClick}
-      className={`hover:bg-surface-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${tone === "danger" ? "text-red-400 hover:text-red-300" : ""
+      className={`hover:bg-surface-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-base transition ${tone === "danger" ? "text-red-400 hover:text-red-300" : ""
         }`}
     >
       {children}
@@ -481,7 +481,7 @@ export default function App() {
           <h1 className="text-2xl font-semibold tracking-[-0.03em]">
             <span className="text-primary">flicky</span>
           </h1>
-          <p className="text-ink-subtle text-xs tracking-[-0.005em]">
+          <p className="text-ink-subtle text-sm tracking-[-0.005em]">
             swipe BTC binaries · PvP on Sui testnet
           </p>
         </div>
@@ -513,7 +513,7 @@ export default function App() {
 function ConnectPrompt() {
   return (
     <Card className="border-dashed">
-      <CardContent className="text-muted-foreground py-12 text-center text-sm">
+      <CardContent className="text-muted-foreground py-12 text-center text-base">
         Connect a Sui testnet wallet to play.
       </CardContent>
     </Card>
@@ -522,7 +522,7 @@ function ConnectPrompt() {
 
 function Footer() {
   return (
-    <p className="text-muted-foreground pt-4 text-center text-xs">
+    <p className="text-muted-foreground pt-4 text-center text-sm">
       package <code>{shortId(CONFIG.packageId)}</code>{" "}
       <ExplorerLink href={objectUrl(CONFIG.packageId)}>flicky on chain</ExplorerLink>
     </p>
@@ -553,9 +553,9 @@ function OracleStrip() {
 
   return (
     <Card className="bg-surface-1 border-hairline">
-      <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4 text-sm">
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4 text-base">
         <div className="flex items-baseline gap-2">
-          <span className="text-ink-subtle text-[11px] font-medium uppercase tracking-[0.06em]">
+          <span className="text-ink-subtle text-xs font-medium uppercase tracking-[0.06em]">
             BTC
           </span>
           {oracle ? (
@@ -563,15 +563,15 @@ function OracleStrip() {
               <span className="text-xl font-semibold tabular-nums">
                 {fmtUsd(oracle.spot)}
               </span>
-              <span className="text-muted-foreground text-xs">
+              <span className="text-muted-foreground text-sm">
                 fwd {fmtUsd(oracle.forward)}
               </span>
             </>
           ) : (
-            <span className="text-muted-foreground text-xs">connecting…</span>
+            <span className="text-muted-foreground text-sm">connecting…</span>
           )}
         </div>
-        <div className="flex items-center gap-3 text-xs">
+        <div className="flex items-center gap-3 text-sm">
           {oracle && (
             <Badge variant={oracle.isActive ? "default" : "secondary"}>
               {oracle.settlementPrice !== null
@@ -697,7 +697,7 @@ function Lobby({
         </CardHeader>
         <CardContent className="space-y-3">
           {/* Tier toggle */}
-          <div className="bg-muted inline-flex rounded-md p-0.5 text-xs">
+          <div className="bg-muted inline-flex rounded-md p-0.5 text-sm">
             <button
               onClick={() => setTier("free")}
               className={`rounded px-3 py-1 transition ${tier === "free" ? "bg-background shadow-sm" : "text-muted-foreground"
@@ -737,13 +737,13 @@ function Lobby({
                   title={reason ?? undefined}
                   className="border-input bg-background hover:border-primary hover:bg-primary/5 group flex flex-col rounded-lg border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-50 sm:p-4"
                 >
-                  <span className="text-muted-foreground text-xs tracking-wide uppercase">
+                  <span className="text-muted-foreground text-sm tracking-wide uppercase">
                     {t.label}
                   </span>
                   <span className="mt-1 text-base font-semibold sm:text-lg">
                     {t.blurb}
                   </span>
-                  <span className="text-muted-foreground mt-2 text-xs">
+                  <span className="text-muted-foreground mt-2 text-sm">
                     {reason ? (
                       <span className="text-amber-500">{reason}</span>
                     ) : (
@@ -755,11 +755,11 @@ function Lobby({
             })}
           </div>
           {err && (
-            <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+            <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-sm text-red-500">
               {err}
             </p>
           )}
-          <p className="text-muted-foreground text-xs">
+          <p className="text-muted-foreground text-sm">
             your wallet:{" "}
             <ExplorerLink href={addressUrl(address)}>{shortId(address)}</ExplorerLink>
           </p>
@@ -772,10 +772,10 @@ function Lobby({
         </CardHeader>
         <CardContent className="space-y-2">
           {duelsQuery.isLoading && (
-            <p className="text-muted-foreground text-sm">loading…</p>
+            <p className="text-muted-foreground text-base">loading…</p>
           )}
           {duelsQuery.data?.length === 0 && (
-            <p className="text-muted-foreground text-sm">no duels yet. be the first.</p>
+            <p className="text-muted-foreground text-base">no duels yet. be the first.</p>
           )}
           {duelsQuery.data?.map((id) => (
             <DuelSummary
@@ -956,12 +956,12 @@ function DepositPanel({
   const hasManagerBalance = managerBalance > 0n
 
   return (
-    <div className="border-muted/60 bg-muted/20 space-y-3 rounded-md border border-dashed p-3 text-xs">
+    <div className="border-muted/60 bg-muted/20 space-y-3 rounded-md border border-dashed p-3 text-sm">
       <div className="flex items-center justify-between">
         <span className="text-muted-foreground tracking-wide uppercase">
           {hasManager ? "Predict wallet" : "Predict setup"}
         </span>
-        <span className="text-muted-foreground text-[10px]">
+        <span className="text-muted-foreground text-xs">
           {hasManager ? "ready for Staked duels" : "two one-time steps"}
         </span>
       </div>
@@ -993,7 +993,7 @@ function DepositPanel({
               variant="default"
               disabled={busy !== null}
               onClick={createManager}
-              className="h-7 px-2 text-xs"
+              className="h-7 px-2 text-sm"
             >
               {busy === "create" ? "creating…" : "Create"}
             </Button>
@@ -1023,7 +1023,7 @@ function DepositPanel({
                 value={depositAmount}
                 onChange={(e) => setDepositAmount(e.target.value)}
                 disabled={busy !== null}
-                className="bg-background h-7 w-16 rounded border px-2 text-right font-mono text-xs"
+                className="bg-background h-7 w-16 rounded border px-2 text-right font-mono text-sm"
                 aria-label="dUSDC amount to deposit"
               />
               <Button
@@ -1031,7 +1031,7 @@ function DepositPanel({
                 variant={hasManagerBalance ? "outline" : "default"}
                 disabled={busy !== null || !hasManager}
                 onClick={deposit}
-                className="h-7 px-2 text-xs"
+                className="h-7 px-2 text-sm"
               >
                 {busy === "deposit" ? "…" : "Deposit"}
               </Button>
@@ -1041,7 +1041,7 @@ function DepositPanel({
       />
 
       {toast && (
-        <div className="flex items-center justify-between gap-2 rounded border-l-2 border-emerald-500 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-600">
+        <div className="flex items-center justify-between gap-2 rounded border-l-2 border-emerald-500 bg-emerald-500/10 px-2 py-1.5 text-xs text-emerald-600">
           <span className="flex items-center gap-1.5">
             <span aria-hidden>✓</span>
             <span>{toast.label}</span>
@@ -1050,7 +1050,7 @@ function DepositPanel({
             href={txExplorerUrl(toast.digest)}
             target="_blank"
             rel="noreferrer"
-            className="font-mono text-[10px] underline-offset-2 hover:underline"
+            className="font-mono text-xs underline-offset-2 hover:underline"
             title={toast.digest}
           >
             {shortId(toast.digest)} ↗
@@ -1068,25 +1068,25 @@ function DepositPanel({
           </span>
         </div>
         <div className="mt-1 flex items-center gap-2">
-          <code className="bg-background flex-1 truncate rounded border px-2 py-1 font-mono text-[10px]">
+          <code className="bg-background flex-1 truncate rounded border px-2 py-1 font-mono text-xs">
             {address}
           </code>
           <Button
             size="sm"
             variant="outline"
             onClick={copy}
-            className="h-7 px-2 text-xs"
+            className="h-7 px-2 text-sm"
           >
             {copied ? "copied!" : "copy"}
           </Button>
         </div>
-        <p className="text-muted-foreground mt-1 text-[10px]">
+        <p className="text-muted-foreground mt-1 text-xs">
           dUSDC has no testnet faucet — receive from another wallet that has
           some. Default deposit ({Number(DEFAULT_DEPOSIT_DUSDC)} dUSDC) covers
           ~{Number(DEFAULT_DEPOSIT_DUSDC) * 10} swipes.
         </p>
         {err && (
-          <p className="text-red-500 mt-1 text-[10px] break-all">{err}</p>
+          <p className="text-red-500 mt-1 text-xs break-all">{err}</p>
         )}
       </div>
     </div>
@@ -1110,7 +1110,7 @@ function ChecklistRow({
     <div className="flex items-center justify-between gap-2">
       <div className="flex min-w-0 items-center gap-2">
         <span
-          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
+          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
             done
               ? "bg-emerald-500/15 text-emerald-500"
               : "bg-muted text-muted-foreground"
@@ -1121,7 +1121,7 @@ function ChecklistRow({
         </span>
         <div className="min-w-0">
           <div className="text-foreground font-medium">{title}</div>
-          <div className="text-muted-foreground truncate text-[10px]">
+          <div className="text-muted-foreground truncate text-xs">
             {detail}
           </div>
         </div>
@@ -1159,18 +1159,18 @@ function DuelSummary({
       onClick={onOpen}
       className="hover:bg-muted/50 flex w-full items-center justify-between rounded p-2 text-left transition"
     >
-      <div className="text-sm">
+      <div className="text-base">
         <div className="flex items-center gap-2">
-          <span className="font-mono text-xs">{shortId(duelId)}</span>
+          <span className="font-mono text-sm">{shortId(duelId)}</span>
           <Badge variant={statusColor[d.status]}>{d.status}</Badge>
           {mine && <Badge variant="outline">yours</Badge>}
         </div>
-        <div className="text-muted-foreground text-xs">
+        <div className="text-muted-foreground text-sm">
           pot {fmtStake(d.p0Stake + d.p1Stake, d.stakeCoinType)} · settled{" "}
           {d.settledCount.toString()}/5
         </div>
       </div>
-      <span className="text-muted-foreground text-xs">→</span>
+      <span className="text-muted-foreground text-sm">→</span>
     </button>
   )
 }
@@ -1201,7 +1201,7 @@ function DuelView({
         <div className="flex items-center justify-between">
           <button
             onClick={onBack}
-            className="text-muted-foreground hover:text-foreground text-sm"
+            className="text-muted-foreground hover:text-foreground text-base"
           >
             ← lobby
           </button>
@@ -1210,7 +1210,7 @@ function DuelView({
       </CardHeader>
       <CardContent>
         {!d ? (
-          <p className="text-muted-foreground py-12 text-center text-sm">loading…</p>
+          <p className="text-muted-foreground py-12 text-center text-base">loading…</p>
         ) : (
           <PhaseDispatcher duel={d} address={address} duelId={duelId} oracle={oracle} />
         )}
@@ -1305,9 +1305,9 @@ function WaitingForOpponentView({
       </div>
       <div className="space-y-1">
         <div className="text-lg font-semibold">matching…</div>
-        <div className="text-muted-foreground text-xs">{elapsed}s elapsed</div>
+        <div className="text-muted-foreground text-sm">{elapsed}s elapsed</div>
       </div>
-      <p className="text-muted-foreground text-sm">
+      <p className="text-muted-foreground text-base">
         you staked{" "}
         <strong className="text-foreground">
           {fmtStake(duel.p0Stake, duel.stakeCoinType)}
@@ -1319,13 +1319,13 @@ function WaitingForOpponentView({
       </p>
       {showShareEscape && (
         <div className="space-y-1 pt-3">
-          <p className="text-muted-foreground text-xs">
+          <p className="text-muted-foreground text-sm">
             still no opponent. share manually:
           </p>
-          <code className="bg-muted block break-all rounded p-2 text-xs">{duelId}</code>
+          <code className="bg-muted block break-all rounded p-2 text-sm">{duelId}</code>
         </div>
       )}
-      <p className="text-muted-foreground pt-2 text-xs">
+      <p className="text-muted-foreground pt-2 text-sm">
         pot when full {fmtStake(duel.p0Stake * 2n, duel.stakeCoinType)}
       </p>
     </div>
@@ -1424,13 +1424,13 @@ function JoinView({
   return (
     <div className="space-y-3 py-4 text-center">
       <Badge variant="outline">open duel</Badge>
-      <p className="text-muted-foreground text-sm">
+      <p className="text-muted-foreground text-base">
         creator staked <strong>{stake}</strong>. match it to start swiping.
       </p>
       {isDusdc && stakedBlocked && (
-        <div className="bg-amber-500/5 border-amber-500/30 text-amber-600 rounded border-l-2 p-2 text-left text-xs">
+        <div className="bg-amber-500/5 border-amber-500/30 text-amber-600 rounded border-l-2 p-2 text-left text-sm">
           <strong>Staked-tier setup required</strong>
-          <div className="mt-1 text-[11px] opacity-90">
+          <div className="mt-1 text-xs opacity-90">
             {needsManager
               ? "You don't have a PredictManager yet — every staked swipe bundles `predict::mint` against it. Go back to the lobby and complete step ① of the Staked-tier setup."
               : "Your PredictManager has 0 dUSDC. Deposit some via the lobby's Staked-tier setup so each swipe can mint a Predict position."}
@@ -1451,13 +1451,13 @@ function JoinView({
         {blockReason ?? `join · stake ${stake}`}
       </Button>
       {plaintextMissing && (
-        <p className="text-muted-foreground text-xs">
+        <p className="text-muted-foreground text-sm">
           deckmaster lost this duel's plaintext (server restart). ask the
           creator to re-create the duel.
         </p>
       )}
       {err && (
-        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-left text-xs text-red-500">
+        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-left text-sm text-red-500">
           {err}
         </p>
       )}
@@ -1673,12 +1673,12 @@ function SwipingView({
   return (
     <div className="space-y-4">
       {/* phase header */}
-      <div className="flex items-center justify-between text-xs">
+      <div className="flex items-center justify-between text-sm">
         <span className="text-muted-foreground">
           card <strong className="text-foreground">{myNextIdx + 1}</strong>/5
           {isDusdc && managerReady && (
             <span
-              className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-500"
+              className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs uppercase tracking-wide text-emerald-500"
               title={`mints ${fmtDusdc(mintQuantity)} per swipe into your PredictManager`}
             >
               + predict mint
@@ -1689,7 +1689,7 @@ function SwipingView({
           {speed.label} {speed.tone === "good" && "⚡"}
         </span>
         <span
-          className="font-mono text-sm tabular-nums"
+          className="font-mono text-base tabular-nums"
           title="decide window for this card — resets after each swipe"
         >
           {timerSec}s
@@ -1735,18 +1735,18 @@ function SwipingView({
             </div>
           )}
 
-          <div className="text-ink-subtle text-[11px] font-medium uppercase tracking-[0.06em]">
+          <div className="text-ink-subtle text-xs font-medium uppercase tracking-[0.06em]">
             BTC at expiry
           </div>
           <div className="mt-3 text-5xl font-semibold tabular-nums tracking-[-0.04em] sm:text-6xl">
             {fmtUsd(card.strike)}
           </div>
-          <div className="text-muted-foreground mt-2 text-sm tracking-[-0.01em]">
+          <div className="text-muted-foreground mt-2 text-base tracking-[-0.01em]">
             will BTC settle{" "}
             <strong className="text-foreground font-semibold">above</strong> this strike?
           </div>
           {oracle && (
-            <div className="text-muted-foreground mt-4 flex justify-between border-t pt-3 text-xs">
+            <div className="text-muted-foreground mt-4 flex justify-between border-t pt-3 text-sm">
               <span>
                 now <strong className="text-foreground">{fmtUsd(oracle.spot)}</strong>
               </span>
@@ -1770,7 +1770,7 @@ function SwipingView({
 
         {/* hint shown only on card 1 before any drag */}
         {myNextIdx === 0 && drag.x === 0 && !drag.flying && (
-          <p className="text-muted-foreground mt-3 text-center text-xs">
+          <p className="text-muted-foreground mt-3 text-center text-sm">
             ← swipe DOWN · swipe UP →
           </p>
         )}
@@ -1790,7 +1790,7 @@ function SwipingView({
         >
           <div className="flex flex-col">
             <span>↓ DOWN</span>
-            <span className="text-muted-foreground text-xs font-normal">
+            <span className="text-muted-foreground text-sm font-normal">
               ≤ {fmtUsd(card.strike)}
             </span>
           </div>
@@ -1806,7 +1806,7 @@ function SwipingView({
         >
           <div className="flex flex-col">
             <span>↑ UP</span>
-            <span className="text-primary-foreground/80 text-xs font-normal">
+            <span className="text-primary-foreground/80 text-sm font-normal">
               &gt; {fmtUsd(card.strike)}
             </span>
           </div>
@@ -1814,19 +1814,19 @@ function SwipingView({
       </div>
 
       {isDusdc && !managerReady && (
-        <p className="rounded border-l-2 border-amber-500 bg-amber-500/5 p-2 text-xs text-amber-600">
+        <p className="rounded border-l-2 border-amber-500 bg-amber-500/5 p-2 text-sm text-amber-600">
           {managerQuery.data
             ? `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC via the lobby setup.`
             : "PredictManager not found. Return to the lobby and complete Staked-tier setup."}
         </p>
       )}
 
-      <p className="text-muted-foreground text-center text-xs">
+      <p className="text-muted-foreground text-center text-sm">
         decide fast: 0–5s = 1.5× · 5–20s = 1.0× · 20–60s = 0.75×
       </p>
 
       {err && (
-        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-xs text-red-500">
+        <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-sm text-red-500">
           {err}
         </p>
       )}
@@ -1897,13 +1897,13 @@ function RevealingView({
         <span className="border-primary inline-block h-10 w-10 animate-spin rounded-full border-4 border-t-transparent" />
       </div>
       <p className="text-lg font-semibold tracking-[-0.01em]">revealing deck…</p>
-      <p className="text-muted-foreground text-sm">
+      <p className="text-muted-foreground text-base">
         the keeper pushes the plaintext on-chain once the challenger joins.
         usually clears within a few seconds.
       </p>
       {cards && (
         <div className="space-y-2 pt-2">
-          <p className="text-muted-foreground text-xs">
+          <p className="text-muted-foreground text-sm">
             keeper looks slow — you can reveal manually.
           </p>
           <Button onClick={manualReveal} disabled={isPending} size="sm">
@@ -1912,7 +1912,7 @@ function RevealingView({
         </div>
       )}
       {err && (
-        <p className="text-destructive text-xs break-all" role="alert">
+        <p className="text-destructive text-sm break-all" role="alert">
           {err}
         </p>
       )}
@@ -1937,10 +1937,10 @@ function LockupView({
           ? "watching the oracle tick toward settlement…"
           : "waiting for opponent to finish swiping…"}
       </p>
-      <p className="text-muted-foreground text-sm">
+      <p className="text-muted-foreground text-base">
         swipes are locked. the deck settles when BTC's oracle resolves.
       </p>
-      <div className="text-muted-foreground flex justify-center gap-6 pt-2 text-xs">
+      <div className="text-muted-foreground flex justify-center gap-6 pt-2 text-sm">
         <span>
           you <strong className="text-foreground">{myNextIdx}</strong>/5
         </span>
@@ -1989,10 +1989,10 @@ function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
     <div className="space-y-4 py-6 text-center">
       <Badge variant="default">oracle settled</Badge>
       <p className="text-lg">paying out…</p>
-      <p className="text-muted-foreground text-sm">
+      <p className="text-muted-foreground text-base">
         the keeper auto-closes settled duels — payouts appear within ~10s.
       </p>
-      <details className="text-muted-foreground mx-auto max-w-sm text-left text-xs">
+      <details className="text-muted-foreground mx-auto max-w-sm text-left text-sm">
         <summary className="cursor-pointer text-center underline-offset-2 hover:underline">
           impatient? settle manually
         </summary>
@@ -2078,7 +2078,7 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
             {banner.text}
           </div>
           {myPayout > 0n && (
-            <div className="text-muted-foreground text-sm">
+            <div className="text-muted-foreground text-base">
               payout{" "}
               <strong className="text-foreground">
                 {fmtStake(myPayout, duel.stakeCoinType)}
@@ -2089,15 +2089,15 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
 
         <Separator />
 
-        <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="grid grid-cols-2 gap-3 text-base">
           <div className="bg-muted/40 rounded p-3">
-            <div className="text-muted-foreground text-xs">your score</div>
+            <div className="text-muted-foreground text-sm">your score</div>
             <div className="text-2xl font-semibold tabular-nums">
               {(Number(myScore) / 1e9).toFixed(2)}
             </div>
           </div>
           <div className="bg-muted/40 rounded p-3">
-            <div className="text-muted-foreground text-xs">opponent</div>
+            <div className="text-muted-foreground text-sm">opponent</div>
             <div className="text-2xl font-semibold tabular-nums">
               {(Number(oppScore) / 1e9).toFixed(2)}
             </div>
@@ -2105,20 +2105,20 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
         </div>
 
         <div>
-          <h3 className="text-muted-foreground mb-2 text-xs uppercase tracking-wide">
+          <h3 className="text-muted-foreground mb-2 text-sm uppercase tracking-wide">
             cards
           </h3>
           <div className="space-y-1.5">
             {myCards.map((m, i) => (
               <div
                 key={i}
-                className="bg-muted/30 flex items-center justify-between rounded p-2 text-sm"
+                className="bg-muted/30 flex items-center justify-between rounded p-2 text-base"
               >
                 <div>
                   <span className="text-muted-foreground">card {i + 1} · </span>
                   <span className="tabular-nums">{fmtUsd(m.card.strike)}</span>
                 </div>
-                <div className="flex items-center gap-3 text-xs">
+                <div className="flex items-center gap-3 text-sm">
                   {m.swipe ? (
                     <span className="text-muted-foreground">
                       you {m.swipe.isUp ? "↑" : "↓"}
@@ -2170,25 +2170,25 @@ function SpectatorView({ duel }: { duel: DuelState }) {
   return (
     <div className="space-y-3 py-4 text-center">
       <Badge variant="secondary">spectating</Badge>
-      <p className="text-muted-foreground text-sm">
+      <p className="text-muted-foreground text-base">
         you're not a player in this duel. pot{" "}
         {fmtStake(duel.p0Stake + duel.p1Stake, duel.stakeCoinType)}.
       </p>
-      <div className="grid grid-cols-2 gap-3 text-sm">
+      <div className="grid grid-cols-2 gap-3 text-base">
         <div className="bg-muted/40 rounded p-3">
-          <div className="text-muted-foreground text-xs">creator</div>
+          <div className="text-muted-foreground text-sm">creator</div>
           <div className="font-semibold">
             {(Number(duel.p0Score) / 1e9).toFixed(2)}
           </div>
         </div>
         <div className="bg-muted/40 rounded p-3">
-          <div className="text-muted-foreground text-xs">challenger</div>
+          <div className="text-muted-foreground text-sm">challenger</div>
           <div className="font-semibold">
             {(Number(duel.p1Score) / 1e9).toFixed(2)}
           </div>
         </div>
       </div>
-      <p className="text-muted-foreground text-xs">
+      <p className="text-muted-foreground text-sm">
         swipes {Number(duel.p0NextCardIdx)}/5 · {Number(duel.p1NextCardIdx)}/5 · settled{" "}
         {duel.settledCount.toString()}/5
       </p>

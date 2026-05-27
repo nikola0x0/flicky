@@ -223,24 +223,24 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
                 onCopy={handleCopy}
               />
 
-              <p className="text-center text-[10px] tracking-wider text-white/55 uppercase">
+              <p className="text-center text-xs tracking-wider text-white/55 uppercase">
                 scan with slush, or send directly to the address
               </p>
 
               {received !== null ? (
-                <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-xs text-emerald-200">
+                <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-sm text-emerald-200">
                   received +{received.toFixed(4)} {receiveMeta.label}
                 </div>
               ) : (
-                <div className="flex items-center justify-center gap-2 text-[10px] tracking-wider text-white/55 uppercase">
+                <div className="flex items-center justify-center gap-2 text-xs tracking-wider text-white/55 uppercase">
                   <span className="size-1.5 animate-pulse rounded-full bg-white/55" />
                   waiting for deposit
                 </div>
               )}
 
-              <div className="flex items-center justify-between text-[10px] tracking-wider text-white/55 uppercase">
+              <div className="flex items-center justify-between text-xs tracking-wider text-white/55 uppercase">
                 <span>current balance</span>
-                <span className="text-sm tabular-nums text-white">
+                <span className="text-base tabular-nums text-white">
                   {currentBalance.toFixed(4)} {receiveMeta.label}
                 </span>
               </div>
@@ -285,7 +285,7 @@ function TabRow({
             key={t.id}
             type="button"
             onClick={() => onChange(t.id)}
-            className={`flex items-center justify-center gap-2 rounded-xl px-2 py-2 text-xs tracking-wider uppercase transition ${
+            className={`flex items-center justify-center gap-2 rounded-xl px-2 py-2 text-sm tracking-wider uppercase transition ${
               active
                 ? "bg-white/15 text-white"
                 : "bg-white/5 text-white/55 hover:text-white"
@@ -316,7 +316,7 @@ function AmountField({
 }) {
   return (
     <div className="rounded-2xl bg-black/35 px-4 py-3 ring-1 ring-white/5">
-      <div className="text-[10px] tracking-[0.18em] text-white/55 uppercase">
+      <div className="text-xs tracking-[0.18em] text-white/55 uppercase">
         amount
       </div>
       <div className="mt-1 flex items-center gap-3">
@@ -340,7 +340,7 @@ function AmountField({
             aria-hidden
             className="size-6 [image-rendering:pixelated]"
           />
-          <span className="text-sm tracking-wider text-white uppercase">
+          <span className="text-base tracking-wider text-white uppercase">
             {token.label}
           </span>
         </div>
@@ -408,12 +408,12 @@ function QRBlock({ data }: { data: string | null }) {
   return (
     <div className="relative mx-auto aspect-square w-56 rounded-2xl bg-white p-2">
       {!data && (
-        <div className="absolute inset-0 grid place-items-center px-4 text-center text-xs tracking-wider text-neutral-500 uppercase">
+        <div className="absolute inset-0 grid place-items-center px-4 text-center text-sm tracking-wider text-neutral-500 uppercase">
           enter amount to generate QR
         </div>
       )}
       {data && !ready && (
-        <div className="absolute inset-0 grid place-items-center text-xs text-neutral-500">
+        <div className="absolute inset-0 grid place-items-center text-sm text-neutral-500">
           generating…
         </div>
       )}
@@ -439,10 +439,10 @@ function AddressRow({
       style={BLUE_BRAND_STYLE}
       className="flex w-full items-center justify-between gap-2 rounded-xl bg-black/35 px-3 py-2 text-left ring-1 ring-white/5 transition hover:bg-black/45"
     >
-      <span className="font-mono text-xs tabular-nums text-white/80">
+      <span className="font-mono text-sm tabular-nums text-white/80">
         {short}
       </span>
-      <span className="text-[10px] tracking-wider text-white/55 uppercase">
+      <span className="text-xs tracking-wider text-white/55 uppercase">
         {copied ? "copied" : "copy"}
       </span>
     </button>
@@ -531,7 +531,7 @@ function ManagerDepositTab({
   return (
     <div className="space-y-3">
       <div className="rounded-2xl bg-black/35 px-4 py-3 ring-1 ring-white/5">
-        <div className="text-[10px] tracking-[0.18em] text-white/55 uppercase">
+        <div className="text-xs tracking-[0.18em] text-white/55 uppercase">
           amount
         </div>
         <div className="mt-1 flex items-center gap-3">
@@ -555,23 +555,23 @@ function ManagerDepositTab({
               aria-hidden
               className="size-6 [image-rendering:pixelated]"
             />
-            <span className="text-sm tracking-wider text-white uppercase">
+            <span className="text-base tracking-wider text-white uppercase">
               mgr
             </span>
           </div>
         </div>
       </div>
 
-      <div className="rounded-xl bg-white/5 px-3 py-2 text-[10px] tracking-wider text-white/55 uppercase">
+      <div className="rounded-xl bg-white/5 px-3 py-2 text-xs tracking-wider text-white/55 uppercase">
         <div className="flex justify-between">
           <span>wallet dUSDC</span>
-          <span className="text-sm tabular-nums text-white">
+          <span className="text-base tabular-nums text-white">
             {walletDusdc.toFixed(4)}
           </span>
         </div>
         <div className="flex justify-between">
           <span>manager dUSDC</span>
-          <span className="text-sm tabular-nums text-white">
+          <span className="text-base tabular-nums text-white">
             {managerBalance.toFixed(4)}
           </span>
         </div>
@@ -590,9 +590,9 @@ function ManagerDepositTab({
             : `deposit ${validAmount ? parsed.toFixed(2) : "—"} dUSDC`}
       </button>
 
-      {error && <p className="text-xs text-red-400">{error}</p>}
+      {error && <p className="text-sm text-red-400">{error}</p>}
       {success !== null && (
-        <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-xs text-emerald-200">
+        <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-sm text-emerald-200">
           deposited +{success.toFixed(4)} dUSDC into manager
         </div>
       )}
@@ -603,7 +603,7 @@ function ManagerDepositTab({
           void refetchManager()
           invalidateBalances()
         }}
-        className="text-[10px] tracking-wider text-white/40 uppercase hover:text-white/70"
+        className="text-xs tracking-wider text-white/40 uppercase hover:text-white/70"
       >
         refresh
       </button>

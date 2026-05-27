@@ -148,7 +148,7 @@ export default function GameShop() {
         <p className="text-base tracking-[0.15em] text-white uppercase">
           swap unavailable
         </p>
-        <p className="text-xs text-white/55">
+        <p className="text-sm text-white/55">
           set VITE_SWAP_POOL_ID in .env.local
         </p>
       </div>
@@ -161,7 +161,7 @@ export default function GameShop() {
         <p className="text-base tracking-[0.15em] text-white uppercase">
           sign in to swap
         </p>
-        <p className="text-xs text-white/55">
+        <p className="text-sm text-white/55">
           use the sign-in button in the header
         </p>
       </div>
@@ -231,9 +231,9 @@ export default function GameShop() {
               }}
               min={0}
               step="any"
-              className="w-14 rounded-md bg-black/30 px-2 py-1 text-right text-sm text-white tabular-nums focus:outline-none"
+              className="w-14 rounded-md bg-black/30 px-2 py-1 text-right text-base text-white tabular-nums focus:outline-none"
             />
-            <span className="text-sm text-white/55">%</span>
+            <span className="text-base text-white/55">%</span>
           </div>
         </div>
         <div className="mt-2 flex items-center justify-between border-t border-white/5 pt-2 text-lg">
@@ -260,7 +260,7 @@ export default function GameShop() {
 
       {status && (
         <div
-          className={`rounded-lg px-3 py-2 text-xs ${
+          className={`rounded-lg px-3 py-2 text-sm ${
             status.kind === "ok"
               ? "bg-emerald-500/15 text-emerald-200"
               : "bg-rose-500/15 text-rose-200"
@@ -325,7 +325,7 @@ function TokenInputCard({
               {balance.toFixed(4)}
             </span>
             {onMax && (
-              <span className="ml-1 rounded bg-white/10 px-1.5 py-0.5 text-[10px] tracking-wider text-white uppercase">
+              <span className="ml-1 rounded bg-white/10 px-1.5 py-0.5 text-xs tracking-wider text-white uppercase">
                 max
               </span>
             )}

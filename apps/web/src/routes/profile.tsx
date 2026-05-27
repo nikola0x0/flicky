@@ -97,7 +97,7 @@ export default function Profile() {
                 <span className="tabular-nums">{short}</span>
                 <span className="text-base">⎘</span>
               </button>
-              <p className="text-xs tracking-[0.18em] text-white/55 uppercase">
+              <p className="text-sm tracking-[0.18em] text-white/55 uppercase">
                 connected via google
               </p>
             </div>
@@ -170,7 +170,7 @@ export default function Profile() {
                 />
                 pvp history
               </span>
-              <span className="text-sm">▾</span>
+              <span className="text-base">▾</span>
             </button>
 
             <div className="mt-10 text-center text-base text-white/55">

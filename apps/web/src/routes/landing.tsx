@@ -11,7 +11,7 @@ export default function Landing() {
         </p>
         <Link
           to="/game/home"
-          className="mt-10 rounded-full bg-primary px-6 py-3 text-sm text-primary-foreground hover:opacity-90"
+          className="mt-10 rounded-full bg-primary px-6 py-3 text-base text-primary-foreground hover:opacity-90"
         >
           enter the game →
         </Link>

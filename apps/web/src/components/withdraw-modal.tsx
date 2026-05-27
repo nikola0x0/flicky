@@ -126,7 +126,7 @@ function TabRow({
             key={t.id}
             type="button"
             onClick={() => onChange(t.id)}
-            className={`flex items-center justify-center gap-2 rounded-xl px-2 py-2 text-xs tracking-wider uppercase transition ${
+            className={`flex items-center justify-center gap-2 rounded-xl px-2 py-2 text-sm tracking-wider uppercase transition ${
               active
                 ? "bg-white/15 text-white"
                 : "bg-white/5 text-white/55 hover:text-white"
@@ -188,7 +188,7 @@ function ManagerWithdrawTab({ address }: { address: string }) {
 
   return (
     <div className="space-y-3">
-      <p className="text-[10px] tracking-wider text-white/55 uppercase">
+      <p className="text-xs tracking-wider text-white/55 uppercase">
         manager &rarr; wallet
       </p>
       <AmountField
@@ -197,10 +197,10 @@ function ManagerWithdrawTab({ address }: { address: string }) {
         onMax={() => setAmount(managerBalance.toString())}
         token={{ icon: "/tokens/manager-usdc.png", label: "mgr" }}
       />
-      <div className="rounded-xl bg-white/5 px-3 py-2 text-[10px] tracking-wider text-white/55 uppercase">
+      <div className="rounded-xl bg-white/5 px-3 py-2 text-xs tracking-wider text-white/55 uppercase">
         <div className="flex justify-between">
           <span>manager dUSDC</span>
-          <span className="text-sm tabular-nums text-white">
+          <span className="text-base tabular-nums text-white">
             {managerBalance.toFixed(4)}
           </span>
         </div>
@@ -220,9 +220,9 @@ function ManagerWithdrawTab({ address }: { address: string }) {
               ? "insufficient manager balance"
               : `withdraw ${validAmount ? parsed.toFixed(2) : "—"} dUSDC`}
       </button>
-      {error && <p className="text-xs text-red-400">{error}</p>}
+      {error && <p className="text-sm text-red-400">{error}</p>}
       {success !== null && (
-        <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-xs text-emerald-200">
+        <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-sm text-emerald-200">
           withdrew +{success.toFixed(4)} dUSDC to wallet
         </div>
       )}
@@ -312,10 +312,10 @@ function SendTab({ address }: { address: string }) {
   if (confirming) {
     return (
       <div className="space-y-3">
-        <p className="text-[10px] tracking-wider text-white/55 uppercase">
+        <p className="text-xs tracking-wider text-white/55 uppercase">
           confirm transfer
         </p>
-        <div className="space-y-2 rounded-xl bg-white/5 px-3 py-3 text-xs">
+        <div className="space-y-2 rounded-xl bg-white/5 px-3 py-3 text-sm">
           <div className="flex items-center justify-between">
             <span className="text-white/55 uppercase">amount</span>
             <span className="font-bold tabular-nums">
@@ -324,11 +324,11 @@ function SendTab({ address }: { address: string }) {
           </div>
           <div>
             <div className="text-white/55 uppercase">to</div>
-            <div className="mt-1 break-all font-mono text-[11px] text-white">
+            <div className="mt-1 break-all font-mono text-xs text-white">
               {recipient.trim()}
             </div>
           </div>
-          <p className="rounded bg-amber-500/15 px-2 py-1 text-[10px] text-amber-200">
+          <p className="rounded bg-amber-500/15 px-2 py-1 text-xs text-amber-200">
             double-check the address — funds sent to a wrong address are
             unrecoverable
           </p>
@@ -338,7 +338,7 @@ function SendTab({ address }: { address: string }) {
             type="button"
             disabled={busy}
             onClick={() => setConfirming(false)}
-            className="rounded-xl bg-white/10 px-4 py-3 text-sm tracking-wider uppercase text-white/80 hover:bg-white/15 disabled:opacity-50"
+            className="rounded-xl bg-white/10 px-4 py-3 text-base tracking-wider uppercase text-white/80 hover:bg-white/15 disabled:opacity-50"
           >
             cancel
           </button>
@@ -347,24 +347,24 @@ function SendTab({ address }: { address: string }) {
             disabled={busy}
             onClick={() => void submit()}
             style={BLUE_BRAND_STYLE}
-            className="rounded-xl bg-[#4094fb] px-4 py-3 text-sm font-bold tracking-wider uppercase text-white disabled:opacity-50"
+            className="rounded-xl bg-[#4094fb] px-4 py-3 text-base font-bold tracking-wider uppercase text-white disabled:opacity-50"
           >
             {busy ? "sending…" : "yes, send"}
           </button>
         </div>
-        {error && <p className="text-xs text-red-400">{error}</p>}
+        {error && <p className="text-sm text-red-400">{error}</p>}
       </div>
     )
   }
 
   return (
     <div className="space-y-3">
-      <p className="text-[10px] tracking-wider text-white/55 uppercase">
+      <p className="text-xs tracking-wider text-white/55 uppercase">
         wallet &rarr; external address
       </p>
       <TokenToggle value={token} onChange={setToken} />
       <div className="rounded-2xl bg-black/35 px-4 py-3 ring-1 ring-white/5">
-        <div className="text-[10px] tracking-[0.18em] text-white/55 uppercase">
+        <div className="text-xs tracking-[0.18em] text-white/55 uppercase">
           recipient address
         </div>
         <input
@@ -373,10 +373,10 @@ function SendTab({ address }: { address: string }) {
           value={recipient}
           onChange={(e) => setRecipient(e.target.value)}
           placeholder="0x…"
-          className="mt-1 w-full bg-transparent font-mono text-sm text-white placeholder-white/30 focus:outline-none"
+          className="mt-1 w-full bg-transparent font-mono text-base text-white placeholder-white/30 focus:outline-none"
         />
         {recipient && !validAddress && (
-          <p className="mt-1 text-[10px] text-amber-300">
+          <p className="mt-1 text-xs text-amber-300">
             must be a 0x-prefixed 32-byte Sui address (not your own)
           </p>
         )}
@@ -387,10 +387,10 @@ function SendTab({ address }: { address: string }) {
         onMax={() => setAmount(balance.toString())}
         token={{ icon: meta.icon, label: meta.label.toLowerCase() }}
       />
-      <div className="rounded-xl bg-white/5 px-3 py-2 text-[10px] tracking-wider text-white/55 uppercase">
+      <div className="rounded-xl bg-white/5 px-3 py-2 text-xs tracking-wider text-white/55 uppercase">
         <div className="flex justify-between">
           <span>wallet {meta.label}</span>
-          <span className="text-sm tabular-nums text-white">
+          <span className="text-base tabular-nums text-white">
             {balance.toFixed(4)}
           </span>
         </div>
@@ -410,9 +410,9 @@ function SendTab({ address }: { address: string }) {
               ? `insufficient ${meta.label}`
               : `review send`}
       </button>
-      {error && <p className="text-xs text-red-400">{error}</p>}
+      {error && <p className="text-sm text-red-400">{error}</p>}
       {success && (
-        <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-xs text-emerald-200">
+        <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-sm text-emerald-200">
           sent {success.amount.toFixed(4)} {SEND_META[success.token].label}
         </div>
       )}
@@ -437,7 +437,7 @@ function TokenToggle({
             key={t}
             type="button"
             onClick={() => onChange(t)}
-            className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm tracking-wider uppercase transition ${
+            className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-base tracking-wider uppercase transition ${
               active
                 ? "bg-white/15 text-white"
                 : "bg-white/5 text-white/55 hover:text-white"
@@ -470,7 +470,7 @@ function AmountField({
 }) {
   return (
     <div className="rounded-2xl bg-black/35 px-4 py-3 ring-1 ring-white/5">
-      <div className="text-[10px] tracking-[0.18em] text-white/55 uppercase">
+      <div className="text-xs tracking-[0.18em] text-white/55 uppercase">
         amount
       </div>
       <div className="mt-1 flex items-center gap-3">
@@ -490,7 +490,7 @@ function AmountField({
         <button
           type="button"
           onClick={onMax}
-          className="rounded-full bg-white/10 px-3 py-1 text-[10px] tracking-wider uppercase text-white/70 hover:text-white"
+          className="rounded-full bg-white/10 px-3 py-1 text-xs tracking-wider uppercase text-white/70 hover:text-white"
         >
           max
         </button>
@@ -501,7 +501,7 @@ function AmountField({
             aria-hidden
             className="size-6 [image-rendering:pixelated]"
           />
-          <span className="text-sm tracking-wider text-white uppercase">
+          <span className="text-base tracking-wider text-white uppercase">
             {token.label}
           </span>
         </div>

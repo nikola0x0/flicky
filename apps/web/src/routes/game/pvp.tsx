@@ -130,7 +130,7 @@ export default function GamePvp() {
         />
       </div>
 
-      <p className="text-center text-[10px] tracking-[0.18em] text-white/45 uppercase">
+      <p className="text-center text-xs tracking-[0.18em] text-white/45 uppercase">
         match starts when an opponent joins
       </p>
 
@@ -228,7 +228,7 @@ function StakeSelector({
                       {s}
                     </span>
                   </span>
-                  <span className="text-xs tracking-[0.18em] text-white/55 uppercase">
+                  <span className="text-sm tracking-[0.18em] text-white/55 uppercase">
                     dUSDC
                   </span>
                 </button>
