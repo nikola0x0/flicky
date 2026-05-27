@@ -135,25 +135,24 @@ export function MyMatchTile() {
   }, [address, demo])
 
   // Demo: synthetic oracle-tick stream so the chart visibly moves
-  // without a real game in flight. The duel itself is computed (not
-  // fetched) below.
+  // without a real game in flight. Drives a slow sine wave plus light
+  // noise — looks like an actual price chart, not a random twitch.
   useEffect(() => {
     if (!demo) return
     const strike = BigInt(DEMO_STRIKE)
-    let forward = strike
+    const start = performance.now()
     const interval = setInterval(() => {
-      // Random walk ±0.06 on the 1e9 scale; clamp to ±0.6 around strike.
-      const step = BigInt(Math.round((Math.random() - 0.5) * 120_000_000))
-      forward += step
-      const max = strike + 600_000_000n
-      const min = strike - 600_000_000n
-      if (forward > max) forward = max
-      if (forward < min) forward = min
+      const t = (performance.now() - start) / 1000
+      // Two stacked sines for organic-feeling motion, amp ~0.5 on 1e9 scale.
+      const wave =
+        Math.sin(t * 0.6) * 350_000_000 + Math.sin(t * 1.7 + 1.2) * 120_000_000
+      const noise = (Math.random() - 0.5) * 30_000_000
+      const forward = strike + BigInt(Math.round(wave + noise))
       setTicks((prev) => ({
         ...prev,
         "demo-oracle-2": { spot: forward.toString(), forward: forward.toString() },
       }))
-    }, 250)
+    }, 60)
     return () => clearInterval(interval)
   }, [demo])
 
@@ -568,12 +567,12 @@ function SeriesLine({
   return (
     <>
       {segments.map((seg, si) => {
-        // A segment can mix settled + live points. Render two polylines
-        // overlapping the segment so each portion uses the right style.
-        const pathPts = seg.map((p) => `${p.x},${p.y}`).join(" ")
+        // Catmull-Rom-to-Bezier smoothing — segments curve through each
+        // point instead of straight-line hinging at card slots.
+        const d = smoothPath(seg)
         const allLive = seg.every((p) => p.live)
         return (
-          <polyline
+          <path
             key={si}
             fill="none"
             stroke={color}
@@ -582,7 +581,7 @@ function SeriesLine({
             strokeLinecap="round"
             strokeDasharray={allLive ? "4 3" : undefined}
             opacity={allLive ? 0.7 : 1}
-            points={pathPts}
+            d={d}
           />
         )
       })}
@@ -615,6 +614,34 @@ function SeriesLine({
       )}
     </>
   )
+}
+
+/**
+ * Catmull-Rom-to-cubic-Bezier path through the given points. Each
+ * segment's control points are derived from the surrounding neighbors
+ * so the curve passes through every point smoothly with no overshoot.
+ * Endpoints mirror their neighbor (the curve still terminates exactly
+ * on the first/last point).
+ */
+function smoothPath(pts: Array<{ x: number; y: number }>): string {
+  if (pts.length === 0) return ""
+  if (pts.length === 1) return `M${pts[0].x},${pts[0].y}`
+  if (pts.length === 2) {
+    return `M${pts[0].x},${pts[0].y} L${pts[1].x},${pts[1].y}`
+  }
+  let d = `M${pts[0].x},${pts[0].y}`
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const p3 = pts[Math.min(pts.length - 1, i + 2)]
+    const c1x = p1.x + (p2.x - p0.x) / 6
+    const c1y = p1.y + (p2.y - p0.y) / 6
+    const c2x = p2.x - (p3.x - p1.x) / 6
+    const c2y = p2.y - (p3.y - p1.y) / 6
+    d += ` C${c1x},${c1y} ${c2x},${c2y} ${p2.x},${p2.y}`
+  }
+  return d
 }
 
 function fmtUsd(micro: bigint): string {
