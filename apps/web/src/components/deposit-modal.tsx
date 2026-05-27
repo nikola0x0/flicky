@@ -24,14 +24,20 @@ import {
 import {
   buildCreateManagerTx,
   buildDepositDusdcTx,
-  extractManagerIdFromChanges,
+  resolveCreatedManagerId,
   writeManagerCache,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
+import { PixelButton } from "@/components/pixel-button"
 
 const BLUE_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
   "--btn-highlight": "#7eb6ff",
+} as CSSProperties
+
+const ORANGE_BRAND_STYLE = {
+  "--btn-bg": "#e08a2b",
+  "--btn-highlight": "#f4b966",
 } as CSSProperties
 
 type Tab = "SUI" | "DUSDC" | "MANAGER"
@@ -487,21 +493,15 @@ function ManagerDepositTab({
       let mgrId = managerId
       if (!mgrId) {
         const createTx = buildCreateManagerTx()
-        const res = await sign.mutateAsync({ transaction: createTx })
-        mgrId = extractManagerIdFromChanges(
-          (
-            res as {
-              objectChanges?: Array<{
-                type: string
-                objectType?: string
-                objectId?: string
-              }>
-            }
-          ).objectChanges ?? [],
-        )
+        const res = (await sign.mutateAsync({ transaction: createTx })) as {
+          digest: string
+        }
+        // Sponsored-gas path returns only { digest }; re-fetch the tx
+        // block to read objectChanges.
+        mgrId = await resolveCreatedManagerId(client, res.digest, address)
         if (!mgrId) {
           throw new Error(
-            "create_manager succeeded but PredictManager id missing from objectChanges",
+            "create_manager succeeded but PredictManager id not found in tx block",
           )
         }
         writeManagerCache(address, mgrId)
@@ -577,18 +577,18 @@ function ManagerDepositTab({
         </div>
       </div>
 
-      <button
-        type="button"
+      <PixelButton
         disabled={busy || !validAmount || insufficient}
         onClick={() => void doDeposit()}
-        className="w-full rounded-xl bg-[#e08a2b] px-4 py-3 text-lg font-bold tracking-wider uppercase text-white disabled:opacity-50"
+        style={ORANGE_BRAND_STYLE}
+        className="h-12 w-full !text-2xl"
       >
         {busy
           ? "depositing…"
           : insufficient
             ? "insufficient dUSDC in wallet"
             : `deposit ${validAmount ? parsed.toFixed(2) : "—"} dUSDC`}
-      </button>
+      </PixelButton>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
       {success !== null && (

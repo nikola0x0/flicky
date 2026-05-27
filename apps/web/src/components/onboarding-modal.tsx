@@ -8,8 +8,8 @@ import {
   fmtDusdc,
   getManagerDusdcBalance,
   getWalletDusdcBalance,
+  resolveCreatedManagerId,
   writeManagerCache,
-  extractManagerIdFromChanges,
 } from "@/lib/deepbook"
 import { DepositModal } from "@/components/deposit-modal"
 import { PixelButton } from "@/components/pixel-button"
@@ -187,21 +187,19 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
               if (!account) return
               try {
                 const tx = buildCreateManagerTx()
-                const res = await sign.mutateAsync({ transaction: tx })
-                const mgrId = extractManagerIdFromChanges(
-                  (
-                    res as {
-                      objectChanges?: Array<{
-                        type: string
-                        objectType?: string
-                        objectId?: string
-                      }>
-                    }
-                  ).objectChanges ?? [],
+                const res = (await sign.mutateAsync({ transaction: tx })) as {
+                  digest: string
+                }
+                // Sponsored-gas path returns only { digest }; re-fetch the
+                // tx block to read objectChanges.
+                const mgrId = await resolveCreatedManagerId(
+                  client,
+                  res.digest,
+                  account.address,
                 )
                 if (!mgrId) {
                   throw new Error(
-                    "create_manager tx succeeded but PredictManager id not in objectChanges",
+                    "create_manager tx succeeded but PredictManager id not found in tx block",
                   )
                 }
                 writeManagerCache(account.address, mgrId)

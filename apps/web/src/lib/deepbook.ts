@@ -468,3 +468,26 @@ export function extractManagerIdFromChanges(
   }
   return null
 }
+
+/**
+ * Resolve the PredictManager id that a `create_manager` tx just produced.
+ *
+ * Implementation note: we deliberately do NOT parse `objectChanges` on the
+ * sign result. The sponsored-gas path returns only `{ digest }`, so that
+ * field is missing. Instead — matching what apps/playground does — we
+ * wait for the tx to be indexed, then re-run the event-based
+ * `findPredictManager` discovery. The `PredictManagerCreated` event is
+ * emitted regardless of who paid gas, so this works for both sponsored
+ * and wallet-paid paths.
+ */
+export async function resolveCreatedManagerId(
+  client: SuiClient,
+  digest: string,
+  ownerAddress: string,
+): Promise<string | null> {
+  await client.waitForTransaction({ digest })
+  // Bust the per-address cache so we don't return a stale null hit.
+  invalidateManagerCache(ownerAddress)
+  const mgr = await findPredictManager(client, ownerAddress)
+  return mgr?.id ?? null
+}
