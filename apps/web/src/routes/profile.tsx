@@ -1,15 +1,17 @@
 import { useState } from "react"
 import type { CSSProperties } from "react"
-import { Link, useNavigate } from "react-router"
+import { Navigate, useNavigate } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"
+import { WithdrawModal } from "@/components/withdraw-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
 import {
   useDusdcBalance,
+  useManagerBalance,
   useSuiBalance,
 } from "@/hooks/use-wallet-balances"
 
@@ -31,15 +33,27 @@ export default function Profile() {
   const navigate = useNavigate()
   const { data: suiBalance = 0 } = useSuiBalance()
   const { data: dusdcBalance = 0 } = useDusdcBalance()
+  const { data: managerInfo } = useManagerBalance()
+  const managerBalance = managerInfo?.balance ?? 0
   const [depositOpen, setDepositOpen] = useState(false)
+  const [withdrawOpen, setWithdrawOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
 
-  // Signed out — bounce back to /game/home where they can sign in.
+  const handleCopyAddress = async () => {
+    if (!account) return
+    try {
+      await navigator.clipboard.writeText(account.address)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Signed out (e.g. logout from the menu while on this page) — bounce
+  // to /game/home rather than render a stripped-down fallback.
   if (!account) {
-    return (
-      <Link to="/game/home" className="text-white underline">
-        go back
-      </Link>
-    )
+    return <Navigate to="/game/home" replace />
   }
 
   const address = account.address
@@ -51,6 +65,7 @@ export default function Profile() {
         <ProfileHeader
           onBack={() => navigate(-1)}
           dusdc={dusdcBalance}
+          managerDusdc={managerBalance}
         />
 
         <main className="flex-1 overflow-y-auto px-4 pb-6">
@@ -73,7 +88,7 @@ export default function Profile() {
 
             <div className="flex flex-1 flex-col gap-2 pt-1">
               <div className="flex items-center gap-2">
-                <h1 className="text-lg tracking-wider">{short}</h1>
+                <h1 className="text-2xl tracking-wider">{short}</h1>
                 <button
                   type="button"
                   aria-label="info"
@@ -84,14 +99,25 @@ export default function Profile() {
               </div>
               <button
                 type="button"
-                onClick={() => navigator.clipboard.writeText(address)}
+                onClick={() => void handleCopyAddress()}
                 aria-label="copy address"
-                className="inline-flex items-center gap-1.5 text-sm text-white/70 hover:text-white"
+                className={`inline-flex items-center gap-2 text-lg transition-colors duration-200 ${
+                  copied
+                    ? "text-emerald-300"
+                    : "text-white/70 hover:text-white"
+                }`}
               >
                 <span className="tabular-nums">{short}</span>
-                <span className="text-base">⎘</span>
+                <span className="text-2xl leading-none">
+                  {copied ? "✓" : "⎘"}
+                </span>
+                {copied && (
+                  <span className="text-xs tracking-[0.18em] uppercase">
+                    copied
+                  </span>
+                )}
               </button>
-              <p className="text-xs tracking-[0.18em] text-white/55 uppercase">
+              <p className="text-sm tracking-[0.18em] text-white/55 uppercase">
                 connected via google
               </p>
             </div>
@@ -108,7 +134,7 @@ export default function Profile() {
             <Stat
               icon="/tokens/manager-usdc.png"
               label="manager dusdc"
-              value="0.00"
+              value={managerBalance.toFixed(2)}
             />
           </section>
 
@@ -140,7 +166,7 @@ export default function Profile() {
             <ActionTile
               label="withdraw"
               icon="/icons/disk_load.png"
-              onClick={() => {}}
+              onClick={() => setWithdrawOpen(true)}
             />
             <ActionTile
               label="export pk"
@@ -153,7 +179,7 @@ export default function Profile() {
             <button
               type="button"
               style={BLUE_BRAND_STYLE}
-              className="default-btn-green-container flex w-full items-center justify-between px-4 py-3 text-base tracking-wider text-white uppercase"
+              className="default-btn-green-container flex w-full items-center justify-between px-4 py-3 text-base text-lg tracking-wider text-white uppercase"
             >
               <span className="flex items-center gap-2">
                 <img
@@ -162,9 +188,9 @@ export default function Profile() {
                   aria-hidden
                   className="size-5 [image-rendering:pixelated]"
                 />
-                PvP Match History
+                pvp history
               </span>
-              <span className="text-sm">▾</span>
+              <span className="text-base">▾</span>
             </button>
 
             <div className="mt-10 text-center text-base text-white/55">
@@ -179,6 +205,11 @@ export default function Profile() {
         address={address}
         onClose={() => setDepositOpen(false)}
       />
+      <WithdrawModal
+        open={withdrawOpen}
+        address={address}
+        onClose={() => setWithdrawOpen(false)}
+      />
     </div>
   )
 }
@@ -186,9 +217,11 @@ export default function Profile() {
 function ProfileHeader({
   onBack,
   dusdc,
+  managerDusdc,
 }: {
   onBack: () => void
   dusdc: number
+  managerDusdc: number
 }) {
   return (
     <header className="flex items-center justify-between gap-2 px-3 py-3">
@@ -217,7 +250,7 @@ function ProfileHeader({
           />
           <BalanceChip
             icon="/tokens/manager-usdc.png"
-            amount="0.00"
+            amount={managerDusdc.toFixed(2)}
             label="manager"
             to="/game/shop"
           />
@@ -245,7 +278,7 @@ function Stat({
         aria-hidden
         className="size-8 [image-rendering:pixelated]"
       />
-      <span className="text-sm tracking-wider text-white/55 uppercase">
+      <span className="text-lg tracking-wider text-white/55 uppercase">
         {label}
       </span>
       <span className="text-3xl tabular-nums">{value}</span>
@@ -267,7 +300,7 @@ function ActionTile({
       type="button"
       onClick={onClick}
       style={BLUE_BRAND_STYLE}
-      className="default-btn-green-container flex h-16 items-center justify-between gap-1 px-3 text-sm tracking-wider text-white uppercase"
+      className="default-btn-green-container flex h-16 items-center justify-between gap-1 px-3 text-lg tracking-wider text-white uppercase"
     >
       <span>{label}</span>
       <img

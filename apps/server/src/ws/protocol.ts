@@ -51,6 +51,15 @@ export type ServerMsg =
       tier: Tier
       role: "creator" | "challenger"
       opponent: string
+      /**
+       * sha2_256 hash of the 5-card deck the server pre-generated for
+       * this match. The plaintext stays server-side until reveal_deck
+       * lands on chain — the creator commits THIS hash in `create_duel`,
+       * the keeper reveals later. "0x"-prefixed hex string. Empty only
+       * if deck generation degraded gracefully (shouldn't happen in
+       * practice).
+       */
+      deckHash: string
     }
   | {
       /**
@@ -68,6 +77,13 @@ export type ServerMsg =
       status: "PENDING" | "ACTIVE" | "COMPLETE"
       cardsRevealed: boolean
       cardCount: number
+      /**
+       * Revealed cards — empty until `DeckRevealed` lands. Each entry
+       * carries the DeepBook `OracleSVI` id and the u64 strike (decimal
+       * string). UI uses these to render the swipe deck and look up
+       * per-card oracle ticks.
+       */
+      cards: Array<{ oracle_id: string; strike: string }>
       settledCount: number
       /**
        * Real-PnL cumulative fields per the new contract. Winner is

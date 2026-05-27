@@ -371,6 +371,85 @@ export function fmtDusdc(microUnits: bigint): string {
   return `${(Number(microUnits) / 1e6).toFixed(4)} dUSDC`
 }
 
+// === UI-only swipe-cost quoter ===
+
+export interface SwipeQuote {
+  /**
+   * dUSDC micro-units. **Display only — do NOT pass to
+   * buildStakedSwipeTx.** The contract snapshots its own `premium` via
+   * `get_trade_amounts` on-chain at swipe time; this is an estimate
+   * that may drift by a few atoms by the time the tx lands.
+   */
+  premium: bigint
+  /**
+   * Implied probability in 1e9 fixed point (e.g. 700_000_000 = 0.70)
+   * for the side this quote was requested for. Derived as
+   * `premium * 1e9 / quantity` — the market's implied probability
+   * that the side wins.
+   */
+  pImplied: bigint
+}
+
+/**
+ * devInspect `predict::get_trade_amounts` to preview a swipe's cost
+ * BEFORE the user clicks UP/DOWN. The Move function returns
+ * `(mint_cost, max_payout)` as two u64s; we decode via BCS and
+ * compute the implied probability from the mint cost.
+ *
+ * Network round-trip — call once per (oracleId, strike, isUp) when a
+ * card enters the swipe UI, NOT on every `oracle_tick`.
+ */
+export async function quoteSwipePremium(
+  client: SuiClient,
+  args: {
+    oracleSviId: string
+    oracleExpiry: bigint
+    strike: bigint
+    isUp: boolean
+    quantity: bigint
+  },
+): Promise<SwipeQuote> {
+  const tx = new Transaction()
+  const mk = tx.add(
+    args.isUp
+      ? marketKey.up({
+          package: DEEPBOOK.package,
+          arguments: [args.oracleSviId, args.oracleExpiry, args.strike],
+        })
+      : marketKey.down({
+          package: DEEPBOOK.package,
+          arguments: [args.oracleSviId, args.oracleExpiry, args.strike],
+        }),
+  )
+  tx.add(
+    predict.getTradeAmounts({
+      package: DEEPBOOK.package,
+      arguments: [
+        DEEPBOOK.predictObject,
+        args.oracleSviId,
+        mk,
+        args.quantity,
+      ],
+    }),
+  )
+  const res = await client.devInspectTransactionBlock({
+    sender:
+      "0x0000000000000000000000000000000000000000000000000000000000000000",
+    transactionBlock: tx,
+  })
+  // The last result is `get_trade_amounts` returning (mint_cost, max_payout).
+  // BCS-encoded u64 each. We only need mint_cost.
+  const last = res.results?.[res.results.length - 1]
+  const rets = last?.returnValues ?? []
+  if (rets.length < 1) {
+    throw new Error("quoteSwipePremium: unexpected devInspect return shape")
+  }
+  const premium = BigInt(bcs.U64.parse(Uint8Array.from(rets[0][0])))
+  const q = args.quantity
+  const pImplied = q > 0n ? (premium * 1_000_000_000n) / q : 0n
+  return { premium, pImplied }
+}
+
 /**
  * Parse the `created` change matching the new PredictManager out of a
  * `create_manager` tx's objectChanges.
@@ -388,4 +467,27 @@ export function extractManagerIdFromChanges(
     return normalizeSuiObjectId(raw.objectId!)
   }
   return null
+}
+
+/**
+ * Resolve the PredictManager id that a `create_manager` tx just produced.
+ *
+ * Implementation note: we deliberately do NOT parse `objectChanges` on the
+ * sign result. The sponsored-gas path returns only `{ digest }`, so that
+ * field is missing. Instead — matching what apps/playground does — we
+ * wait for the tx to be indexed, then re-run the event-based
+ * `findPredictManager` discovery. The `PredictManagerCreated` event is
+ * emitted regardless of who paid gas, so this works for both sponsored
+ * and wallet-paid paths.
+ */
+export async function resolveCreatedManagerId(
+  client: SuiClient,
+  digest: string,
+  ownerAddress: string,
+): Promise<string | null> {
+  await client.waitForTransaction({ digest })
+  // Bust the per-address cache so we don't return a stale null hit.
+  invalidateManagerCache(ownerAddress)
+  const mgr = await findPredictManager(client, ownerAddress)
+  return mgr?.id ?? null
 }

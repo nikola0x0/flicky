@@ -1,25 +1,172 @@
 import { useEffect, useRef, useState } from "react"
 import type { CSSProperties } from "react"
+import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { MatchButton } from "@/components/match-button"
+import { ModeModal } from "@/components/mode-modal"
+import { OnboardingModal } from "@/components/onboarding-modal"
+import { PixelButton } from "@/components/pixel-button"
+import { WsErrorBanner } from "@/components/ws-error-banner"
+import { useFlickySocket } from "@/hooks/use-flicky-socket"
+import { ActiveDuel } from "./active-duel"
+import { STAKE_TIERS, type Tier } from "@/lib/protocol"
 
 const STAKES = [1, 3, 5, 10] as const
 type Stake = (typeof STAKES)[number]
 
-const PRACTICE_BRAND_STYLE = {
+const MODE_BRAND_STYLE = {
   "--btn-bg": "#e08a2b",
   "--btn-highlight": "#f4b966",
 } as CSSProperties
 
-export default function GamePvp() {
-  const [stake, setStake] = useState<Stake>(3)
+const RED_BRAND_STYLE = {
+  "--btn-bg": "#d94646",
+  "--btn-highlight": "#f08585",
+} as CSSProperties
 
+const TIER_LABEL: Record<Tier, string> = {
+  practice: "practice",
+  starter: "starter",
+  casual: "casual",
+  standard: "standard",
+  high_roller: "high roller",
+}
+
+export default function GamePvp() {
+  const account = useCurrentAccount()
+  const [stake, setStake] = useState<Stake>(3)
+  const [modeOpen, setModeOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const [managerId, setManagerId] = useState<string | null>(null)
+
+  const { wsOpen, send, onMessage } = useFlickySocket(account?.address)
+
+  const [queueSize, setQueueSize] = useState<number | null>(null)
+  const [matched, setMatched] = useState<{
+    role: "creator" | "challenger"
+    opponent: string
+    deckHash: string
+  } | null>(null)
+
+  const tier: Tier =
+    stake === 1
+      ? "starter"
+      : stake === 3
+        ? "casual"
+        : stake === 5
+          ? "standard"
+          : "high_roller"
+
+  useEffect(() => {
+    return onMessage((msg) => {
+      if (msg.type === "queue_status") setQueueSize(msg.size)
+      else if (msg.type === "queue_left") setQueueSize(null)
+      else if (msg.type === "match_found")
+        setMatched({
+          role: msg.role,
+          opponent: msg.opponent,
+          deckHash: msg.deckHash,
+        })
+    })
+  }, [onMessage])
+
+  const onQueueMatch = () => {
+    if (!account) {
+      alert("Please sign in first")
+      return
+    }
+    if (!wsOpen) {
+      alert("Connecting to server... Please wait.")
+      return
+    }
+    if (queueSize !== null) {
+      send({ type: "queue_leave" })
+      // Snap UI back immediately — don't wait for the server's queue_left
+      // echo. If the server hasn't acked yet, leaving the chip in the
+      // "queueing" state makes the button feel broken/unresponsive.
+      setQueueSize(null)
+      return
+    }
+    // Open the onboarding gate — it checks wallet + manager balances
+    // and only fires onReady when both are sufficient.
+    setOnboardingOpen(true)
+  }
+
+  // Single render path so the WS error banner stays mounted across
+  // queue → match transitions and never loses its subscription.
+  let content: React.ReactNode
+  if (matched && managerId) {
+    content = (
+      <ActiveDuel
+        role={matched.role}
+        tier={tier}
+        managerId={managerId}
+        deckHash={matched.deckHash}
+        wsOpen={wsOpen}
+        send={send}
+        onMessage={onMessage}
+        onExit={() => {
+          setMatched(null)
+          setQueueSize(null)
+        }}
+      />
+    )
+  } else if (queueSize !== null) {
+    content = (
+      <QueueScreen
+        tier={tier}
+        stake={stake}
+        queueSize={queueSize}
+        onCancel={onQueueMatch}
+      />
+    )
+  } else {
+    content = (
+      <StandbyView
+        stake={stake}
+        setStake={setStake}
+        onQueueMatch={onQueueMatch}
+        onOpenMode={() => setModeOpen(true)}
+      />
+    )
+  }
+
+  return (
+    <>
+      <WsErrorBanner onMessage={onMessage} />
+      {content}
+      <ModeModal open={modeOpen} onClose={() => setModeOpen(false)} />
+      <OnboardingModal
+        open={onboardingOpen}
+        stake={STAKE_TIERS[tier]}
+        onClose={() => setOnboardingOpen(false)}
+        onReady={(mgrId) => {
+          setManagerId(mgrId)
+          setOnboardingOpen(false)
+          send({ type: "queue_join", tier })
+        }}
+      />
+    </>
+  )
+}
+
+function StandbyView({
+  stake,
+  setStake,
+  onQueueMatch,
+  onOpenMode,
+}: {
+  stake: Stake
+  setStake: (s: Stake) => void
+  onQueueMatch: () => void
+  onOpenMode: () => void
+}) {
   return (
     <div className="flex h-full flex-col gap-5 px-4 py-4">
       <img
         src="/banners/pvp-banner.png"
         alt="pvp duel"
-        className="-mx-4 mt-4 block aspect-video w-[calc(100%+2rem)] max-w-none object-cover [image-rendering:pixelated]"
+        className="mt-4 block aspect-video w-full object-cover [image-rendering:pixelated]"
       />
 
       <header className="flex items-center justify-center gap-3">
@@ -27,28 +174,34 @@ export default function GamePvp() {
           src="/icons/swords.png"
           alt=""
           aria-hidden
-          className="size-5 [image-rendering:pixelated] opacity-55"
+          className="size-5 opacity-55 [image-rendering:pixelated]"
         />
-        <h2 className="text-2xl tracking-[0.2em] text-white uppercase">
-          duel
-        </h2>
+        <h2 className="text-2xl tracking-[0.2em] text-white uppercase">duel</h2>
         <img
           src="/icons/swords.png"
           alt=""
           aria-hidden
-          className="size-5 -scale-x-100 [image-rendering:pixelated] opacity-55"
+          className="size-5 -scale-x-100 opacity-55 [image-rendering:pixelated]"
         />
       </header>
 
       <div className="flex flex-col gap-2">
         <div className="flex items-stretch gap-2">
           <StakeSelector value={stake} onChange={setStake} />
-          <MatchButton className="flex-1" label="queue match" />
+          <MatchButton
+            className="flex-1"
+            label={<span className="text-2xl">queue match</span>}
+            onClick={onQueueMatch}
+          />
         </div>
-        <MatchButton label="practice" style={PRACTICE_BRAND_STYLE} />
+        <MatchButton
+          label={<span className="text-2xl">game mode</span>}
+          style={MODE_BRAND_STYLE}
+          onClick={onOpenMode}
+        />
       </div>
 
-      <p className="text-center text-[10px] tracking-[0.18em] text-white/45 uppercase">
+      <p className="text-center text-xs tracking-[0.18em] text-white/45 uppercase">
         match starts when an opponent joins
       </p>
     </div>
@@ -58,9 +211,11 @@ export default function GamePvp() {
 function StakeSelector({
   value,
   onChange,
+  disabled
 }: {
   value: Stake
   onChange: (s: Stake) => void
+  disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -85,16 +240,12 @@ function StakeSelector({
     <div ref={rootRef} className="relative">
       <button
         type="button"
+        disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`stake ${value} dUSDC`}
-        className="
-          flex h-14 shrink-0 items-center gap-2
-          rounded-md border-2 border-black/55 bg-[#1b2548] px-3
-          shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08)]
-          transition-colors hover:bg-[#243364]
-        "
+        className="flex h-14 shrink-0 items-center gap-2 rounded-md border-2 border-black/55 bg-[#1b2548] px-3 shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08)] transition-colors hover:bg-[#243364] disabled:opacity-50"
       >
         <img
           src="/tokens/usdc-icon.png"
@@ -102,7 +253,7 @@ function StakeSelector({
           aria-hidden
           className="size-6 [image-rendering:pixelated]"
         />
-        <span className="w-[2ch] text-right text-2xl font-black leading-none tabular-nums text-white">
+        <span className="w-[2.5ch] text-right text-2xl leading-none font-black text-white tabular-nums">
           {value}
         </span>
         <ChevronDown open={open} />
@@ -111,11 +262,7 @@ function StakeSelector({
       {open && (
         <ul
           role="listbox"
-          className="
-            absolute left-0 top-full z-20 mt-1 min-w-full
-            overflow-hidden rounded-md border-2 border-black/55 bg-[#1b2548]
-            shadow-[0_4px_0_rgba(0,0,0,0.45)]
-          "
+          className="absolute top-full left-0 z-20 mt-1 min-w-full overflow-hidden rounded-md border-2 border-black/55 bg-[#1b2548] shadow-[0_4px_0_rgba(0,0,0,0.45)]"
         >
           {STAKES.map((s) => {
             const selected = s === value
@@ -127,11 +274,7 @@ function StakeSelector({
                     onChange(s)
                     setOpen(false)
                   }}
-                  className={`
-                    flex w-full items-center justify-between gap-3 px-3 py-2.5
-                    text-white transition-colors
-                    ${selected ? "bg-white/10" : "hover:bg-white/5"}
-                  `}
+                  className={`flex w-full items-center justify-between gap-3 px-3 py-2.5 text-white transition-colors ${selected ? "bg-white/10" : "hover:bg-white/5"} `}
                 >
                   <span className="flex items-center gap-2">
                     <img
@@ -140,11 +283,11 @@ function StakeSelector({
                       aria-hidden
                       className="size-5 [image-rendering:pixelated]"
                     />
-                    <span className="text-lg font-black leading-none tabular-nums">
+                    <span className="text-lg leading-none font-black tabular-nums">
                       {s}
                     </span>
                   </span>
-                  <span className="text-xs tracking-[0.18em] text-white/55 uppercase">
+                  <span className="text-sm tracking-[0.18em] text-white/55 uppercase">
                     dUSDC
                   </span>
                 </button>
@@ -154,6 +297,105 @@ function StakeSelector({
         </ul>
       )}
     </div>
+  )
+}
+
+/**
+ * Full-frame "searching for opponent" screen rendered while the player
+ * is in the matchmaking queue. Mirrors the layout/aesthetic of the
+ * standby PvP view (banner up top, tier+stake echoed, action button at
+ * the bottom) but with a single red cancel CTA instead of the queue
+ * controls.
+ */
+function QueueScreen({
+  tier,
+  stake,
+  queueSize,
+  onCancel,
+}: {
+  tier: Tier
+  stake: Stake
+  queueSize: number
+  onCancel: () => void
+}) {
+  return (
+    <div className="queue-enter flex h-full flex-col gap-5 px-4 pb-4">
+      {/* Banner bleeds to the frame edges and softly fades into the
+          background at the bottom so it reads as part of the screen
+          rather than a postcard pasted on top. A stationary rounded
+          border breathes in opacity/glow to give a subtle "active"
+          feel — no scale, no expanding pings. */}
+      <div className="relative -mx-4">
+        <img
+          src="/banners/searching.png"
+          alt="searching for opponent"
+          className="block aspect-video w-full object-cover [image-rendering:pixelated] [mask-image:linear-gradient(to_bottom,transparent_0%,black_8%,black_78%,transparent_100%)]"
+        />
+        <span
+          aria-hidden
+          className="border-glow pointer-events-none absolute inset-2 rounded-2xl [mask-image:linear-gradient(to_bottom,transparent_0%,black_12%,black_85%,transparent_100%)]"
+        />
+        <AnimatedDots className="absolute bottom-3 left-1/2 -translate-x-1/2 text-3xl tracking-[0.3em] text-white drop-shadow-[0_2px_0_rgba(0,0,0,0.6)]" />
+      </div>
+
+      <header className="flex flex-col items-center gap-1 -mt-2">
+        <p className="text-xs tracking-[0.18em] text-white/55 uppercase">
+          finding a duelist for you
+        </p>
+      </header>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between rounded-md border-2 border-black/55 bg-[#1b2548] px-4 py-3 shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08)]">
+          <div className="flex flex-col">
+            <span className="text-xs tracking-[0.18em] text-white/55 uppercase">
+              tier
+            </span>
+            <span className="text-lg tracking-wider text-white uppercase">
+              {TIER_LABEL[tier]}
+            </span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="text-xs tracking-[0.18em] text-white/55 uppercase">
+              stake
+            </span>
+            <span className="flex items-center gap-1.5 text-lg leading-none font-black text-white tabular-nums">
+              <img
+                src="/tokens/usdc-icon.png"
+                alt=""
+                aria-hidden
+                className="size-5 [image-rendering:pixelated]"
+              />
+              {stake}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between rounded-md bg-white/5 px-4 py-2 text-sm tracking-[0.18em] text-white/55 uppercase">
+          <span>in queue</span>
+          <span className="text-base tabular-nums text-white">{queueSize}</span>
+        </div>
+      </div>
+
+      <div className="mt-auto">
+        <PixelButton
+          onClick={onCancel}
+          style={RED_BRAND_STYLE}
+          className="h-14 w-full !text-2xl"
+        >
+          cancel
+        </PixelButton>
+      </div>
+    </div>
+  )
+}
+
+function AnimatedDots({ className = "" }: { className?: string }) {
+  return (
+    <span aria-hidden className={`inline-flex gap-0.5 ${className}`}>
+      <span className="animate-bounce [animation-delay:-0.3s]">.</span>
+      <span className="animate-bounce [animation-delay:-0.15s]">.</span>
+      <span className="animate-bounce">.</span>
+    </span>
   )
 }
 

@@ -5,8 +5,10 @@ import {
   useSignAndExecuteTransaction,
   useSuiClient,
 } from "@mysten/dapp-kit"
+import { useOutletContext } from "react-router"
 
 import { PixelButton } from "@/components/pixel-button"
+import type { GameOutletContext } from "./layout"
 import {
   useDusdcBalance,
   useInvalidateWalletBalances,
@@ -64,6 +66,7 @@ export default function GameShop() {
   const account = useCurrentAccount()
   const client = useSuiClient()
   const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction()
+  const { openLogin } = useOutletContext<GameOutletContext>()
 
   const [direction, setDirection] = useState<SwapDirection>("sui_to_dusdc")
   const [inputAmount, setInputAmount] = useState("1")
@@ -118,7 +121,7 @@ export default function GameShop() {
         account.address,
         direction,
         inputRaw,
-        minOutRaw,
+        minOutRaw
       )
       const result = await signAndExecute({ transaction: tx })
       setStatus({
@@ -148,21 +151,8 @@ export default function GameShop() {
         <p className="text-base tracking-[0.15em] text-white uppercase">
           swap unavailable
         </p>
-        <p className="text-xs text-white/55">
+        <p className="text-sm text-white/55">
           set VITE_SWAP_POOL_ID in .env.local
-        </p>
-      </div>
-    )
-  }
-
-  if (!account) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-        <p className="text-base tracking-[0.15em] text-white uppercase">
-          sign in to swap
-        </p>
-        <p className="text-xs text-white/55">
-          use the sign-in button in the header
         </p>
       </div>
     )
@@ -171,9 +161,7 @@ export default function GameShop() {
   return (
     <div className="flex flex-col gap-4 px-4 py-4">
       <header className="flex items-center justify-between">
-        <h2 className="text-2xl tracking-[0.2em] text-white uppercase">
-          swap
-        </h2>
+        <h2 className="text-4xl tracking-[0.2em] text-white uppercase">swap</h2>
         <button
           type="button"
           onClick={() => {
@@ -205,7 +193,7 @@ export default function GameShop() {
           disabled={busy}
           onClick={() =>
             setDirection((d) =>
-              d === "sui_to_dusdc" ? "dusdc_to_sui" : "sui_to_dusdc",
+              d === "sui_to_dusdc" ? "dusdc_to_sui" : "sui_to_dusdc"
             )
           }
         />
@@ -219,7 +207,7 @@ export default function GameShop() {
       </div>
 
       <div className="rounded-xl bg-white/5 px-4 py-3">
-        <div className="flex items-center justify-between text-xs">
+        <div className="flex items-center justify-between text-lg">
           <span className="tracking-wider text-white/55 uppercase">
             slippage
           </span>
@@ -233,36 +221,42 @@ export default function GameShop() {
               }}
               min={0}
               step="any"
-              className="w-14 rounded-md bg-black/30 px-2 py-1 text-right text-sm text-white tabular-nums focus:outline-none"
+              className="w-14 rounded-md bg-black/30 px-2 py-1 text-right text-base text-white tabular-nums focus:outline-none"
             />
-            <span className="text-sm text-white/55">%</span>
+            <span className="text-base text-white/55">%</span>
           </div>
         </div>
-        <div className="mt-2 flex items-center justify-between border-t border-white/5 pt-2 text-xs">
+        <div className="mt-2 flex items-center justify-between border-t border-white/5 pt-2 text-lg">
           <span className="tracking-wider text-white/55 uppercase">
             min received
           </span>
-          <span className="tabular-nums text-white">
+          <span className="text-white tabular-nums">
             {minOut > 0 ? minOut.toFixed(6) : "0.000000"} {toToken.symbol}
           </span>
         </div>
       </div>
 
       <PixelButton
-        onClick={handleSwap}
-        disabled={busy || !pool || inputNum <= 0 || inputNum > fromBalance}
+        onClick={account ? handleSwap : openLogin}
+        disabled={
+          !!account &&
+          (busy || !pool || inputNum <= 0 || inputNum > fromBalance)
+        }
+        style={account ? undefined : BLUE_BRAND_STYLE}
         className="h-12 w-full text-base"
       >
-        {busy
-          ? "swapping…"
-          : inputNum > fromBalance
-            ? `not enough ${fromToken.symbol.toLowerCase()}`
-            : `swap ${fromToken.symbol} → ${toToken.symbol}`}
+        {!account
+          ? "sign in to swap"
+          : busy
+            ? "swapping…"
+            : inputNum > fromBalance
+              ? `not enough ${fromToken.symbol.toLowerCase()}`
+              : `swap ${fromToken.symbol} → ${toToken.symbol}`}
       </PixelButton>
 
       {status && (
         <div
-          className={`rounded-lg px-3 py-2 text-xs ${
+          className={`rounded-lg px-3 py-2 text-sm ${
             status.kind === "ok"
               ? "bg-emerald-500/15 text-emerald-200"
               : "bg-rose-500/15 text-rose-200"
@@ -273,11 +267,14 @@ export default function GameShop() {
       )}
 
       {pool && (
-        <div className="rounded-xl bg-white/5 px-4 py-3 text-xs">
+        <div className="rounded-xl bg-white/5 px-4 py-3 text-lg">
           <div className="mb-2 tracking-[0.18em] text-white/45 uppercase">
             pool
           </div>
-          <PoolRow label="spot" value={`1 SUI = ${pool.spotPrice.toFixed(4)} dUSDC`} />
+          <PoolRow
+            label="spot"
+            value={`1 SUI = ${pool.spotPrice.toFixed(4)} dUSDC`}
+          />
           <PoolRow label="fee" value={`${(pool.feeBps / 100).toFixed(2)}%`} />
           <PoolRow
             label="reserves"
@@ -309,7 +306,7 @@ function TokenInputCard({
   return (
     <div className="rounded-2xl bg-black/35 px-4 py-3 ring-1 ring-white/5">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] tracking-[0.18em] text-white/55 uppercase">
+        <span className="text-[16px] tracking-[0.18em] text-white/55 uppercase">
           {label}
         </span>
         {!readOnly && (
@@ -319,12 +316,12 @@ function TokenInputCard({
             disabled={!onMax}
             className="flex items-center gap-1.5 text-white/70 hover:text-white disabled:cursor-default disabled:hover:text-white/70"
           >
-            <span className="text-[10px] tracking-wider uppercase">bal</span>
-            <span className="text-sm tabular-nums text-white">
+            <span className="text-[16px] tracking-wider uppercase">bal</span>
+            <span className="text-lg text-white tabular-nums">
               {balance.toFixed(4)}
             </span>
             {onMax && (
-              <span className="ml-1 rounded bg-white/10 px-1.5 py-0.5 text-[10px] tracking-wider text-white uppercase">
+              <span className="ml-1 rounded bg-white/10 px-1.5 py-0.5 text-xs tracking-wider text-white uppercase">
                 max
               </span>
             )}
@@ -344,16 +341,16 @@ function TokenInputCard({
           inputMode="decimal"
           min={0}
           step="any"
-          className="w-full bg-transparent text-2xl tabular-nums text-white focus:outline-none"
+          className="w-full bg-transparent text-2xl text-white tabular-nums focus:outline-none"
         />
-        <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pl-1.5 pr-2">
+        <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pr-2 pl-1.5">
           <img
             src={token.icon}
             alt=""
             aria-hidden
             className="size-6 [image-rendering:pixelated]"
           />
-          <span className="text-sm tracking-wider text-white uppercase">
+          <span className="text-md tracking-wider text-white uppercase">
             {token.symbol}
           </span>
         </div>
@@ -377,7 +374,7 @@ function DirectionToggle({
         disabled={disabled}
         aria-label="switch direction"
         style={BLUE_BRAND_STYLE}
-        className="default-btn-green-container with-border absolute left-1/2 top-0 grid size-9 -translate-x-1/2 -translate-y-1/2 place-items-center !p-0"
+        className="default-btn-green-container with-border absolute top-0 left-1/2 grid size-9 -translate-x-1/2 -translate-y-1/2 place-items-center !p-0"
       >
         <img
           src="/icons/arrow_switch.png"
@@ -394,7 +391,7 @@ function PoolRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between py-0.5">
       <span className="tracking-wider text-white/55 uppercase">{label}</span>
-      <span className="tabular-nums text-white">{value}</span>
+      <span className="text-white tabular-nums">{value}</span>
     </div>
   )
 }

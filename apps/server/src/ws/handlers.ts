@@ -7,6 +7,7 @@ import type { WebSocketHandler } from "bun"
 import { getSuiClient } from "../lib/sui"
 import { makeLogger, shortId } from "../log"
 import { checkQueueBalanceGate, MIN_BALANCE_FOR_QUEUE } from "../predict"
+import { findDeckOracles } from "../deckmaster"
 import { consume } from "../ratelimit"
 import { handleChatReact, handleChatSend, sendChatHistory } from "./chat"
 import {
@@ -78,7 +79,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         }
         if (msg.tier === "practice") {
           // joinQueue itself rejects practice; let it emit the canonical error.
-          joinQueue(ws, msg.tier)
+          await joinQueue(ws, msg.tier)
           return
         }
         if (!ws.data.address) {
@@ -116,7 +117,36 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           }
           return
         }
-        joinQueue(ws, msg.tier)
+        // Pre-flight the BTC oracle pool so players get a clear "try
+        // again in a few" instead of silently entering a queue that's
+        // going to fail at deck-gen. Upstream Predict creates oracles
+        // on a 15-min cron with occasional skipped ticks — when the
+        // cron drops we sit at 4/5 eligible oracles until the next
+        // beat. Letting the match form anyway leads to a retry loop
+        // that the player sees as a permanent "searching".
+        try {
+          const oracles = await findDeckOracles(getSuiClient(), "BTC", 5)
+          if (oracles.length < 5) {
+            send(ws, {
+              type: "error",
+              code: "oracles_unavailable",
+              message: `Only ${oracles.length}/5 BTC oracles are live right now. The upstream cron should produce another in a few minutes — try again then.`,
+              detail: { available: oracles.length, required: 5 },
+            })
+            return
+          }
+        } catch (e) {
+          log.warn(
+            `oracle preflight failed: ${e instanceof Error ? e.message : String(e)}`,
+          )
+          send(ws, {
+            type: "error",
+            code: "oracles_unavailable",
+            message: "couldn't check oracle availability; try again shortly",
+          })
+          return
+        }
+        await joinQueue(ws, msg.tier)
         return
       }
       case "queue_leave": {

@@ -3,12 +3,30 @@ import { Link, NavLink, Outlet, useLocation } from "react-router"
 import type { CSSProperties } from "react"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 
+/**
+ * Game-route context, passed through react-router's <Outlet />. Lets
+ * children open the layout-owned login modal — needed by routes that
+ * are visible while signed out (e.g. /game/shop) so their CTAs can
+ * prompt sign-in without each route owning its own modal.
+ */
+export interface GameOutletContext {
+  openLogin: () => void
+}
+
+// Routes that render even when signed out — used to showcase features
+// (e.g. the swap) before login. Everything else falls back to the
+// unified <SignedOutPrompt>.
+const PUBLIC_ROUTES = new Set<string>(["/game/shop"])
+
 import { BalanceChip } from "@/components/balance-chip"
 import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
-import { useDusdcBalance } from "@/hooks/use-wallet-balances"
+import {
+  useDusdcBalance,
+  useManagerBalance,
+} from "@/hooks/use-wallet-balances"
 
 const SIGN_IN_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -38,18 +56,37 @@ const BEVEL_GRADIENT =
  */
 export default function GameLayout() {
   const [loginOpen, setLoginOpen] = useState(false)
+  const account = useCurrentAccount()
   const location = useLocation()
-  const isPvp = location.pathname === "/game/pvp"
+  const isPublicRoute = PUBLIC_ROUTES.has(location.pathname)
+  const showOutlet = Boolean(account) || isPublicRoute
+  // Route-specific chrome (shop's tall top-decor header, pvp's checker
+  // background) only kicks in when the routed page is actually
+  // rendering — otherwise the unified <SignedOutPrompt> would sit at
+  // different y-positions across routes because the header height
+  // varies.
+  const isPvp = showOutlet && location.pathname === "/game/pvp"
+
+  const outletContext: GameOutletContext = {
+    openLogin: () => setLoginOpen(true),
+  }
 
   return (
     <>
       <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
         <div
-          className={`pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl font-pixel text-white sm:max-h-[900px] ${isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}`}
+          className={`pixel-frame relative flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl font-pixel text-white sm:max-h-[900px] ${isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}`}
         >
-          <FrameHeader onSignInClick={() => setLoginOpen(true)} />
+          <FrameHeader
+            onSignInClick={() => setLoginOpen(true)}
+            signedOut={!account && !isPublicRoute}
+          />
           <main className="flex-1 overflow-hidden">
-            <GameOutletTransition />
+            {showOutlet ? (
+              <GameOutletTransition context={outletContext} />
+            ) : (
+              <SignedOutPrompt />
+            )}
           </main>
           <FrameBottomNav />
         </div>
@@ -57,6 +94,19 @@ export default function GameLayout() {
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
     </>
+  )
+}
+
+function SignedOutPrompt() {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+      <p className="text-base tracking-[0.15em] text-white uppercase">
+        sign in to continue
+      </p>
+      <p className="text-sm text-white/55">
+        use the sign-in button in the header
+      </p>
+    </div>
   )
 }
 
@@ -68,7 +118,7 @@ export default function GameLayout() {
  * transition. Inner div is keyed on pathname to force remount per
  * navigation so the CSS keyframe replays.
  */
-function GameOutletTransition() {
+function GameOutletTransition({ context }: { context: GameOutletContext }) {
   const location = useLocation()
   const prevPathRef = useRef<string | null>(null)
 
@@ -95,15 +145,24 @@ function GameOutletTransition() {
       key={location.pathname}
       className={`h-full overflow-y-auto ${animClass}`}
     >
-      <Outlet />
+      <Outlet context={context} />
     </div>
   )
 }
 
-function FrameHeader({ onSignInClick }: { onSignInClick: () => void }) {
+function FrameHeader({
+  onSignInClick,
+  signedOut,
+}: {
+  onSignInClick: () => void
+  signedOut: boolean
+}) {
   const account = useCurrentAccount()
   const location = useLocation()
-  const isShop = location.pathname === "/game/shop"
+  // When signed out we render the unified empty-state prompt in <main>,
+  // so suppress the shop's tall decor header (it'd push the prompt
+  // around route-to-route).
+  const isShop = !signedOut && location.pathname === "/game/shop"
 
   return (
     <header
@@ -119,7 +178,7 @@ function FrameHeader({ onSignInClick }: { onSignInClick: () => void }) {
         <PixelButton
           onClick={onSignInClick}
           style={SIGN_IN_BRAND_STYLE}
-          className="h-10 px-3 text-xs"
+          className="h-10 px-3 text-sm"
         >
           <span className="flex items-center gap-2">
             <img
@@ -132,13 +191,15 @@ function FrameHeader({ onSignInClick }: { onSignInClick: () => void }) {
           </span>
         </PixelButton>
       )}
-      {!isShop && <MenuButton />}
+      {!isShop && account && <MenuButton />}
     </header>
   )
 }
 
 function HeaderBalances({ address }: { address: string }) {
   const { data: dusdc } = useDusdcBalance()
+  const { data: managerInfo } = useManagerBalance()
+  const managerBalance = managerInfo?.balance ?? 0
   return (
     <div className="flex items-center gap-5">
       <Link
@@ -157,7 +218,7 @@ function HeaderBalances({ address }: { address: string }) {
         />
         <BalanceChip
           icon="/tokens/manager-usdc.png"
-          amount="0.00"
+          amount={managerBalance.toFixed(2)}
           label="manager"
           to="/game/shop"
         />

@@ -447,6 +447,39 @@ export async function fetchDuel(
 }
 
 /**
+ * Resolve the Duel object id from a `create_duel` transaction digest.
+ *
+ * The sponsored-gas path returns only `{ digest }` — `objectChanges` is
+ * NOT in that response. Callers that need the new Duel's id must wait
+ * for the tx to be indexed and re-fetch it with `showObjectChanges`.
+ *
+ * Returns null if the tx didn't produce a Duel object (e.g. it failed,
+ * was on a different package, or the indexer hasn't caught up despite
+ * `waitForTransaction`). Callers should treat null as a retryable
+ * lookup state, not a hard failure.
+ */
+export async function resolveCreatedDuelId(
+  client: SuiClient,
+  digest: string,
+): Promise<string | null> {
+  await client.waitForTransaction({ digest })
+  const tx = await client.getTransactionBlock({
+    digest,
+    options: { showObjectChanges: true },
+  })
+  const changes = tx.objectChanges ?? []
+  for (const c of changes) {
+    if (c.type !== "created") continue
+    // objectType examples:
+    //   "0xpkg::duel::Duel<0xcoin::TYPE>" (paid)
+    //   "0xpkg::duel::Duel" (rare; free variant)
+    if (!c.objectType.includes("::duel::Duel")) continue
+    return normalizeSuiObjectId(c.objectId)
+  }
+  return null
+}
+
+/**
  * Discover all duels by querying DuelCreated events. Filters for the
  * configured package + stake type and returns most-recent-first.
  */

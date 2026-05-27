@@ -131,6 +131,7 @@ describe("handleChatReact — filters to creator + challenger (PRD §Social)", (
       startedAtMs: 0,
       cardOutcomes: [],
       swipes: [],
+      cards: [],
     })
   }
 

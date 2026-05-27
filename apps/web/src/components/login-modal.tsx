@@ -113,7 +113,7 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
           >
             sign in to flicky
           </h2>
-          <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-white/45">
+          <p className="mt-1 text-xs uppercase tracking-[0.18em] text-white/45">
             zklogin via enoki
           </p>
         </header>
@@ -136,7 +136,7 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
             </span>
           </PixelButton>
 
-          <div className="my-1 flex items-center gap-3 text-[9px] uppercase tracking-[0.2em] text-white/35">
+          <div className="my-1 flex items-center gap-3 text-[10px] uppercase tracking-[0.2em] text-white/35">
             <span className="h-px flex-1 bg-white/15" />
             or
             <span className="h-px flex-1 bg-white/15" />
@@ -159,7 +159,7 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
             </span>
           </PixelButton>
 
-          <p className="mt-2 text-center text-[9px] uppercase tracking-[0.18em] text-white/35">
+          <p className="mt-2 text-center text-[10px] uppercase tracking-[0.18em] text-white/35">
             google uses zklogin — your account stays with google. slush is a sui wallet extension.
           </p>
         </div>

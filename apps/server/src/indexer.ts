@@ -69,6 +69,13 @@ interface DuelLite {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
+  /**
+   * Revealed deck. Empty array until `DeckRevealed` lands on chain;
+   * one entry per slot (5 once revealed). Each card carries the
+   * DeepBook `OracleSVI` id and the strike. Web UI uses these to
+   * render the swipe deck and look up per-card oracle ticks.
+   */
+  cards: Array<{ oracle_id: string; strike: string }>
   p0Payout: bigint
   p0Premium: bigint
   p1Payout: bigint
@@ -128,22 +135,113 @@ function computePnl(
   return pnl.toString()
 }
 
+export interface CardOutcomeInput {
+  cards: Array<{ oracle_id: string; strike: string }>
+  p0Swipes: Array<
+    { isUp: boolean; quantity: string; premium: string } | null
+  >
+  p1Swipes: Array<
+    { isUp: boolean; quantity: string; premium: string } | null
+  >
+  /**
+   * Settled prices keyed by oracle id (base-10 string). Only contains
+   * oracles whose `settlement_price.is_some()` — cards whose oracle
+   * isn't in the map are omitted from the output.
+   */
+  oracleSettlements: Map<string, string>
+}
+
 /**
- * @param settlementPrice  When the `DuelFinalized` event for this duel
- *   was seen in the same tick, its `settlement_price` is passed in so we
- *   can reconstruct per-card outcomes. The new contract finalizes
- *   one-shot and does NOT persist per-card settlements on the object — so
- *   the price only ever arrives via the event. For `finalize_test_one_oracle`
- *   / single-oracle `finalize` this one price applies to all 5 cards; for
- *   `finalize_multi` it's oracle_0's representative price (per-card oracle
- *   ids remain on-chain in `Duel.cards` for full audit). When no price is
- *   passed but the duel is already COMPLETE, we preserve any outcomes the
- *   mirror already stored (so a later refresh doesn't wipe them).
+ * Project per-card outcomes deterministically. For each card whose
+ * oracle has settled, compute `upWon` (strict `>`, matching the
+ * contract) and signed-decimal per-player PnL. Cards whose oracle
+ * hasn't settled yet are omitted — the array grows as settlements
+ * roll in, even before `finalize_multi` lands. Pure / synchronous so
+ * it's trivially testable.
+ */
+export function computeCardOutcomes(input: CardOutcomeInput): CardOutcome[] {
+  const out: CardOutcome[] = []
+  for (let i = 0; i < input.cards.length; i++) {
+    const card = input.cards[i]
+    const price = input.oracleSettlements.get(card.oracle_id)
+    if (price === undefined) continue
+    const upWon = BigInt(price) > BigInt(card.strike)
+    const p0Swipe = input.p0Swipes[i] ?? null
+    const p1Swipe = input.p1Swipes[i] ?? null
+    out.push({
+      cardIdx: i,
+      settlementPrice: price,
+      strike: card.strike,
+      upWon,
+      p0Swipe,
+      p1Swipe,
+      p0Pnl: computePnl(p0Swipe, upWon),
+      p1Pnl: computePnl(p1Swipe, upWon),
+    })
+  }
+  return out
+}
+
+/**
+ * Read `settlement_price` for each oracle id passed in. Only entries
+ * whose price is `Some` end up in the returned map — callers can treat
+ * "absent key" as "not settled yet".
+ *
+ * `OracleSVI.settlement_price` is `Option<u64>`. Sui RPC encodes
+ * `Some(x)` as `{ fields: { vec: [x] } }` and `None` as either a missing
+ * key or `{ fields: { vec: [] } }`. We accept both shapes (and a bare
+ * string in case a future RPC version unwraps it) defensively.
+ */
+async function readOracleSettlements(
+  client: SuiClient,
+  oracleIds: string[],
+): Promise<Map<string, string>> {
+  const unique = Array.from(new Set(oracleIds.filter((x) => !!x)))
+  if (unique.length === 0) return new Map()
+  const objs = await client.multiGetObjects({
+    ids: unique,
+    options: { showContent: true },
+  })
+  const out = new Map<string, string>()
+  for (const o of objs) {
+    if (o.data?.content?.dataType !== "moveObject") continue
+    const oid = o.data.objectId
+    if (!oid) continue
+    const fields = o.data.content.fields as {
+      settlement_price?:
+        | { fields?: { vec?: string[] } }
+        | string
+        | null
+    }
+    const sp = fields.settlement_price
+    let price: string | undefined
+    if (typeof sp === "string") {
+      price = sp
+    } else if (sp && typeof sp === "object") {
+      const vec = sp.fields?.vec ?? []
+      if (vec.length > 0) price = vec[0]
+    }
+    if (price !== undefined) out.set(normalizeSuiObjectId(oid), price)
+  }
+  return out
+}
+
+/**
+ * Fetch a duel's on-chain state, project per-card outcomes, and return
+ * the wire-ready `DuelLite`. Self-contained: reads the duel object,
+ * then bulk-reads each card's `OracleSVI` for `settlement_price`, then
+ * runs the pure `computeCardOutcomes` projection. No `settlementPrice`
+ * parameter — every card uses its OWN oracle, which is the only correct
+ * model for multi-oracle decks.
+ *
+ * Fallback: if per-card reads return nothing but the duel is already
+ * COMPLETE on chain (e.g. oracles were compacted post-settle, or we're
+ * mid-restart), preserve whatever cardOutcomes the SQLite mirror
+ * already computed so the per-card breakdown isn't blanked.
  */
 async function fetchDuel(
   client: SuiClient,
   id: string,
-  settlementPrice?: string | null,
 ): Promise<DuelLite | null> {
   const obj = await client.getObject({
     id,
@@ -168,9 +266,6 @@ async function fetchDuel(
   const status = STATUS_MAP[String(f.status)] ?? "PENDING"
   const p0SwipesRaw = f.p0_swipes ?? []
   const p1SwipesRaw = f.p1_swipes ?? []
-  // All per-card swipes (settled or not). Powers running-PnL display
-  // and F5 hydration in the panel. One entry per card slot with at
-  // least one swipe.
   const swipes: PendingSwipe[] = []
   const swipeSlotCount = Math.max(
     p0SwipesRaw.length,
@@ -182,31 +277,33 @@ async function fetchDuel(
     const p1 = parseSwipeRaw(p1SwipesRaw[i])
     if (p0 || p1) swipes.push({ cardIdx: i, p0Swipe: p0, p1Swipe: p1 })
   }
-  // Per-card outcomes are derived from the DuelFinalized settlement_price
-  // applied to each card's strike (UP wins when price > strike). Only
-  // available once finalized.
-  let cardOutcomes: CardOutcome[] = []
-  if (settlementPrice != null) {
-    for (let i = 0; i < cards.length; i++) {
-      const strike = cards[i]?.fields?.strike ?? "0"
-      const upWon = BigInt(settlementPrice) > BigInt(strike)
-      const p0Swipe = parseSwipeRaw(p0SwipesRaw[i])
-      const p1Swipe = parseSwipeRaw(p1SwipesRaw[i])
-      cardOutcomes.push({
-        cardIdx: i,
-        settlementPrice,
-        strike,
-        upWon,
-        p0Swipe,
-        p1Swipe,
-        p0Pnl: computePnl(p0Swipe, upWon),
-        p1Pnl: computePnl(p1Swipe, upWon),
-      })
-    }
-  } else if (status === "COMPLETE") {
-    // No fresh price this tick (e.g. a COMPLETE duel touched by an
-    // unrelated refresh, or post-restart). Preserve whatever the mirror
-    // already computed so we don't blank the per-card breakdown.
+  const cardsLite = cards.map((c) => ({
+    oracle_id: c.fields?.oracle_id
+      ? normalizeSuiObjectId(c.fields.oracle_id)
+      : "",
+    strike: c.fields?.strike ?? "0",
+  }))
+  // Bulk-read settlement_price for every card's oracle. Cards whose
+  // oracle isn't settled yet are simply absent from the map; the
+  // projection helper omits them.
+  const oracleSettlements =
+    cardsLite.length > 0
+      ? await readOracleSettlements(
+          client,
+          cardsLite.map((c) => c.oracle_id),
+        )
+      : new Map<string, string>()
+  const p0SwipesParsed = p0SwipesRaw.map(parseSwipeRaw)
+  const p1SwipesParsed = p1SwipesRaw.map(parseSwipeRaw)
+  let cardOutcomes = computeCardOutcomes({
+    cards: cardsLite,
+    p0Swipes: p0SwipesParsed,
+    p1Swipes: p1SwipesParsed,
+    oracleSettlements,
+  })
+  // Restart / post-compaction fallback: if we got nothing fresh and the
+  // duel is already COMPLETE, preserve mirror's outcomes.
+  if (cardOutcomes.length === 0 && status === "COMPLETE") {
     try {
       cardOutcomes = getDuel(normalizeSuiObjectId(id))?.cardOutcomes ?? []
     } catch {
@@ -221,6 +318,7 @@ async function fetchDuel(
     challenger: f.challenger,
     cardsRevealed: cards.length > 0,
     cardCount: cards.length,
+    cards: cardsLite,
     settledCount: cardOutcomes.length,
     p0Payout: BigInt(f.p0_payout ?? "0"),
     p0Premium: BigInt(f.p0_premium ?? "0"),
@@ -384,13 +482,13 @@ export class DuelIndexer {
         log.warn(`${eventName(t)}: ${describeError(e)}`)
       }
     }
-    // Settlement prices keyed by duel — lets refreshDuel reconstruct
-    // per-card outcomes for duels finalized this tick.
-    const priceByDuel = new Map<string, string | null>()
-    for (const f of finalized) priceByDuel.set(f.duelId, f.settlementPrice)
+    // refreshDuel now self-reads each card's oracle for
+    // settlement_price, so we no longer need to thread the
+    // DuelFinalized event's `settlement_price` through here. The
+    // `finalized` array is still used below for MMR attribution.
     for (const duelId of touched) {
       try {
-        await this.refreshDuel(duelId, priceByDuel.get(duelId) ?? null)
+        await this.refreshDuel(duelId)
       } catch (e) {
         log.warn(`refresh ${shortId(duelId)}: ${describeError(e)}`)
       }
@@ -415,11 +513,8 @@ export class DuelIndexer {
     }
   }
 
-  private async refreshDuel(
-    duelId: string,
-    settlementPrice?: string | null,
-  ): Promise<void> {
-    const d = await fetchDuel(this.client, duelId, settlementPrice)
+  private async refreshDuel(duelId: string): Promise<void> {
+    const d = await fetchDuel(this.client, duelId)
     if (!d) return
     // Mirror to SQLite so /duels endpoints can serve without re-hitting
     // chain. Best-effort: a DB failure shouldn't block the broadcast.
@@ -440,6 +535,7 @@ export class DuelIndexer {
         startedAtMs: Number(d.startedAtMs),
         cardOutcomes: d.cardOutcomes,
         swipes: d.swipes,
+        cards: d.cards,
       })
     } catch {
       // db.ts already logged the error with context.
@@ -450,6 +546,7 @@ export class DuelIndexer {
       status: d.status,
       cardsRevealed: d.cardsRevealed,
       cardCount: d.cardCount,
+      cards: d.cards,
       settledCount: d.settledCount,
       p0Payout: d.p0Payout.toString(),
       p0Premium: d.p0Premium.toString(),

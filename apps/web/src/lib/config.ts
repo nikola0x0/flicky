@@ -5,12 +5,15 @@
 
 export const CONFIG = {
   /**
-   * Flicky package on testnet — first published 2026-05-20.
-   * `apps/contracts/deployed.json` is the source of truth.
+   * Flicky package on testnet — fresh publish 2026-05-26 (fix/contract:
+   * settlement collapsed to single finalize_multi, record_swipe snapshots
+   * premium on-chain). `apps/contracts/deployed.json` is the source of
+   * truth; if it drifts from this default, update here so fresh checkouts
+   * without VITE_FLICKY_PACKAGE_ID_TESTNET in .env.local still work.
    */
   packageId:
     import.meta.env.VITE_FLICKY_PACKAGE_ID_TESTNET ??
-    "0x505cdc9868df09c5a3cbfa469971feb795a17ecd2fec35405dd951e10d624f26",
+    "0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44",
 
   /** DeepBook Predict package on testnet (provides `oracle::OracleSVI`). */
   deepbookPredictPackageId:
@@ -24,6 +27,12 @@ export const CONFIG = {
   fallbackOracleSviId:
     import.meta.env.VITE_DEEPBOOK_BTC_ORACLE_ID ??
     "0xdc8ae118f2770366e0f0a91deb5dd8533150cb79b343f83e800a9a951aca6cba",
+
+  serverHttpUrl:
+    import.meta.env.VITE_SERVER_HTTP_URL || "http://localhost:3001",
+  serverWsUrl: import.meta.env.VITE_SERVER_WS_URL || "ws://localhost:3001/ws",
+
+  CLOCK_ID: "0x6",
 
   /** Default duel stake coin type. */
   stakeType: "0x2::sui::SUI" as const,

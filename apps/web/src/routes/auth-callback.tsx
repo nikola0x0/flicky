@@ -14,7 +14,7 @@
 export default function AuthCallback() {
   return (
     <div className="grid min-h-dvh place-items-center bg-[#1b2548] text-white font-display">
-      <p className="text-sm uppercase tracking-widest opacity-70">
+      <p className="text-base uppercase tracking-widest opacity-70">
         signing you in…
       </p>
     </div>

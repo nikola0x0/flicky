@@ -11,10 +11,18 @@ import {
   queueStats,
   registerAddress,
   roomCount,
+  setDeckHashProvider,
   subscribeRoom,
   type SocketState,
   unsubscribeRoom,
 } from "./matchmaking"
+
+// Bypass real deck generation in queue tests — the matchmaking layer is
+// what's under test here, not Deckmaster. Tests that DO care about
+// deck-gen should override this stub locally.
+setDeckHashProvider(async () =>
+  "0x" + "a".repeat(64),
+)
 
 type FakeWs = ServerWebSocket<SocketState> & { _sent: string[] }
 
@@ -89,13 +97,13 @@ describe("joinQueue", () => {
     expect(queueStats().casual).toBe(1)
   })
 
-  test("two sockets in same tier are paired immediately", () => {
+  test("two sockets in same tier are paired immediately", async () => {
     const alice = makeWs()
     const bob = makeWs()
     registerAddress(alice, "0xalice")
     registerAddress(bob, "0xbob")
-    joinQueue(alice, "casual")
-    joinQueue(bob, "casual")
+    await joinQueue(alice, "casual")
+    await joinQueue(bob, "casual")
     // Both removed from queue once matched.
     expect(queueStats().casual).toBe(0)
     // Both received match_found.
@@ -113,6 +121,8 @@ describe("joinQueue", () => {
       role: "challenger",
       opponent: "0xalice",
     })
+    // deckHash is carried in match_found (any 0x-prefixed string in tests).
+    expect((aMsgs.at(-1) as { deckHash?: string }).deckHash).toMatch(/^0x[0-9a-f]+$/i)
   })
 
   test("two sockets in DIFFERENT tiers do not pair", () => {
@@ -209,13 +219,13 @@ describe("sync-only queue (no bot-fill — Practice Mode is the only bot path)",
     expect(queueStats().casual).toBe(1)
   })
 
-  test("match_found has no bot-related fields, never pairs with a bot opponent", () => {
+  test("match_found has no bot-related fields, never pairs with a bot opponent", async () => {
     const a = makeWs()
     const b = makeWs()
     registerAddress(a, "0xa")
     registerAddress(b, "0xb")
-    joinQueue(a, "casual")
-    joinQueue(b, "casual")
+    await joinQueue(a, "casual")
+    await joinQueue(b, "casual")
     const ack = lastMsg(a) as Record<string, unknown>
     expect(ack.type).toBe("match_found")
     expect(ack.opponent).not.toBe("bot")

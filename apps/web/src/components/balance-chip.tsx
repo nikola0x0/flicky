@@ -28,14 +28,14 @@ export function BalanceChip({
   const navigate = useNavigate()
   return (
     <div className="flex items-center">
-      <div className="relative flex h-8 items-center rounded-lg bg-[#1f1812] pl-8 pr-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_-1px_0_rgba(0,0,0,0.4)]">
+      <div className="relative flex h-8 items-center rounded-lg bg-[#1f1812] pr-5 pl-8 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_-1px_0_rgba(0,0,0,0.4)]">
         <img
           src={icon}
           alt=""
           aria-hidden
-          className="absolute -left-2 top-1/2 size-8 -translate-y-1/2 [image-rendering:pixelated]"
+          className="absolute top-1/2 -left-2 size-8 -translate-y-1/2 [image-rendering:pixelated]"
         />
-        <span className="text-base tabular-nums tracking-wider text-white">
+        <span className="text-base text-xl tracking-wider text-white tabular-nums">
           {amount}
         </span>
       </div>

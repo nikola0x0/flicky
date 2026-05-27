@@ -23,11 +23,58 @@
  */
 import type { ServerWebSocket } from "bun"
 import { getPlayerRating } from "../db"
+import {
+  buildAndProbeDeck,
+  deriveSeed,
+  findDeckOracles,
+  hashToHex,
+  rememberDeck,
+} from "../deckmaster"
 import { env } from "../env"
+import { getSuiClient } from "../lib/sui"
 import { makeLogger, shortId } from "../log"
 import { findClosestOpponent } from "../mmr"
 import type { ServerMsg, Tier } from "./protocol"
 import { STAKE_TIERS } from "./protocol"
+
+/**
+ * Pluggable deck-hash generator. Default hits chain via Deckmaster.
+ * Tests override with `setDeckHashProvider` to avoid network and to
+ * keep `joinQueue` deterministic. Returns the "0x"-prefixed sha2_256
+ * hex string the creator commits in `create_duel`.
+ */
+type DeckHashProvider = (opts: {
+  tier: Tier
+  creatorAddr: string | undefined
+}) => Promise<string>
+
+let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
+  const client = getSuiClient()
+  const oracles = await findDeckOracles(client, "BTC", 5)
+  if (oracles.length < 5) {
+    throw new Error(
+      `not enough live oracles (${oracles.length}/5) — retry in a few minutes`,
+    )
+  }
+  const nonceHex = hashToHex(crypto.getRandomValues(new Uint8Array(16)))
+  const seed = deriveSeed({
+    sender: creatorAddr,
+    asset: "BTC",
+    tier,
+    timestampMs: Date.now(),
+    nonceHex,
+  })
+  const deck = await buildAndProbeDeck(client, oracles, seed)
+  rememberDeck(deck.hash, deck.cards, seed)
+  // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields
+  // `0x0x…` which decodes to 33 bytes and trips create_duel's 32-byte
+  // assert.
+  return deck.hashHex
+}
+
+export function setDeckHashProvider(fn: DeckHashProvider): void {
+  deckHashProvider = fn
+}
 
 const log = makeLogger("match")
 
@@ -112,7 +159,7 @@ function unregisterAddress(ws: AnyWs): void {
 
 // ─── Queue ──────────────────────────────────────────────────────────────────
 
-export function joinQueue(ws: AnyWs, tier: Tier): void {
+export async function joinQueue(ws: AnyWs, tier: Tier): Promise<void> {
   if (!ws.data.address) {
     send(ws, { type: "error", code: "no_address", message: "send `hello` with your address first" })
     return
@@ -153,7 +200,7 @@ export function joinQueue(ws: AnyWs, tier: Tier): void {
     const opponent = candidates.find((c) => c.address === pick.address)?.ws
     if (opponent) {
       q.splice(q.indexOf(opponent), 1)
-      matchPair(opponent, ws, tier)
+      await matchPair(opponent, ws, tier)
       return
     }
   }
@@ -175,7 +222,14 @@ export function leaveQueue(ws: AnyWs): void {
   send(ws, { type: "queue_left" })
 }
 
-function matchPair(creator: AnyWs, challenger: AnyWs, tier: Tier): void {
+/** Retry delay when matchPair fails during deck-gen (e.g. transient oracle shortage). */
+const MATCH_RETRY_MS = 15_000
+
+async function matchPair(
+  creator: AnyWs,
+  challenger: AnyWs,
+  tier: Tier,
+): Promise<void> {
   creator.data.queuedTier = null
   challenger.data.queuedTier = null
   const creatorAddr = creator.data.address
@@ -183,6 +237,32 @@ function matchPair(creator: AnyWs, challenger: AnyWs, tier: Tier): void {
   log.info(
     `match ${tier}: creator=${shortId(creatorAddr ?? "?")} vs challenger=${shortId(challengerAddr ?? "?")}`,
   )
+  // Generate the deck server-side BEFORE announcing the match. The
+  // creator gets only the hash (commits it in create_duel); the
+  // plaintext stays cached against the hash and is later read by the
+  // keeper for reveal_deck.
+  let deckHashHex: string
+  try {
+    deckHashHex = await deckHashProvider({
+      tier,
+      creatorAddr: creatorAddr ?? undefined,
+    })
+  } catch (e) {
+    log.warn(
+      `deck-gen failed for ${tier} match: ${e instanceof Error ? e.message : String(e)}`,
+    )
+    // Don't drop the players — put them back in the queue so they remain
+    // searchable, surface a soft error, and schedule a retry. Without
+    // this both sockets would silently leave the queue on a transient
+    // oracle-availability blip and the UI would still show "searching".
+    const msg = `match failed during deck setup: ${e instanceof Error ? e.message : String(e)}`
+    requeue(creator, tier)
+    requeue(challenger, tier)
+    send(creator, { type: "error", code: "match_setup_failed", message: msg })
+    send(challenger, { type: "error", code: "match_setup_failed", message: msg })
+    scheduleRetryPair(creator, challenger, tier)
+    return
+  }
   // Remember the pairing so the indexer can push `duel_assigned` to the
   // challenger the moment the creator's `DuelCreated` event surfaces.
   if (creatorAddr && challengerAddr) {
@@ -193,13 +273,51 @@ function matchPair(creator: AnyWs, challenger: AnyWs, tier: Tier): void {
     tier,
     role: "creator",
     opponent: challengerAddr ?? "",
+    deckHash: deckHashHex,
   })
   send(challenger, {
     type: "match_found",
     tier,
     role: "challenger",
     opponent: creatorAddr ?? "",
+    deckHash: deckHashHex,
   })
+}
+
+/**
+ * Restore `ws` to the FIFO queue for `tier` without re-running MMR
+ * pairing. Used by the deck-gen failure path so a transient oracle
+ * shortage doesn't silently drop both players off the queue. Preserves
+ * `queuedAt` if already set so MMR-window growth isn't reset.
+ */
+function requeue(ws: AnyWs, tier: Tier): void {
+  if (!ws.data.address) return
+  if (ws.data.queuedTier !== null) return // already requeued / never cleared
+  ws.data.queuedTier = tier
+  if (!ws.data.queuedAt) ws.data.queuedAt = Date.now()
+  let q = queues.get(tier)
+  if (!q) {
+    q = []
+    queues.set(tier, q)
+  }
+  if (!q.includes(ws)) q.push(ws)
+  send(ws, { type: "queue_status", tier, size: q.length, waitMs: Date.now() - ws.data.queuedAt })
+}
+
+/**
+ * After a failed `matchPair`, try the same two sockets again after
+ * `MATCH_RETRY_MS`. If either has left the queue / disconnected / been
+ * matched with someone else by then, abort silently.
+ */
+function scheduleRetryPair(a: AnyWs, b: AnyWs, tier: Tier): void {
+  setTimeout(() => {
+    if (a.data.queuedTier !== tier || b.data.queuedTier !== tier) return
+    const q = queues.get(tier)
+    if (!q || !q.includes(a) || !q.includes(b)) return
+    q.splice(q.indexOf(a), 1)
+    q.splice(q.indexOf(b), 1)
+    void matchPair(a, b, tier)
+  }, MATCH_RETRY_MS)
 }
 
 /**

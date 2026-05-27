@@ -29,6 +29,7 @@ function toWire(d: DuelRow) {
     startedAtMs: d.startedAtMs,
     cardOutcomes: d.cardOutcomes,
     swipes: d.swipes,
+    cards: d.cards,
     lastUpdatedMs: d.lastUpdatedMs,
   }
 }
