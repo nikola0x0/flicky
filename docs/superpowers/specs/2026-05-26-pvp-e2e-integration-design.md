@@ -37,6 +37,55 @@ Skipping the on-chain reveal isn't an option — without `duel.cards[i].strike` 
 
 This removes the creator-disconnect failure mode, removes one sponsored sign step from the creator, collapses two client state machines to one, and shows cards to both players at the same instant.
 
+## Backend prerequisites
+
+This spec is web-focused but depends on two server-side behaviors that aren't quite right in the current `apps/server/src/indexer.ts`. Both need to be in place before the web flow described below behaves as designed. Tracked here so the implementation plan picks them up.
+
+### B1. Incremental per-card PnL projection
+
+**Today:** `indexer.ts` (lines 185–205, post-merge) populates `room_state.cardOutcomes` only when `settlementPrice != null`, and that value comes from the `DuelFinalized` event. Result: `cardOutcomes` stays empty (and `settledCount = 0`) until the keeper has called `finalize_multi`. The web UI can't show "card 2 settled, you're +0.3 dUSDC on it" until all 5 have settled and the keeper has fired the finalize tx.
+
+**Required:** project `cardOutcomes[i]` per card, the moment that card's oracle's `settlement_price` flips to `Some(price)` — independently of finalize. Algorithm:
+
+```
+on each duel refresh (oracle_tick / poll / event):
+  for each card N in 0..4:
+    if cardOutcomes[N] already populated: skip
+    oracle = OracleSVI(cards[N].oracle_id)
+    if oracle.settlement_price is None: skip
+    price = oracle.settlement_price
+    upWon = price > cards[N].strike
+    cardOutcomes[N] = {
+      cardIdx: N,
+      settlementPrice: price,
+      strike: cards[N].strike,
+      upWon,
+      p0Swipe, p1Swipe,
+      p0Pnl: computePnl(p0_swipes[N], upWon),
+      p1Pnl: computePnl(p1_swipes[N], upWon),
+    }
+    push room_state (settledCount grows by 1)
+```
+
+Result: `cardOutcomes` grows from 0 → 5 over time as each oracle settles, web UI flips each card from mark-to-market to definitive PnL the instant its oracle resolves. `DuelFinalized` becomes redundant for `cardOutcomes` and is only used for the final `payout_to_p0` / `payout_to_p1` numbers + the COMPLETE status flip.
+
+### B2. Per-card oracle reads (fix latent multi-oracle bug)
+
+**Today:** the indexer reuses one `settlementPrice` (from `DuelFinalized`) for all 5 cards. This is correct only when all 5 cards share one oracle (current Deckmaster behavior in some test paths). For a 5-different-oracle deck — which `finalize_multi` is designed for — it produces wrong `upWon` for any card whose oracle isn't the one in the event.
+
+**Required:** in B1's algorithm, each card reads `OracleSVI(cards[N].oracle_id).settlement_price` — its OWN oracle, not a shared one. No external API to change; same data the contract already uses in `finalize_multi`.
+
+### B3. Polling frequency
+
+The indexer needs to poll each duel's oracles often enough that the "settles → web sees it" gap is small (a few seconds, not minutes). Existing `INDEXER_POLL_INTERVAL_MS=3000` (3 s) is fine — the only behavioral change is the projection logic, not the polling cadence.
+
+### B4. What does NOT change
+
+- `protocol.ts` `room_state.cardOutcomes` shape is already correct.
+- `DuelFinalized` event handling stays — still drives the COMPLETE flip and the canonical payout totals.
+- Keeper's `finalize_multi` and `redeem_permissionless` calls are untouched.
+- No new WS event type needed; clients re-render off the existing `room_state` push.
+
 ## Architectural baseline (what's already there)
 
 Do not recreate any of this:
@@ -190,8 +239,8 @@ Live data: `oracle_tick` updates a `spot` display under the active card. No re-q
 > **Contract change (2026-05-27):** settlement is now a **single** `finalize_multi` call (or `finalize` if all 5 cards share one oracle), not 5× `settle_card` + a separate `finalize`. The new `buildFinalizeTx` helper in `lib/flicky.ts` builds the PTB, but the web app does NOT call it — the keeper does, signed by the server admin key.
 
 - No client-side finalize call. Keeper in `apps/server/src/keeper.ts` waits until both players are 5/5 AND all relevant oracles have `settlement_price.is_some()`, then submits `finalize_multi(duel, p0_mgr, p1_mgr, oracle_0..oracle_4, clock)`.
-- UI shows "awaiting settlement" while watching `room_state`. With one-shot finalize, the displayed counter is no longer a 0→5 settled-card progress — it's "waiting for oracles to settle" (5 separate expiries), then a single chain confirmation flips the duel to COMPLETE.
-- The `room_state.settledCount` field (per current `protocol.ts`) is interpreted as "oracles with `settlement_price.is_some()`", climbing 0→5. UI displays "X / 5 oracles settled" until the keeper fires `finalize_multi`.
+- UI shows per-card PnL progressively as each oracle settles, **before** any on-chain finalize, courtesy of backend prereq **B1**. Each `room_state.cardOutcomes[i]` push flips card `i` from mark-to-market (proportional, `oracle_tick`-driven) to definitive binary PnL.
+- `room_state.settledCount` climbs 0→5 as each card's oracle resolves (per B1). UI displays "X / 5 cards settled" with each card's resolved PnL inline. Once all 5 are settled, UI shows "awaiting finalize tx" until the keeper's `finalize_multi` lands and flips status to COMPLETE.
 - On `room_state.status === "COMPLETE"`: render winner from `room_state` payout fields. The `DuelFinalized` event also carries `oracle_id` + `settlement_price` as on-chain proof — server can include these in the room_state push for the results screen.
 - `finalize_test_one_oracle` (dev-mode finalize using spot price as fallback) is **out of scope** for the production game UI. The keeper picks the right finalize call.
 
@@ -266,6 +315,8 @@ results screen ◀── room_state.cardOutcomes
 8. Verify per-card UP/DOWN buttons show pre-computed swipe cost + implied probability, **and** that the on-chain `premium` in `SwipeRecorded` matches the UI estimate within drift tolerance (a few atoms).
 9. Verify swipe PTBs do NOT include a client-supplied `premium` arg (inspect `record_swipe` call args — should be 7 args, not 8).
 10. Verify `oracle_tick` updates the live spot under the active card.
+10a. Verify the mixed PnL display: as each oracle settles, that specific card's row flips from a smoothly-ticking mark-to-market estimate to a frozen `cardOutcomes[i].p{0,1}Pnl` value, while other unsettled cards continue to tick. The running net at the bottom updates whenever either an `oracle_tick` arrives or a `cardOutcomes[i]` lands.
+10b. Verify per-card outcomes appear in `room_state.cardOutcomes` BEFORE the keeper's `finalize_multi` lands (i.e., `settledCount` can climb to 5 with `status` still `ACTIVE`).
 11. Verify `room_state` from server matches `fetchDuel` from chain (no protocol drift).
 12. Verify settlement is a SINGLE `finalize_multi` tx (one chain confirmation), not 5 settle_card txs.
 13. Verify winner displayed matches the `DuelFinalized` event payouts: `payout_to_p0` vs `payout_to_p1`.
