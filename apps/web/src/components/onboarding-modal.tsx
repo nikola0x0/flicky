@@ -11,11 +11,12 @@ import {
   writeManagerCache,
   extractManagerIdFromChanges,
 } from "@/lib/deepbook"
+import { DepositModal } from "@/components/deposit-modal"
 
 /**
  * Per-swipe Predict position size (dUSDC micro-units). Fixed at 1 dUSDC
- * in v1 — worst-case 5-card exposure = 5 * SWIPE_QUANTITY, matching the
- * PredictManager minimum below. Keep these two constants in lockstep.
+ * in v1 — worst-case 5-card exposure = 5 * SWIPE_QUANTITY, matching
+ * MIN_MANAGER_BALANCE below. Keep these two constants in lockstep.
  */
 export const SWIPE_QUANTITY = 1_000_000n
 
@@ -27,25 +28,45 @@ export const MIN_MANAGER_BALANCE = 5n * SWIPE_QUANTITY
 
 interface Props {
   open: boolean
+  /** The duel-entry stake the user picked (dUSDC micro-units). The
+   *  modal verifies the wallet holds at least `stake + (topup needed)`
+   *  before letting the player into the queue. */
+  stake: bigint
   onClose: () => void
-  /** Called once the wallet has a manager funded to ≥ MIN_MANAGER_BALANCE. */
+  /** Called once the wallet AND manager balances are both sufficient. */
   onReady: (managerId: string) => void
 }
 
 type Phase =
+  /** Reading balances. */
   | { kind: "checking" }
+  /** Wallet doesn't have enough dUSDC for stake + manager top-up. */
+  | {
+      kind: "needs_wallet"
+      needed: bigint
+      current: bigint
+    }
+  /** Wallet OK; no PredictManager yet. */
   | { kind: "needs_manager" }
-  | { kind: "needs_deposit"; managerId: string; current: bigint }
+  /** Wallet OK; manager exists but balance < 5 dUSDC. */
+  | { kind: "needs_manager_deposit"; managerId: string; current: bigint }
+  /** Both checks passed. */
   | { kind: "ready"; managerId: string }
   | { kind: "error"; message: string }
 
-export function OnboardingModal({ open, onClose, onReady }: Props) {
+export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
   const account = useCurrentAccount()
   const client = useSuiClient()
   const sign = useFlickySign()
   const [phase, setPhase] = useState<Phase>({ kind: "checking" })
   const [walletDusdc, setWalletDusdc] = useState<bigint>(0n)
+  const [walletTopupOpen, setWalletTopupOpen] = useState(false)
 
+  /**
+   * Single source of truth for "what state are we in?". Reads wallet
+   * + (optional) manager balances and computes the next phase. Idempotent —
+   * safe to call after each tx or whenever the DepositModal closes.
+   */
   const recheck = useCallback(async () => {
     if (!account) return
     setPhase({ kind: "checking" })
@@ -53,30 +74,47 @@ export function OnboardingModal({ open, onClose, onReady }: Props) {
       const wallet = await getWalletDusdcBalance(client, account.address)
       setWalletDusdc(wallet)
       const mgr = await findPredictManager(client, account.address)
+      const mgrBal = mgr
+        ? await getManagerDusdcBalance(client, mgr.id)
+        : 0n
+      // How much MORE dUSDC must move from wallet into the manager.
+      const topup =
+        mgrBal >= MIN_MANAGER_BALANCE ? 0n : MIN_MANAGER_BALANCE - mgrBal
+      // Wallet must cover both the stake escrow AND the manager top-up.
+      const walletNeeded = stake + topup
+      if (wallet < walletNeeded) {
+        setPhase({
+          kind: "needs_wallet",
+          needed: walletNeeded,
+          current: wallet,
+        })
+        return
+      }
       if (!mgr) {
         setPhase({ kind: "needs_manager" })
         return
       }
-      const bal = await getManagerDusdcBalance(client, mgr.id)
-      if (bal >= MIN_MANAGER_BALANCE) {
-        setPhase({ kind: "ready", managerId: mgr.id })
+      if (mgrBal < MIN_MANAGER_BALANCE) {
+        setPhase({
+          kind: "needs_manager_deposit",
+          managerId: mgr.id,
+          current: mgrBal,
+        })
         return
       }
-      setPhase({ kind: "needs_deposit", managerId: mgr.id, current: bal })
+      setPhase({ kind: "ready", managerId: mgr.id })
     } catch (e) {
       setPhase({
         kind: "error",
         message: e instanceof Error ? e.message : String(e),
       })
     }
-  }, [account, client])
+  }, [account, client, stake])
 
-  // Re-check whenever the modal opens or the account changes.
   useEffect(() => {
     if (open) void recheck()
   }, [open, recheck])
 
-  // Notify caller exactly once when we reach `ready`.
   useEffect(() => {
     if (phase.kind === "ready") onReady(phase.managerId)
   }, [phase, onReady])
@@ -91,9 +129,16 @@ export function OnboardingModal({ open, onClose, onReady }: Props) {
         </h2>
 
         {phase.kind === "checking" && (
-          <p className="text-sm text-white/70">
-            Checking your Predict account&hellip;
-          </p>
+          <p className="text-sm text-white/70">Checking your balances&hellip;</p>
+        )}
+
+        {phase.kind === "needs_wallet" && (
+          <NeedsWalletStep
+            needed={phase.needed}
+            current={phase.current}
+            stake={stake}
+            onTopup={() => setWalletTopupOpen(true)}
+          />
         )}
 
         {phase.kind === "needs_manager" && (
@@ -121,16 +166,12 @@ export function OnboardingModal({ open, onClose, onReady }: Props) {
                   )
                 }
                 writeManagerCache(account.address, mgrId)
-                const bal = await getManagerDusdcBalance(client, mgrId)
-                if (bal >= MIN_MANAGER_BALANCE) {
-                  setPhase({ kind: "ready", managerId: mgrId })
-                } else {
-                  setPhase({
-                    kind: "needs_deposit",
-                    managerId: mgrId,
-                    current: bal,
-                  })
-                }
+                // New manager always has 0 balance — go straight to deposit.
+                setPhase({
+                  kind: "needs_manager_deposit",
+                  managerId: mgrId,
+                  current: 0n,
+                })
               } catch (e) {
                 setPhase({
                   kind: "error",
@@ -141,20 +182,12 @@ export function OnboardingModal({ open, onClose, onReady }: Props) {
           />
         )}
 
-        {phase.kind === "needs_deposit" && (
+        {phase.kind === "needs_manager_deposit" && (
           <NeedsDepositStep
             current={phase.current}
-            walletDusdc={walletDusdc}
             onDeposit={async () => {
               if (!account) return
               const needed = MIN_MANAGER_BALANCE - phase.current
-              if (walletDusdc < needed) {
-                setPhase({
-                  kind: "error",
-                  message: `Wallet has ${fmtDusdc(walletDusdc)} but needs ${fmtDusdc(needed)} to top up to 5 dUSDC.`,
-                })
-                return
-              }
               try {
                 const tx = await buildDepositDusdcTx(
                   client,
@@ -175,7 +208,9 @@ export function OnboardingModal({ open, onClose, onReady }: Props) {
         )}
 
         {phase.kind === "ready" && (
-          <p className="text-sm text-green-400">Ready — joining queue&hellip;</p>
+          <p className="text-sm text-green-400">
+            Ready &mdash; joining queue&hellip;
+          </p>
         )}
 
         {phase.kind === "error" && (
@@ -200,6 +235,52 @@ export function OnboardingModal({ open, onClose, onReady }: Props) {
           </div>
         )}
       </div>
+
+      {account && (
+        <DepositModal
+          open={walletTopupOpen}
+          address={account.address}
+          onClose={() => {
+            setWalletTopupOpen(false)
+            // Refresh balances — if the user funded the wallet, the
+            // gate advances automatically.
+            void recheck()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function NeedsWalletStep({
+  needed,
+  current,
+  stake,
+  onTopup,
+}: {
+  needed: bigint
+  current: bigint
+  stake: bigint
+  onTopup: () => void
+}) {
+  const short = needed - current
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-white/80">
+        Your zkLogin wallet needs <strong>{fmtDusdc(needed)}</strong> total to
+        play this stake: {fmtDusdc(stake)} for the duel escrow plus enough to
+        top your Predict account to {fmtDusdc(MIN_MANAGER_BALANCE)}.
+      </p>
+      <p className="text-xs text-white/55">
+        Have: {fmtDusdc(current)} &nbsp;·&nbsp; need {fmtDusdc(short)} more
+      </p>
+      <button
+        type="button"
+        onClick={onTopup}
+        className="w-full rounded-md bg-[#4094fb] px-4 py-2 text-lg font-bold text-white"
+      >
+        Get dUSDC
+      </button>
     </div>
   )
 }
@@ -215,8 +296,8 @@ function NeedsManagerStep({
   return (
     <div className="space-y-3">
       <p className="text-sm text-white/80">
-        You need a Predict account to swipe. We&rsquo;ll create one, then deposit
-        5 dUSDC.
+        You need a Predict account to swipe. We&rsquo;ll create one, then
+        deposit {fmtDusdc(MIN_MANAGER_BALANCE)}.
       </p>
       <p className="text-xs text-white/55">
         Wallet balance: {fmtDusdc(walletDusdc)}
@@ -242,29 +323,23 @@ function NeedsManagerStep({
 
 function NeedsDepositStep({
   current,
-  walletDusdc,
   onDeposit,
 }: {
   current: bigint
-  walletDusdc: bigint
   onDeposit: () => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
   const needed = MIN_MANAGER_BALANCE - current
-  const insufficient = walletDusdc < needed
   return (
     <div className="space-y-3">
       <p className="text-sm text-white/80">
-        Your Predict account has {fmtDusdc(current)}. We need{" "}
-        {fmtDusdc(MIN_MANAGER_BALANCE)} for a worst-case 5-card duel.
-      </p>
-      <p className="text-xs text-white/55">
-        Wallet balance: {fmtDusdc(walletDusdc)} · deposit needed:{" "}
-        {fmtDusdc(needed)}
+        Your Predict account has {fmtDusdc(current)}. Depositing{" "}
+        {fmtDusdc(needed)} brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} for the
+        5-card duel.
       </p>
       <button
         type="button"
-        disabled={busy || insufficient}
+        disabled={busy}
         onClick={async () => {
           setBusy(true)
           try {
@@ -275,11 +350,7 @@ function NeedsDepositStep({
         }}
         className="w-full rounded-md bg-[#e08a2b] px-4 py-2 text-lg font-bold text-white disabled:opacity-50"
       >
-        {busy
-          ? "Depositing…"
-          : insufficient
-            ? "Insufficient dUSDC in wallet"
-            : `Deposit ${fmtDusdc(needed)}`}
+        {busy ? "Depositing…" : `Deposit ${fmtDusdc(needed)}`}
       </button>
     </div>
   )

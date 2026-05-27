@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from "react"
 import type { CSSProperties } from "react"
+import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { MatchButton } from "@/components/match-button"
 import { ModeModal } from "@/components/mode-modal"
+import { OnboardingModal } from "@/components/onboarding-modal"
+import { useFlickySocket } from "@/hooks/use-flicky-socket"
+import { ActiveDuel } from "./active-duel"
+import { STAKE_TIERS, type Tier } from "@/lib/protocol"
 
 const STAKES = [1, 3, 5, 10] as const
 type Stake = (typeof STAKES)[number]
@@ -13,8 +18,73 @@ const MODE_BRAND_STYLE = {
 } as CSSProperties
 
 export default function GamePvp() {
+  const account = useCurrentAccount()
   const [stake, setStake] = useState<Stake>(3)
   const [modeOpen, setModeOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const [managerId, setManagerId] = useState<string | null>(null)
+
+  const { wsOpen, send, onMessage } = useFlickySocket(account?.address)
+
+  const [queueSize, setQueueSize] = useState<number | null>(null)
+  const [matched, setMatched] = useState<{
+    role: "creator" | "challenger"
+    opponent: string
+  } | null>(null)
+
+  const tier: Tier =
+    stake === 1
+      ? "starter"
+      : stake === 3
+        ? "casual"
+        : stake === 5
+          ? "standard"
+          : "high_roller"
+
+  useEffect(() => {
+    return onMessage((msg) => {
+      if (msg.type === "queue_status") setQueueSize(msg.size)
+      else if (msg.type === "queue_left") setQueueSize(null)
+      else if (msg.type === "match_found")
+        setMatched({ role: msg.role, opponent: msg.opponent })
+    })
+  }, [onMessage])
+
+  const onQueueMatch = () => {
+    if (!account) {
+      alert("Please sign in first")
+      return
+    }
+    if (!wsOpen) {
+      alert("Connecting to server... Please wait.")
+      return
+    }
+    if (queueSize !== null) {
+      send({ type: "queue_leave" })
+      return
+    }
+    // Open the onboarding gate — it checks wallet + manager balances
+    // and only fires onReady when both are sufficient.
+    setOnboardingOpen(true)
+  }
+
+  // If a match is found, render the Active Duel phase.
+  if (matched && managerId) {
+    return (
+      <ActiveDuel
+        role={matched.role}
+        tier={tier}
+        managerId={managerId}
+        wsOpen={wsOpen}
+        send={send}
+        onMessage={onMessage}
+        onExit={() => {
+          setMatched(null)
+          setQueueSize(null)
+        }}
+      />
+    )
+  }
 
   return (
     <div className="flex h-full flex-col gap-5 px-4 py-4">
@@ -42,10 +112,15 @@ export default function GamePvp() {
 
       <div className="flex flex-col gap-2">
         <div className="flex items-stretch gap-2">
-          <StakeSelector value={stake} onChange={setStake} />
+          <StakeSelector value={stake} onChange={setStake} disabled={queueSize !== null} />
           <MatchButton
             className="flex-1"
-            label={<span className="text-2xl">queue match</span>}
+            label={
+              <span className="text-2xl">
+                {queueSize !== null ? `queueing (${queueSize})` : "queue match"}
+              </span>
+            }
+            onClick={onQueueMatch}
           />
         </div>
         <MatchButton
@@ -60,6 +135,16 @@ export default function GamePvp() {
       </p>
 
       <ModeModal open={modeOpen} onClose={() => setModeOpen(false)} />
+      <OnboardingModal
+        open={onboardingOpen}
+        stake={STAKE_TIERS[tier]}
+        onClose={() => setOnboardingOpen(false)}
+        onReady={(mgrId) => {
+          setManagerId(mgrId)
+          setOnboardingOpen(false)
+          send({ type: "queue_join", tier })
+        }}
+      />
     </div>
   )
 }
@@ -67,9 +152,11 @@ export default function GamePvp() {
 function StakeSelector({
   value,
   onChange,
+  disabled
 }: {
   value: Stake
   onChange: (s: Stake) => void
+  disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -94,11 +181,12 @@ function StakeSelector({
     <div ref={rootRef} className="relative">
       <button
         type="button"
+        disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`stake ${value} dUSDC`}
-        className="flex h-14 shrink-0 items-center gap-2 rounded-md border-2 border-black/55 bg-[#1b2548] px-3 shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08)] transition-colors hover:bg-[#243364]"
+        className="flex h-14 shrink-0 items-center gap-2 rounded-md border-2 border-black/55 bg-[#1b2548] px-3 shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08)] transition-colors hover:bg-[#243364] disabled:opacity-50"
       >
         <img
           src="/tokens/usdc-icon.png"
