@@ -5,6 +5,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit"
 import { MatchButton } from "@/components/match-button"
 import { ModeModal } from "@/components/mode-modal"
 import { OnboardingModal } from "@/components/onboarding-modal"
+import { PixelButton } from "@/components/pixel-button"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { ActiveDuel } from "./active-duel"
 import { STAKE_TIERS, type Tier } from "@/lib/protocol"
@@ -16,6 +17,19 @@ const MODE_BRAND_STYLE = {
   "--btn-bg": "#e08a2b",
   "--btn-highlight": "#f4b966",
 } as CSSProperties
+
+const RED_BRAND_STYLE = {
+  "--btn-bg": "#d94646",
+  "--btn-highlight": "#f08585",
+} as CSSProperties
+
+const TIER_LABEL: Record<Tier, string> = {
+  practice: "practice",
+  starter: "starter",
+  casual: "casual",
+  standard: "standard",
+  high_roller: "high roller",
+}
 
 export default function GamePvp() {
   const account = useCurrentAccount()
@@ -61,6 +75,10 @@ export default function GamePvp() {
     }
     if (queueSize !== null) {
       send({ type: "queue_leave" })
+      // Snap UI back immediately — don't wait for the server's queue_left
+      // echo. If the server hasn't acked yet, leaving the chip in the
+      // "queueing" state makes the button feel broken/unresponsive.
+      setQueueSize(null)
       return
     }
     // Open the onboarding gate — it checks wallet + manager balances
@@ -82,6 +100,20 @@ export default function GamePvp() {
           setMatched(null)
           setQueueSize(null)
         }}
+      />
+    )
+  }
+
+  // While in queue, take over the full PvP view with a dedicated
+  // "searching" screen — keeps the player oriented on what's happening
+  // and gives the wait some game-like presence.
+  if (queueSize !== null) {
+    return (
+      <QueueScreen
+        tier={tier}
+        stake={stake}
+        queueSize={queueSize}
+        onCancel={onQueueMatch}
       />
     )
   }
@@ -112,14 +144,10 @@ export default function GamePvp() {
 
       <div className="flex flex-col gap-2">
         <div className="flex items-stretch gap-2">
-          <StakeSelector value={stake} onChange={setStake} disabled={queueSize !== null} />
+          <StakeSelector value={stake} onChange={setStake} />
           <MatchButton
             className="flex-1"
-            label={
-              <span className="text-2xl">
-                {queueSize !== null ? `queueing (${queueSize})` : "queue match"}
-              </span>
-            }
+            label={<span className="text-2xl">queue match</span>}
             onClick={onQueueMatch}
           />
         </div>
@@ -238,6 +266,105 @@ function StakeSelector({
         </ul>
       )}
     </div>
+  )
+}
+
+/**
+ * Full-frame "searching for opponent" screen rendered while the player
+ * is in the matchmaking queue. Mirrors the layout/aesthetic of the
+ * standby PvP view (banner up top, tier+stake echoed, action button at
+ * the bottom) but with a single red cancel CTA instead of the queue
+ * controls.
+ */
+function QueueScreen({
+  tier,
+  stake,
+  queueSize,
+  onCancel,
+}: {
+  tier: Tier
+  stake: Stake
+  queueSize: number
+  onCancel: () => void
+}) {
+  return (
+    <div className="queue-enter flex h-full flex-col gap-5 px-4 pb-4">
+      {/* Banner bleeds to the frame edges and softly fades into the
+          background at the bottom so it reads as part of the screen
+          rather than a postcard pasted on top. A stationary rounded
+          border breathes in opacity/glow to give a subtle "active"
+          feel — no scale, no expanding pings. */}
+      <div className="relative -mx-4">
+        <img
+          src="/banners/searching.png"
+          alt="searching for opponent"
+          className="block aspect-video w-full object-cover [image-rendering:pixelated] [mask-image:linear-gradient(to_bottom,transparent_0%,black_8%,black_78%,transparent_100%)]"
+        />
+        <span
+          aria-hidden
+          className="border-glow pointer-events-none absolute inset-2 rounded-2xl [mask-image:linear-gradient(to_bottom,transparent_0%,black_12%,black_85%,transparent_100%)]"
+        />
+        <AnimatedDots className="absolute bottom-3 left-1/2 -translate-x-1/2 text-3xl tracking-[0.3em] text-white drop-shadow-[0_2px_0_rgba(0,0,0,0.6)]" />
+      </div>
+
+      <header className="flex flex-col items-center gap-1 -mt-2">
+        <p className="text-xs tracking-[0.18em] text-white/55 uppercase">
+          finding a duelist for you
+        </p>
+      </header>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between rounded-md border-2 border-black/55 bg-[#1b2548] px-4 py-3 shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08)]">
+          <div className="flex flex-col">
+            <span className="text-xs tracking-[0.18em] text-white/55 uppercase">
+              tier
+            </span>
+            <span className="text-lg tracking-wider text-white uppercase">
+              {TIER_LABEL[tier]}
+            </span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="text-xs tracking-[0.18em] text-white/55 uppercase">
+              stake
+            </span>
+            <span className="flex items-center gap-1.5 text-lg leading-none font-black text-white tabular-nums">
+              <img
+                src="/tokens/usdc-icon.png"
+                alt=""
+                aria-hidden
+                className="size-5 [image-rendering:pixelated]"
+              />
+              {stake}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between rounded-md bg-white/5 px-4 py-2 text-sm tracking-[0.18em] text-white/55 uppercase">
+          <span>in queue</span>
+          <span className="text-base tabular-nums text-white">{queueSize}</span>
+        </div>
+      </div>
+
+      <div className="mt-auto">
+        <PixelButton
+          onClick={onCancel}
+          style={RED_BRAND_STYLE}
+          className="h-14 w-full !text-2xl"
+        >
+          cancel
+        </PixelButton>
+      </div>
+    </div>
+  )
+}
+
+function AnimatedDots({ className = "" }: { className?: string }) {
+  return (
+    <span aria-hidden className={`inline-flex gap-0.5 ${className}`}>
+      <span className="animate-bounce [animation-delay:-0.3s]">.</span>
+      <span className="animate-bounce [animation-delay:-0.15s]">.</span>
+      <span className="animate-bounce">.</span>
+    </span>
   )
 }
 

@@ -17,6 +17,7 @@ import {
   SUI_COIN_TYPE,
   SUI_DECIMALS,
 } from "@/lib/swap"
+import { PixelButton } from "@/components/pixel-button"
 
 const BLUE_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -205,12 +206,11 @@ function ManagerWithdrawTab({ address }: { address: string }) {
           </span>
         </div>
       </div>
-      <button
-        type="button"
+      <PixelButton
         disabled={busy || !validAmount || insufficient || noManager}
         onClick={() => void doWithdraw()}
         style={BLUE_BRAND_STYLE}
-        className="w-full rounded-xl bg-[#4094fb] px-4 py-3 text-lg font-bold tracking-wider uppercase text-white disabled:opacity-50"
+        className="h-12 w-full !text-2xl"
       >
         {busy
           ? "withdrawing…"
@@ -219,7 +219,7 @@ function ManagerWithdrawTab({ address }: { address: string }) {
             : insufficient
               ? "insufficient manager balance"
               : `withdraw ${validAmount ? parsed.toFixed(2) : "—"} dUSDC`}
-      </button>
+      </PixelButton>
       {error && <p className="text-sm text-red-400">{error}</p>}
       {success !== null && (
         <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-sm text-emerald-200">
@@ -342,15 +342,14 @@ function SendTab({ address }: { address: string }) {
           >
             cancel
           </button>
-          <button
-            type="button"
+          <PixelButton
             disabled={busy}
             onClick={() => void submit()}
             style={BLUE_BRAND_STYLE}
-            className="rounded-xl bg-[#4094fb] px-4 py-3 text-base font-bold tracking-wider uppercase text-white disabled:opacity-50"
+            className="h-12 !text-xl"
           >
             {busy ? "sending…" : "yes, send"}
-          </button>
+          </PixelButton>
         </div>
         {error && <p className="text-sm text-red-400">{error}</p>}
       </div>
@@ -395,12 +394,11 @@ function SendTab({ address }: { address: string }) {
           </span>
         </div>
       </div>
-      <button
-        type="button"
+      <PixelButton
         disabled={!validAddress || !validAmount || insufficient}
         onClick={() => setConfirming(true)}
         style={BLUE_BRAND_STYLE}
-        className="w-full rounded-xl bg-[#4094fb] px-4 py-3 text-lg font-bold tracking-wider uppercase text-white disabled:opacity-50"
+        className="h-12 w-full !text-2xl"
       >
         {!validAddress
           ? "enter recipient"
@@ -409,7 +407,7 @@ function SendTab({ address }: { address: string }) {
             : insufficient
               ? `insufficient ${meta.label}`
               : `review send`}
-      </button>
+      </PixelButton>
       {error && <p className="text-sm text-red-400">{error}</p>}
       {success && (
         <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-sm text-emerald-200">

@@ -1,6 +1,6 @@
 import { useState } from "react"
 import type { CSSProperties } from "react"
-import { Link, useNavigate } from "react-router"
+import { Navigate, useNavigate } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { BalanceChip } from "@/components/balance-chip"
@@ -37,14 +37,23 @@ export default function Profile() {
   const managerBalance = managerInfo?.balance ?? 0
   const [depositOpen, setDepositOpen] = useState(false)
   const [withdrawOpen, setWithdrawOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
 
-  // Signed out — bounce back to /game/home where they can sign in.
+  const handleCopyAddress = async () => {
+    if (!account) return
+    try {
+      await navigator.clipboard.writeText(account.address)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Signed out (e.g. logout from the menu while on this page) — bounce
+  // to /game/home rather than render a stripped-down fallback.
   if (!account) {
-    return (
-      <Link to="/game/home" className="text-white underline">
-        go back
-      </Link>
-    )
+    return <Navigate to="/game/home" replace />
   }
 
   const address = account.address
@@ -90,12 +99,23 @@ export default function Profile() {
               </div>
               <button
                 type="button"
-                onClick={() => navigator.clipboard.writeText(address)}
+                onClick={() => void handleCopyAddress()}
                 aria-label="copy address"
-                className="inline-flex items-center gap-1.5 text-lg text-white/70 hover:text-white"
+                className={`inline-flex items-center gap-2 text-lg transition-colors duration-200 ${
+                  copied
+                    ? "text-emerald-300"
+                    : "text-white/70 hover:text-white"
+                }`}
               >
                 <span className="tabular-nums">{short}</span>
-                <span className="text-base">⎘</span>
+                <span className="text-2xl leading-none">
+                  {copied ? "✓" : "⎘"}
+                </span>
+                {copied && (
+                  <span className="text-xs tracking-[0.18em] uppercase">
+                    copied
+                  </span>
+                )}
               </button>
               <p className="text-sm tracking-[0.18em] text-white/55 uppercase">
                 connected via google

@@ -5,8 +5,10 @@ import {
   useSignAndExecuteTransaction,
   useSuiClient,
 } from "@mysten/dapp-kit"
+import { useOutletContext } from "react-router"
 
 import { PixelButton } from "@/components/pixel-button"
+import type { GameOutletContext } from "./layout"
 import {
   useDusdcBalance,
   useInvalidateWalletBalances,
@@ -64,6 +66,7 @@ export default function GameShop() {
   const account = useCurrentAccount()
   const client = useSuiClient()
   const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction()
+  const { openLogin } = useOutletContext<GameOutletContext>()
 
   const [direction, setDirection] = useState<SwapDirection>("sui_to_dusdc")
   const [inputAmount, setInputAmount] = useState("1")
@@ -155,19 +158,6 @@ export default function GameShop() {
     )
   }
 
-  if (!account) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-        <p className="text-base tracking-[0.15em] text-white uppercase">
-          sign in to swap
-        </p>
-        <p className="text-sm text-white/55">
-          use the sign-in button in the header
-        </p>
-      </div>
-    )
-  }
-
   return (
     <div className="flex flex-col gap-4 px-4 py-4">
       <header className="flex items-center justify-between">
@@ -247,15 +237,21 @@ export default function GameShop() {
       </div>
 
       <PixelButton
-        onClick={handleSwap}
-        disabled={busy || !pool || inputNum <= 0 || inputNum > fromBalance}
+        onClick={account ? handleSwap : openLogin}
+        disabled={
+          !!account &&
+          (busy || !pool || inputNum <= 0 || inputNum > fromBalance)
+        }
+        style={account ? undefined : BLUE_BRAND_STYLE}
         className="h-12 w-full text-base"
       >
-        {busy
-          ? "swapping…"
-          : inputNum > fromBalance
-            ? `not enough ${fromToken.symbol.toLowerCase()}`
-            : `swap ${fromToken.symbol} → ${toToken.symbol}`}
+        {!account
+          ? "sign in to swap"
+          : busy
+            ? "swapping…"
+            : inputNum > fromBalance
+              ? `not enough ${fromToken.symbol.toLowerCase()}`
+              : `swap ${fromToken.symbol} → ${toToken.symbol}`}
       </PixelButton>
 
       {status && (

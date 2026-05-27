@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react"
+import { createPortal } from "react-dom"
 import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import {
@@ -146,14 +147,17 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
 
   if (!open) return null
 
-  return (
+  // Portal to body so the backdrop covers the header + bottom-nav too.
+  // Rendering inline would anchor to the ancestor route-transition div
+  // (which uses transform), confining the overlay to <main>.
+  return createPortal(
     <div
       onClick={onClose}
-      className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="relative w-full max-w-lg rounded-md border-2 border-black/55 bg-[#1b2548] p-5 text-white shadow-[0_6px_0_rgba(0,0,0,0.45)]"
+        className="relative w-full max-w-lg rounded-md border-2 border-black/55 bg-[#1b2548] p-5 font-pixel text-white shadow-[0_6px_0_rgba(0,0,0,0.45)]"
       >
         <button
           type="button"
@@ -168,7 +172,12 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         </h2>
 
         {phase.kind === "checking" && (
-          <p className="text-base text-white/70">Checking your balances&hellip;</p>
+          <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
+            <span className="size-2 animate-pulse rounded-full bg-white/55" />
+            <p className="text-base tracking-wider text-white/70 uppercase">
+              checking your balances&hellip;
+            </p>
+          </div>
         )}
 
         {phase.kind === "needs_wallet" && (
@@ -285,7 +294,8 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
           }}
         />
       )}
-    </div>
+    </div>,
+    document.body,
   )
 }
 
