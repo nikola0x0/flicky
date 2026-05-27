@@ -40,6 +40,60 @@ const POLL_INTERVAL_MS = 5_000
 const CARD_SLOTS = 5
 
 /**
+ * Dev-only visual test path: `?demoChart=1` swaps the tile's data
+ * sources for a synthesized ACTIVE duel + a synthetic oracle-tick stream
+ * so the chart's avatar + smoothing can be verified without needing
+ * the duel pipeline. Gated on `import.meta.env.DEV` so it can't ship.
+ */
+function useDemoChart(): boolean {
+  if (!import.meta.env.DEV) return false
+  if (typeof window === "undefined") return false
+  return new URLSearchParams(window.location.search).get("demoChart") === "1"
+}
+
+const DEMO_OPP_ADDRESS =
+  "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+const DEMO_STRIKE = "100000000000" // 100.0 on 1e9 scale
+const DEMO_QUANTITY = "1000000000" // 1.0 quantity
+
+function buildDemoDuel(address: string): DuelLite {
+  return {
+    id: "demo-duel",
+    status: "ACTIVE",
+    creator: address,
+    challenger: DEMO_OPP_ADDRESS,
+    cardCount: CARD_SLOTS,
+    settledCount: 2,
+    startedAtMs: Date.now() - 60_000,
+    cardOutcomes: [
+      { cardIdx: 0, p0Pnl: "500000", p1Pnl: "-500000" },
+      { cardIdx: 1, p0Pnl: "-250000", p1Pnl: "250000" },
+    ],
+    swipes: [
+      {
+        cardIdx: 0,
+        p0Swipe: { isUp: true, quantity: DEMO_QUANTITY, premium: "100000" },
+        p1Swipe: { isUp: false, quantity: DEMO_QUANTITY, premium: "100000" },
+      },
+      {
+        cardIdx: 1,
+        p0Swipe: { isUp: false, quantity: DEMO_QUANTITY, premium: "100000" },
+        p1Swipe: { isUp: true, quantity: DEMO_QUANTITY, premium: "100000" },
+      },
+      {
+        cardIdx: 2,
+        p0Swipe: { isUp: true, quantity: DEMO_QUANTITY, premium: "100000" },
+        p1Swipe: { isUp: false, quantity: DEMO_QUANTITY, premium: "100000" },
+      },
+    ],
+    cards: Array.from({ length: CARD_SLOTS }, (_, i) => ({
+      oracle_id: `demo-oracle-${i}`,
+      strike: DEMO_STRIKE,
+    })),
+  }
+}
+
+/**
  * Home-screen tile that surfaces a player's currently-settling duel
  * (LIVE) or, if none is active, their most recently completed duel
  * (FINAL). Polls `/duels/recent?player=…` every 5 s, and for ACTIVE
@@ -49,13 +103,14 @@ const CARD_SLOTS = 5
 export function MyMatchTile() {
   const account = useCurrentAccount()
   const address = account?.address
-  const { send, onMessage } = useFlickySocket(address)
+  const demo = useDemoChart()
+  const { send, onMessage } = useFlickySocket(demo ? undefined : address)
   const [duels, setDuels] = useState<DuelLite[] | null>(null)
   const [ticks, setTicks] = useState<Record<string, Tick>>({})
 
-  // Poll the player's duels.
+  // Poll the player's duels — skipped in demo mode (mock seeded below).
   useEffect(() => {
-    if (!address) return
+    if (!address || demo) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
     const tick = async () => {
@@ -77,9 +132,39 @@ export function MyMatchTile() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [address])
+  }, [address, demo])
 
-  const pick = useMemo(() => pickMatch(duels), [duels])
+  // Demo: synthetic oracle-tick stream so the chart visibly moves
+  // without a real game in flight. The duel itself is computed (not
+  // fetched) below.
+  useEffect(() => {
+    if (!demo) return
+    const strike = BigInt(DEMO_STRIKE)
+    let forward = strike
+    const interval = setInterval(() => {
+      // Random walk ±0.06 on the 1e9 scale; clamp to ±0.6 around strike.
+      const step = BigInt(Math.round((Math.random() - 0.5) * 120_000_000))
+      forward += step
+      const max = strike + 600_000_000n
+      const min = strike - 600_000_000n
+      if (forward > max) forward = max
+      if (forward < min) forward = min
+      setTicks((prev) => ({
+        ...prev,
+        "demo-oracle-2": { spot: forward.toString(), forward: forward.toString() },
+      }))
+    }, 250)
+    return () => clearInterval(interval)
+  }, [demo])
+
+  // Demo override: a synthesized ACTIVE duel replaces the polled list,
+  // computed (not set into state) so the demo path doesn't fight the
+  // real fetch effect on re-mounts.
+  const effectiveDuels = useMemo(
+    () => (demo && address ? [buildDemoDuel(address)] : duels),
+    [demo, address, duels],
+  )
+  const pick = useMemo(() => pickMatch(effectiveDuels), [effectiveDuels])
   const isLive = pick?.status === "ACTIVE"
 
   // Subscribe to oracle ticks for the duel's cards while LIVE. The
@@ -91,7 +176,7 @@ export function MyMatchTile() {
   )
   const oracleKey = oracleIds.join(",")
   useEffect(() => {
-    if (oracleIds.length === 0) return
+    if (oracleIds.length === 0 || demo) return
     send({ type: "oracle_subscribe", oracleIds })
     const off = onMessage((msg) => {
       if (msg.type !== "oracle_tick") return
@@ -108,7 +193,7 @@ export function MyMatchTile() {
     // oracleKey condenses the array dependency so we don't re-subscribe
     // on every parent render that returns a fresh `oracleIds`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [oracleKey, onMessage, send])
+  }, [oracleKey, onMessage, send, demo])
 
   if (!address || !pick) return null
 
@@ -396,8 +481,10 @@ function useSmoothedPoints(
   points: Array<{ x: number; y: number | null; live: boolean }>,
 ): Array<{ x: number; y: number | null; live: boolean }> {
   const targetRef = useRef(points)
-  targetRef.current = points
   const [display, setDisplay] = useState(points)
+  useEffect(() => {
+    targetRef.current = points
+  }, [points])
 
   useEffect(() => {
     let raf = 0
