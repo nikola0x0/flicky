@@ -535,6 +535,7 @@ export class DuelIndexer {
         startedAtMs: Number(d.startedAtMs),
         cardOutcomes: d.cardOutcomes,
         swipes: d.swipes,
+        cards: d.cards,
       })
     } catch {
       // db.ts already logged the error with context.

@@ -7,6 +7,7 @@ import {
   buildCreateDuelDusdcTx,
   buildJoinDuelDusdcTx,
   fetchOracleSvi,
+  resolveCreatedDuelId,
 } from "@/lib/flicky"
 import {
   DEEPBOOK,
@@ -22,6 +23,13 @@ interface Props {
   role: "creator" | "challenger"
   tier: Tier
   managerId: string
+  /**
+   * Deck hash from `match_found`. Required for the creator's
+   * `create_duel` PTB. Passed as a prop (not subscribed to inside this
+   * component) because the message has already fired by the time
+   * ActiveDuel mounts — pvp.tsx captures it on receipt.
+   */
+  deckHash: string
   wsOpen: boolean
   send: (msg: ClientMsg) => void
   onMessage: (handler: (msg: ServerMsg) => void) => Unsubscribe
@@ -81,6 +89,7 @@ export function ActiveDuel({
   role,
   tier,
   managerId,
+  deckHash,
   // wsOpen is in the Props for future status indicators but the player
   // doesn't need to see the connection state during a match.
   wsOpen: _wsOpen,
@@ -182,18 +191,19 @@ export function ActiveDuel({
     }
   }, [oraclesReady, client, send])
 
-  // Creator: as soon as match_found arrives with the deckHash, sign
-  // create_duel and transition to AWAIT_REVEAL. Idempotent — `sentCreateRef`
-  // prevents resending if match_found fires twice (server replay, etc.).
+  // Creator: fire create_duel as soon as we mount with the deckHash
+  // already captured from match_found at the pvp.tsx level. Subscribing
+  // to match_found here would be too late — by the time ActiveDuel
+  // mounts, that message has already dispatched. `sentCreateRef` keeps
+  // this idempotent across StrictMode double-invocations.
   useEffect(() => {
     if (role !== "creator") return
-    return onMessage(async (msg) => {
-      if (msg.type !== "match_found") return
-      if (sentCreateRef.current) return
-      sentCreateRef.current = true
+    if (sentCreateRef.current) return
+    sentCreateRef.current = true
+    ;(async () => {
       try {
         if (!account) throw new Error("wallet not connected")
-        const deckHashBytes = hexToBytes(msg.deckHash)
+        const deckHashBytes = hexToBytes(deckHash)
         if (deckHashBytes.length !== 32) {
           throw new Error(
             `deck hash must be 32 bytes, got ${deckHashBytes.length}`,
@@ -207,19 +217,14 @@ export function ActiveDuel({
           DEEPBOOK.dusdcType,
         )
         const res = await sign.mutateAsync({ transaction: tx })
-        const duelId = extractDuelIdFromChanges(
-          (
-            res as {
-              objectChanges?: Array<{
-                type: string
-                objectType?: string
-                objectId?: string
-              }>
-            }
-          ).objectChanges ?? [],
-        )
+        // Sponsored-gas path returns only `{ digest }` — objectChanges
+        // isn't included. Wait for the tx to be indexed, then re-fetch
+        // it to read the created Duel id.
+        const duelId = await resolveCreatedDuelId(client, res.digest)
         if (!duelId) {
-          throw new Error("create_duel succeeded but Duel id not in objectChanges")
+          throw new Error(
+            "create_duel landed but Duel id not yet indexed — try again",
+          )
         }
         send({ type: "room_subscribe", duelId })
         setPhase({ kind: "AWAIT_REVEAL", duelId })
@@ -230,8 +235,8 @@ export function ActiveDuel({
           message: e instanceof Error ? e.message : String(e),
         })
       }
-    })
-  }, [role, onMessage, account, client, sign, tier, send])
+    })()
+  }, [role, deckHash, account, client, sign, tier, send])
 
   // Challenger: wait for duel_assigned, then sign join_duel.
   useEffect(() => {
@@ -677,13 +682,3 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes
 }
 
-function extractDuelIdFromChanges(
-  changes: Array<{ type: string; objectType?: string; objectId?: string }>,
-): string | null {
-  for (const c of changes) {
-    if (c.type !== "created") continue
-    if (!c.objectType || !c.objectType.includes("::duel::Duel<")) continue
-    return c.objectId ?? null
-  }
-  return null
-}

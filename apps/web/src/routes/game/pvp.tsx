@@ -45,6 +45,7 @@ export default function GamePvp() {
   const [matched, setMatched] = useState<{
     role: "creator" | "challenger"
     opponent: string
+    deckHash: string
   } | null>(null)
 
   const tier: Tier =
@@ -61,7 +62,11 @@ export default function GamePvp() {
       if (msg.type === "queue_status") setQueueSize(msg.size)
       else if (msg.type === "queue_left") setQueueSize(null)
       else if (msg.type === "match_found")
-        setMatched({ role: msg.role, opponent: msg.opponent })
+        setMatched({
+          role: msg.role,
+          opponent: msg.opponent,
+          deckHash: msg.deckHash,
+        })
     })
   }, [onMessage])
 
@@ -96,6 +101,7 @@ export default function GamePvp() {
         role={matched.role}
         tier={tier}
         managerId={managerId}
+        deckHash={matched.deckHash}
         wsOpen={wsOpen}
         send={send}
         onMessage={onMessage}

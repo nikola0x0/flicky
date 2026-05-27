@@ -75,7 +75,7 @@ export default function GameLayout() {
     <>
       <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
         <div
-          className={`pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl font-pixel text-white sm:max-h-[900px] ${isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}`}
+          className={`pixel-frame relative flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl font-pixel text-white sm:max-h-[900px] ${isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}`}
         >
           <FrameHeader
             onSignInClick={() => setLoginOpen(true)}

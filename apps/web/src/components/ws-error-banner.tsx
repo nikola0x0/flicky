@@ -32,6 +32,11 @@ function describe(code: string, fallback: string): { title: string; body: string
         title: "trouble setting up the match",
         body: "we'll keep retrying — hang tight or cancel to step out of the queue.",
       }
+    case "oracles_unavailable":
+      return {
+        title: "oracles not ready",
+        body: "the price feed is short a card — try again in a couple of minutes.",
+      }
     case "no_address":
       return {
         title: "session not ready",
@@ -87,9 +92,9 @@ export function WsErrorBanner({
     <div
       role="status"
       aria-live="polite"
-      className="pointer-events-none fixed inset-x-0 top-3 z-50 flex justify-center px-6 sm:px-9"
+      className="pointer-events-none absolute inset-x-3 top-3 z-50 flex justify-center"
     >
-      <div className="pointer-events-auto flex w-full max-w-[416px] items-start gap-3 rounded-md border-2 border-black/55 bg-[#3a1717] px-3 py-2.5 font-pixel shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08),0_4px_0_rgba(0,0,0,0.45)]">
+      <div className="pointer-events-auto flex w-full items-start gap-3 rounded-md border-2 border-black/55 bg-[#3a1717] px-3 py-2.5 font-pixel shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08),0_4px_0_rgba(0,0,0,0.45)] animate-in slide-in-from-top-2 fade-in duration-200">
         <img
           src="/icons/warn.png"
           alt=""

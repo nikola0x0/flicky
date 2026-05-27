@@ -103,12 +103,19 @@ export function clientIp(req: Request, fallback: string | null): string {
 //
 // Tuned per-endpoint based on the cost of the underlying work:
 //   - deckmaster:generate hits RPC + writes disk → 1 req / 5 s, burst 3
-//   - sponsor             Enoki call (paid)       → 5 req / 60 s, burst 5
+//   - sponsor             Enoki call (paid)       → 2 req/s sustained,
+//                                                    burst 200
+//     A single match burns ~6 sponsor calls per player (create/join_duel
+//     + 5 swipes). In dev two windows share an IP, and in prod a NAT can
+//     put dozens of players behind one. The previous 5/60s burst tripped
+//     mid-match. Generous limits here are fine — the real cost gate is
+//     Enoki itself + the per-tx allowlist. Tighten once we key by
+//     address instead of IP.
 //   - practice_start      RPC                     → 1 req / 10 s, burst 2
 //   - queue_join          RPC (balance check)     → 1 req / 2 s,  burst 3
 
 registerLimit("deckmaster:generate", { capacity: 3, refillPerSec: 1 / 5 })
-registerLimit("sponsor", { capacity: 5, refillPerSec: 5 / 60 })
+registerLimit("sponsor", { capacity: 200, refillPerSec: 2 })
 registerLimit("ws:practice_start", { capacity: 2, refillPerSec: 1 / 10 })
 registerLimit("ws:queue_join", { capacity: 3, refillPerSec: 1 / 2 })
 //   - chat_send / chat_react        1 msg / 1.5 s, burst 4

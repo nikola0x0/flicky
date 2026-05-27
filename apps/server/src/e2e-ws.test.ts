@@ -241,6 +241,7 @@ describe("WS end-to-end", () => {
       startedAtMs: 0,
       cardOutcomes: [],
       swipes: [],
+      cards: [],
     })
 
     const creator = new WSClient(baseUrl)

@@ -2,7 +2,6 @@ import { useEffect, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
 import { useNavigate } from "react-router"
 
-
 type ModeInfo = {
   id: string
   title: string
@@ -21,7 +20,6 @@ const MODES: ModeInfo[] = [
     icon: "/icons/joystick.png",
     banner: "/banners/mode-practice.png",
     to: "/game/practice",
-    headerStyle: { backgroundColor: "#3a8a4a" },
     headerStyle: { backgroundColor: "#3a8a4a" },
   },
 ]

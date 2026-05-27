@@ -52,6 +52,76 @@ interface FallbackSigner {
 }
 
 /**
+ * Sentinel error thrown when the sponsor server is reachable but refuses
+ * to sponsor (typically 503 = ENOKI_PRIVATE_KEY missing). The wrapper
+ * `signAndExecuteWithSponsorOrFallback` treats this as the only error
+ * that's safe to fall back from — everything else propagates so the
+ * player doesn't end up paying gas from a wallet that's supposed to
+ * only ever hold dUSDC (see CLAUDE.md "Sponsored gas end-to-end").
+ */
+class SponsorUnconfiguredError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SponsorUnconfiguredError"
+  }
+}
+
+/**
+ * Network-level failure (fetch threw, e.g. DNS / connection refused).
+ * Also fallback-eligible in dev when the server isn't up.
+ */
+class SponsorUnreachableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SponsorUnreachableError"
+  }
+}
+
+/**
+ * POST to /sponsor with automatic retry on 429. Server's rate-limit
+ * response includes `retryMs` — we respect it (clamped to a sane range)
+ * and retry up to `MAX_RETRIES` times. Other non-2xx statuses surface
+ * to the caller unchanged.
+ */
+const MAX_RETRIES = 3
+const MIN_RETRY_MS = 250
+const MAX_RETRY_MS = 5_000
+
+async function postSponsorWithRetry(body: unknown): Promise<Response> {
+  let attempt = 0
+  while (true) {
+    let res: Response
+    try {
+      res = await fetch(`${SPONSOR_URL}/sponsor`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    } catch (e) {
+      throw new SponsorUnreachableError(
+        `sponsor unreachable: ${e instanceof Error ? e.message : String(e)}`,
+      )
+    }
+    if (res.status !== 429 || attempt >= MAX_RETRIES) return res
+    // Read retryMs hint from body without consuming the original Response,
+    // by cloning. Fallback to expontial backoff if missing/malformed.
+    let retryMs = MIN_RETRY_MS * 2 ** attempt
+    try {
+      const txt = await res.clone().text()
+      const parsed = JSON.parse(txt) as { retryMs?: number }
+      if (typeof parsed.retryMs === "number" && parsed.retryMs > 0) {
+        retryMs = parsed.retryMs
+      }
+    } catch {
+      /* keep backoff default */
+    }
+    retryMs = Math.min(MAX_RETRY_MS, Math.max(MIN_RETRY_MS, retryMs))
+    await new Promise((r) => setTimeout(r, retryMs))
+    attempt += 1
+  }
+}
+
+/**
  * Try the sponsor path. If the server isn't available or returns a
  * non-2xx, throws — callers can catch and fall back to wallet-pay.
  */
@@ -63,16 +133,16 @@ export async function executeSponsored(
   const sender = signer.toSuiAddress()
   const kindBytes = await tx.build({ client, onlyTransactionKind: true })
 
-  const createRes = await fetch(`${SPONSOR_URL}/sponsor`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      action: "create",
-      network: NETWORK,
-      transactionKindBytes: toBase64(kindBytes),
-      sender,
-    }),
+  const createRes = await postSponsorWithRetry({
+    action: "create",
+    network: NETWORK,
+    transactionKindBytes: toBase64(kindBytes),
+    sender,
   })
+  if (createRes.status === 503) {
+    const body = await createRes.text()
+    throw new SponsorUnconfiguredError(`sponsor disabled (503): ${body}`)
+  }
   if (!createRes.ok) {
     const body = await createRes.text()
     throw new Error(`sponsor create failed: ${createRes.status} ${body}`)
@@ -83,10 +153,10 @@ export async function executeSponsored(
   // returns { signature } only — wallet does NOT submit.
   const { signature } = await signer.signTransaction(fromBase64(bytes))
 
-  const execRes = await fetch(`${SPONSOR_URL}/sponsor`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action: "execute", digest, signature }),
+  const execRes = await postSponsorWithRetry({
+    action: "execute",
+    digest,
+    signature,
   })
   if (!execRes.ok) {
     const body = await execRes.text()
@@ -96,10 +166,13 @@ export async function executeSponsored(
 }
 
 /**
- * Convenience: try the sponsor path; if it 503s (server unconfigured)
- * or the network call fails, fall back to wallet-paid signAndExecute.
- * Lets the rest of the app use one entrypoint regardless of whether
- * Enoki is wired.
+ * Try the sponsor path. Only fall back to wallet-paid gas when the
+ * sponsor server is unconfigured (503) or unreachable (fetch threw) —
+ * those are dev-only states. For everything else (4xx, 5xx that isn't
+ * 503, sponsor returned bad bytes, wallet refused to sign sponsored
+ * bytes, etc.) propagate the original error rather than masking it as
+ * "No valid gas coins found", which is the misleading wallet-fallback
+ * error players see when their dUSDC-only zkLogin wallet has no SUI.
  */
 export async function signAndExecuteWithSponsorOrFallback(
   client: SuiJsonRpcClient,
@@ -110,8 +183,22 @@ export async function signAndExecuteWithSponsorOrFallback(
   try {
     const res = await executeSponsored(client, tx, signer)
     return { ...res, sponsored: true }
-  } catch {
-    const res = await fallback.signAndExecuteTransaction({ transaction: tx })
-    return { digest: res.digest, sponsored: false }
+  } catch (e) {
+    if (
+      e instanceof SponsorUnconfiguredError ||
+      e instanceof SponsorUnreachableError
+    ) {
+      console.warn(
+        "[sponsor] falling back to wallet-paid gas:",
+        e instanceof Error ? e.message : String(e),
+      )
+      const res = await fallback.signAndExecuteTransaction({ transaction: tx })
+      return { digest: res.digest, sponsored: false }
+    }
+    console.error(
+      "[sponsor] aborting (not falling back to wallet-paid gas):",
+      e instanceof Error ? e.message : String(e),
+    )
+    throw e
   }
 }
