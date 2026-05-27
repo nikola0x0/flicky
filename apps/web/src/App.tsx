@@ -52,7 +52,7 @@ import {
   buildJoinDuelDusdcTx,
   buildJoinDuelTx,
   buildRevealDeckTx,
-  buildSettleAndFinalizeTx,
+  buildFinalizeTx,
   buildSwipeTx,
   computeDeckHash,
   fetchDuel,
@@ -1565,13 +1565,9 @@ function SwipingView({
           if (!oracle) {
             throw new Error("Oracle not loaded")
           }
-          // TODO: query `pricing::p_up(oracle, strike)` via devInspect
-          // and set premium = quote × quantity. For now we use a
-          // placeholder of `quantity / 2n` (≈ 50/50 implied mark) — the
-          // contract just enforces `premium > 0` and stores the value
-          // for PnL display; the actual mint cost is computed by
-          // DeepBook independently inside `predict::mint`.
-          const premium = mintQuantity / 2n > 0n ? mintQuantity / 2n : 1n
+          // Premium + p_swiped are snapshotted on-chain by the contract
+          // (via predict::get_trade_amounts inside record_swipe) — the FE
+          // only supplies the mint quantity.
           tx = buildStakedSwipeTx({
             duelId,
             oracleSviId: card.oracleId,
@@ -1580,15 +1576,13 @@ function SwipingView({
             strike: card.strike,
             isUp,
             quantity: mintQuantity,
-            premium,
             cardIdx: myNextIdx,
           })
         } else {
           // Legacy non-staked path (free/SUI duels) — PRD has
           // replaced this with Practice Mode (server-only). The
-          // builder needs a manager + quantity + premium for the
-          // new contract; this branch is effectively dead code in
-          // the staked-only world.
+          // builder needs a manager + quantity for the new contract;
+          // this branch is effectively dead code in the staked-only world.
           tx = buildSwipeTx({
             duelId,
             managerId: managerQuery.data?.id ?? "0x0",
@@ -1596,7 +1590,6 @@ function SwipingView({
             cardIdx: myNextIdx,
             isUp,
             quantity: 1n,
-            premium: 1n,
             stakeCoinType: duel.stakeCoinType,
           })
         }
@@ -1961,6 +1954,7 @@ function LockupView({
 
 function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
   const { mutateAsync: signAndExec, isPending } = useFlickySign()
+  const client = useSuiClient()
   const queryClient = useQueryClient()
   const [err, setErr] = useState<string | null>(null)
   const [digest, setDigest] = useState<string | null>(null)
@@ -1968,7 +1962,21 @@ function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
   async function settle() {
     setErr(null)
     try {
-      const tx = buildSettleAndFinalizeTx(duelId, duel.cards, duel.stakeCoinType)
+      // One-shot finalize. finalize_multi reads both players' Predict
+      // managers for anti-replay, so resolve them first.
+      const [p0Manager, p1Manager] = await Promise.all([
+        findPredictManager(client, duel.creator),
+        findPredictManager(client, duel.challenger),
+      ])
+      if (!p0Manager || !p1Manager)
+        throw new Error("could not resolve both players' PredictManagers")
+      const tx = buildFinalizeTx(
+        duelId,
+        duel.cards,
+        p0Manager.id,
+        p1Manager.id,
+        duel.stakeCoinType,
+      )
       const res = await signAndExec({ transaction: tx })
       setDigest(res.digest)
       queryClient.invalidateQueries({ queryKey: ["duel", duelId] })

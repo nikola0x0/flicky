@@ -179,6 +179,28 @@ export function settlementPrice(options: SettlementPriceOptions) {
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }
+export interface SpotPriceArguments {
+    market: RawTransactionArgument<string>;
+}
+export interface SpotPriceOptions {
+    package?: string;
+    arguments: SpotPriceArguments | [
+        market: RawTransactionArgument<string>
+    ];
+}
+export function spotPrice(options: SpotPriceOptions) {
+    const packageAddress = options.package ?? 'deepbook_predict';
+    const argumentsTypes = [
+        null
+    ] satisfies (string | null)[];
+    const parameterNames = ["market"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'oracle',
+        function: 'spot_price',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+    });
+}
 export interface ComputePriceArguments {
     market: RawTransactionArgument<string>;
     Strike: RawTransactionArgument<number | bigint>;
@@ -201,6 +223,109 @@ export function computePrice(options: ComputePriceOptions) {
         package: packageAddress,
         module: 'oracle',
         function: 'compute_price',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+    });
+}
+export interface NewMarketOracleArguments {
+    expiry: RawTransactionArgument<number | bigint>;
+}
+export interface NewMarketOracleOptions {
+    package?: string;
+    arguments: NewMarketOracleArguments | [
+        expiry: RawTransactionArgument<number | bigint>
+    ];
+}
+/**
+ * Create a new OracleSVI on testnet. The stub deliberately omits the real Predict
+ * cap-bearing constructor; this entry exists so the Flicky playground and dev
+ * scripts can mint usable oracles without owning a real admin cap.
+ */
+export function newMarketOracle(options: NewMarketOracleOptions) {
+    const packageAddress = options.package ?? 'deepbook_predict';
+    const argumentsTypes = [
+        'u64'
+    ] satisfies (string | null)[];
+    const parameterNames = ["expiry"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'oracle',
+        function: 'new_market_oracle',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+    });
+}
+export interface ShareArguments {
+    oracle: RawTransactionArgument<string>;
+}
+export interface ShareOptions {
+    package?: string;
+    arguments: ShareArguments | [
+        oracle: RawTransactionArgument<string>
+    ];
+}
+export function share(options: ShareOptions) {
+    const packageAddress = options.package ?? 'deepbook_predict';
+    const argumentsTypes = [
+        null
+    ] satisfies (string | null)[];
+    const parameterNames = ["oracle"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'oracle',
+        function: 'share',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+    });
+}
+export interface SetComputePriceArguments {
+    market: RawTransactionArgument<string>;
+    price: RawTransactionArgument<number | bigint>;
+}
+export interface SetComputePriceOptions {
+    package?: string;
+    arguments: SetComputePriceArguments | [
+        market: RawTransactionArgument<string>,
+        price: RawTransactionArgument<number | bigint>
+    ];
+}
+/**
+ * Set the price returned by `compute_price`. Stored in a dynamic field so we don't
+ * need to mutate the (private) `prices` struct directly.
+ */
+export function setComputePrice(options: SetComputePriceOptions) {
+    const packageAddress = options.package ?? 'deepbook_predict';
+    const argumentsTypes = [
+        null,
+        'u64'
+    ] satisfies (string | null)[];
+    const parameterNames = ["market", "price"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'oracle',
+        function: 'set_compute_price',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+    });
+}
+export interface SettleWithArguments {
+    market: RawTransactionArgument<string>;
+    price: RawTransactionArgument<number | bigint>;
+}
+export interface SettleWithOptions {
+    package?: string;
+    arguments: SettleWithArguments | [
+        market: RawTransactionArgument<string>,
+        price: RawTransactionArgument<number | bigint>
+    ];
+}
+export function settleWith(options: SettleWithOptions) {
+    const packageAddress = options.package ?? 'deepbook_predict';
+    const argumentsTypes = [
+        null,
+        'u64'
+    ] satisfies (string | null)[];
+    const parameterNames = ["market", "price"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'oracle',
+        function: 'settle_with',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }

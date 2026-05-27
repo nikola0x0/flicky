@@ -29,7 +29,14 @@ import { bcs } from '@mysten/sui/bcs'
 import { normalizeSuiObjectId } from '@mysten/sui/utils'
 import { CONFIG } from '../../config'
 import { client } from '../../lib/client'
-import { txCreateDuel, txJoinDuel, txRecordSwipe, txRevealDeck } from '../../lib/duel-txb'
+import {
+  txCreateDuel,
+  txFinalizeDuelMulti,
+  txFinalizeDuelTestOneOracle,
+  txJoinDuel,
+  txRecordSwipe,
+  txRevealDeck,
+} from '../../lib/duel-txb'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -155,8 +162,6 @@ const STAKE_BY_TIER = {
 } as const
 /** Per-card mint quantity. */
 const MINT_QUANTITY = 20_000n
-/** Placeholder premium (50% of quantity). Production should use `pricing::p_up`. */
-const MINT_PREMIUM = 10_000n
 /** Required PredictManager balance to enter the staked queue (PRD). */
 const MIN_BALANCE = 5_000_000n
 
@@ -177,6 +182,18 @@ function fmtPnl(pnl: string | null): string {
   if (pnl === null) return '—'
   const n = Number(pnl) / 1_000_000
   return (n >= 0 ? '+' : '') + n.toFixed(4) + ' dUSDC'
+}
+
+/** "4m 12s" / "1h 3m 8s" / "expired" — for the oracle expiry countdown. */
+function formatCountdown(ms: number): string {
+  if (ms <= 0) return 'expired'
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}h ${m}m ${s}s`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
 }
 
 /**
@@ -287,17 +304,22 @@ function parseMoveAbort(msg: string): {
     7: { label: 'ECardIndexOOB', hint: 'Card index out of range (must be 0-4).' },
     8: { label: 'EOracleMismatch', hint: 'Oracle id doesn\'t match the card\'s recorded oracle.' },
     9: { label: 'EOutOfTurn', hint: 'You\'re swiping the wrong card next — chain enforces order 0→4.' },
-    10: { label: 'ECardAlreadySettled', hint: 'This card already had its oracle resolved.' },
-    11: { label: 'EAllCardsNotSettled', hint: 'finalize requires all 5 cards settled first.' },
+    11: { label: 'EAllCardsNotSettled', hint: 'Finalize precondition not met — both players must complete all 5 swipes (or the swipe window must expire for a forfeit/refund). For finalize_multi, all 5 oracles must also be settled.' },
     13: { label: 'EZeroStake', hint: 'Stake amount must be > 0.' },
-    14: { label: 'EOracleNotLive', hint: 'Oracle is not ACTIVE (settled or pending settlement). Pick a fresher deck.' },
+    14: { label: 'EOracleNotLive', hint: 'Oracle missing settlement_price. For production finalize, wait for the oracle to settle — or use the test finalize (spot-price fallback).' },
     15: { label: 'EInvalidDeckHash', hint: 'Deck hash must be exactly 32 bytes (sha2_256).' },
     16: { label: 'EDeckAlreadyRevealed', hint: 'Deck was already revealed.' },
     17: { label: 'EDeckHashMismatch', hint: 'Revealed deck doesn\'t hash to the committed value.' },
     18: { label: 'EDeckNotRevealed', hint: 'Reveal the deck before recording swipes.' },
     19: { label: 'ENotManagerOwner', hint: 'PredictManager owner ≠ signer. Use the wallet that created the manager.' },
-    20: { label: 'EZeroPositionQuantity', hint: 'Mint a Predict position first (atomic mint + record_swipe).' },
+    20: { label: 'EInsufficientPosition', hint: 'manager.position(key) < quantity — mint the Predict position in the SAME PTB as record_swipe (atomic mint + record_swipe).' },
     21: { label: 'ESwipeTimeout', hint: 'Swipe window (10 min from duel start) has expired.' },
+    24: { label: 'EZeroQuantity', hint: 'Swipe quantity must be > 0.' },
+    25: { label: 'EZeroPremium', hint: 'Derived premium was 0 — p_swiped is too extreme for this strike. Pick a fresher deck.' },
+    27: { label: 'EWrongTier', hint: 'Called a Staked entry on a Free duel (or vice versa).' },
+    28: { label: 'EInvalidProb', hint: 'p_swiped fell outside (0, 1e9) — degenerate oracle pricing. Regenerate the deck.' },
+    29: { label: 'ERefundDuelComplete', hint: 'Both players finished 5/5 — refund is blocked, finalize is the only path.' },
+    30: { label: 'ERevealNotTimedOut', hint: 'Reveal-timeout forfeit claimed before the 5-minute window elapsed.' },
   }
   const known = fn.startsWith('duel::') ? DUEL_CODES[code] : null
   return {
@@ -383,6 +405,8 @@ export default function E2EFlowPanel({ onOutput }: Props) {
   const [oracleTicks, setOracleTicks] = useState<Record<string, { spot: string; forward: string }>>({})
   const [error, setError] = useState<string | null>(null)
   const [busyStep, setBusyStep] = useState<StepId | null>(null)
+  // 1-second tick driving the per-card oracle expiry countdown.
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   // WebSocket
   const wsRef = useRef<WebSocket | null>(null)
@@ -520,6 +544,12 @@ export default function E2EFlowPanel({ onOutput }: Props) {
   useEffect(() => {
     setStatus('wallet', account ? 'done' : 'pending')
   }, [account, setStatus])
+
+  // Per-second clock for oracle countdowns.
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
 
   // ─── Session persistence ─────────────────────────────────────────────────
   //
@@ -1127,78 +1157,117 @@ export default function E2EFlowPanel({ onOutput }: Props) {
     [account, deck, tier, runStep, signAndExecute, setStatus, onOutput],
   )
 
-  // ─── Manual settle + finalize (fallback when backend keeper is disabled) ─
-  //
-  // `duel::settle_card(duel, oracle, card_idx)` is permissionless on chain
-  // — it just asserts the oracle has produced a settlement_price. Once
-  // all 5 cards are settled, `duel::finalize(duel)` pays out the side
-  // pot to the winner. We expose both as buttons so the demo doesn't
-  // need the backend keeper running.
-  const stepManualSettle = useCallback(
-    (cardIdx: number) =>
-      runStep('result', async () => {
-        if (!duelId || !deck) throw new Error('no duel/deck')
-        const card = deck.cards[cardIdx]
-        if (!card) throw new Error('cardIdx out of range')
-        const tx = new Transaction()
-        tx.moveCall({
-          target: `${CONFIG.flickyPackageId}::duel::settle_card`,
-          typeArguments: [DUSDC_COIN_TYPE],
-          arguments: [
-            tx.object(duelId),
-            tx.object(card.oracle_id),
-            tx.pure.u64(BigInt(cardIdx)),
-          ],
-        })
-        const res = await signAndExecute({ transaction: tx })
-        await client.waitForTransaction({ digest: res.digest })
-        onOutput({
-          type: 'success',
-          title: `duel::settle_card #${cardIdx}`,
-          data: 'oracle settlement recorded on duel',
-          txDigest: res.digest,
-        })
-        // Refresh room_state so settledCount + cardOutcomes flip
-        try {
-          const r = await fetch(
-            `${CONFIG.serverHttpUrl}/duels/${encodeURIComponent(duelId)}`,
-          )
-          if (r.ok) setRoomState((await r.json()) as RoomState)
-        } catch {
-          // WS will catch up on the next indexer tick
-        }
-      }),
-    [duelId, deck, runStep, signAndExecute, onOutput],
-  )
+  /** Resolve any address's PredictManager via PredictManagerCreated events. */
+  const findManagerForOwner = useCallback(async (owner: string) => {
+    let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
+    for (let page = 0; page < 5; page++) {
+      const evts = await client.queryEvents({
+        query: {
+          MoveEventType: `${DEEPBOOK_PKG}::predict_manager::PredictManagerCreated`,
+        },
+        limit: 50,
+        order: 'descending',
+        cursor,
+      })
+      for (const e of evts.data) {
+        const p = e.parsedJson as { manager_id: string; owner: string }
+        if (p.owner === owner) return normalizeSuiObjectId(p.manager_id)
+      }
+      if (!evts.hasNextPage) break
+      cursor = evts.nextCursor
+    }
+    return null
+  }, [])
 
-  const stepManualFinalize = useCallback(
+  const refreshFromBackend = useCallback(async () => {
+    if (!duelId) return
+    try {
+      const r = await fetch(
+        `${CONFIG.serverHttpUrl}/duels/${encodeURIComponent(duelId)}`,
+      )
+      if (r.ok) setRoomState((await r.json()) as RoomState)
+    } catch {
+      // WS push will catch up on the next indexer tick
+    }
+  }, [duelId])
+
+  // ─── Finalize (one-shot; keeper bypass) ──────────────────────────────
+  //
+  // The new contract has NO per-card settle step. `finalize*` reads the
+  // oracle(s), scores all 5 cards inline, compares aggregate PnL
+  // (val0 = p0_payout + p1_premium  vs  val1 = p1_payout + p0_premium),
+  // and pays the whole side-pot to the winner — all in one tx.
+  //
+  //   • Test mode (finalize_test_one_oracle): one oracle's price applied
+  //     to all 5 cards. Uses settlement_price if settled, else falls back
+  //     to the live spot_price — so you can finalize immediately without
+  //     waiting for any oracle to expire. No managers, no anti-replay.
+  //   • Production (finalize_multi): each card scored against its own
+  //     oracle's settlement_price; both managers passed for anti-replay.
+  //     Requires all 5 oracles settled.
+  const stepFinalizeTest = useCallback(
     () =>
       runStep('result', async () => {
-        if (!duelId) throw new Error('no duel')
+        if (!duelId || !deck) throw new Error('no duel/deck')
+        const oracleId = deck.cards[0]?.oracle_id
+        if (!oracleId) throw new Error('deck has no oracle')
         const tx = new Transaction()
-        tx.moveCall({
-          target: `${CONFIG.flickyPackageId}::duel::finalize`,
-          typeArguments: [DUSDC_COIN_TYPE],
-          arguments: [tx.object(duelId)],
-        })
+        txFinalizeDuelTestOneOracle(tx, duelId, oracleId, DUSDC_COIN_TYPE)
         const res = await signAndExecute({ transaction: tx })
         await client.waitForTransaction({ digest: res.digest })
         onOutput({
           type: 'success',
-          title: 'duel::finalize',
-          data: 'side-pot paid to winner',
+          title: 'duel::finalize_test_one_oracle',
+          data: 'scored 5 cards on spot/settlement price · side-pot paid to winner',
           txDigest: res.digest,
         })
-        try {
-          const r = await fetch(
-            `${CONFIG.serverHttpUrl}/duels/${encodeURIComponent(duelId)}`,
-          )
-          if (r.ok) setRoomState((await r.json()) as RoomState)
-        } catch {
-          // ignore
-        }
+        await refreshFromBackend()
       }),
-    [duelId, runStep, signAndExecute, onOutput],
+    [duelId, deck, runStep, signAndExecute, onOutput, refreshFromBackend],
+  )
+
+  const stepFinalizeMulti = useCallback(
+    () =>
+      runStep('result', async () => {
+        if (!duelId || !deck) throw new Error('no duel/deck')
+        if (!roomState?.creator || !isChallengerJoined(roomState))
+          throw new Error('need both players resolved for finalize_multi')
+        if (deck.cards.length !== 5) throw new Error('deck must have 5 cards')
+        const [p0Mgr, p1Mgr] = await Promise.all([
+          findManagerForOwner(roomState.creator),
+          findManagerForOwner(roomState.challenger),
+        ])
+        if (!p0Mgr || !p1Mgr)
+          throw new Error('could not resolve both players\' PredictManagers')
+        const oracleIds = deck.cards.map((c) => c.oracle_id) as [
+          string,
+          string,
+          string,
+          string,
+          string,
+        ]
+        const tx = new Transaction()
+        txFinalizeDuelMulti(tx, duelId, p0Mgr, p1Mgr, oracleIds, DUSDC_COIN_TYPE)
+        const res = await signAndExecute({ transaction: tx })
+        await client.waitForTransaction({ digest: res.digest })
+        onOutput({
+          type: 'success',
+          title: 'duel::finalize_multi',
+          data: 'scored 5 cards on per-oracle settlement · side-pot paid to winner',
+          txDigest: res.digest,
+        })
+        await refreshFromBackend()
+      }),
+    [
+      duelId,
+      deck,
+      roomState,
+      findManagerForOwner,
+      runStep,
+      signAndExecute,
+      onOutput,
+      refreshFromBackend,
+    ],
   )
 
   const stepSwipe = useCallback(
@@ -1243,16 +1312,19 @@ export default function E2EFlowPanel({ onOutput }: Props) {
             tx.object(CONFIG.CLOCK_ID),
           ],
         })
-        // Record the swipe atomically.
+        // Record the swipe atomically. The contract snapshots premium +
+        // p_swiped on-chain via get_trade_amounts, so we pass only the
+        // Predict shared object + oracle + quantity — no client-side premium.
+        //   record_swipe<T>(duel, manager, predict, oracle, card_idx, is_up, quantity, clock, ctx)
         txRecordSwipe(
           tx,
           duelId,
           managerId,
+          DEEPBOOK_OBJ,
           card.oracle_id,
           cardIdx,
           isUp,
           MINT_QUANTITY,
-          MINT_PREMIUM,
           DUSDC_COIN_TYPE,
         )
         const res = await signAndExecute({ transaction: tx })
@@ -1750,6 +1822,7 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                       idx={i}
                       card={c}
                       tick={oracleTicks[c.oracle_id]}
+                      nowMs={nowMs}
                     />
                   ))}
                 </div>
@@ -1955,19 +2028,20 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                 {nextSwipeIdx < 5 ? `#${nextSwipeIdx}` : '— done'}
               </span>
             </div>
-            <div className="grid grid-cols-5 gap-1.5">
+            <div className="space-y-2">
               {deck.cards.map((c, i) => {
-                const swipe = swipeResults[i]
+                const swipe = swipeResults.find((s) => s.cardIdx === i)
                 const outcome = roomState.cardOutcomes.find((o) => o.cardIdx === i)
                 const tick = oracleTicks[c.oracle_id]
                 return (
-                  <SwipeTile
+                  <SwipeRow
                     key={i}
                     idx={i}
                     card={c}
                     swipe={swipe}
                     outcome={outcome}
                     tick={tick}
+                    nowMs={nowMs}
                     isCurrent={i === nextSwipeIdx}
                     busy={busyStep === 'swipe'}
                     onUp={() => stepSwipe(i, true)}
@@ -1993,25 +2067,27 @@ export default function E2EFlowPanel({ onOutput }: Props) {
           roomState
             ? roomState.status === 'COMPLETE'
               ? 'duel complete'
-              : `${roomState.settledCount} / ${roomState.cardCount} cards settled`
+              : 'live — not finalized'
             : 'pending'
         }
-        desc="Keeper settles each card as its oracle resolves, then bundles redeem×N + finalize."
+        desc="One-shot finalize: the contract reads the oracle(s), scores all 5 cards, compares aggregate PnL, and pays the winner — in a single tx. Live PnL below is mark-to-market until then."
       >
         {roomState ? (
           <div className="space-y-2 text-xs">
             {roomState.status !== 'COMPLETE' && (
               <div className="flex items-center justify-between gap-2">
                 <div className="text-gray-400">
-                  Cards settled:{' '}
+                  Both-sides swiped:{' '}
                   <span className="text-gray-200">
-                    {roomState.settledCount} / {roomState.cardCount}
+                    {
+                      roomState.swipes.filter((s) => s.p0Swipe && s.p1Swipe)
+                        .length
+                    }{' '}
+                    / {roomState.cardCount}
                   </span>
-                  {roomState.settledCount < roomState.cardCount && (
-                    <span className="ml-2 animate-pulse text-blue-400">
-                      ⏳ keeper polling oracles…
-                    </span>
-                  )}
+                  <span className="ml-2 text-gray-500">
+                    · finalize ready when 5/5
+                  </span>
                 </div>
                 <button
                   onClick={refreshDuelState}
@@ -2191,32 +2267,69 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                     oppLivePnl={oppLivePnl}
                     strike={card?.strike}
                     forward={tick?.forward}
-                    onSettle={() => stepManualSettle(cardIdx)}
-                    settling={busyStep === 'result'}
+                    expiry={card?.expiry}
+                    nowMs={nowMs}
                   />
                 )
               })}
             </div>
 
-            {/* Manual settle / finalize controls (keeper bypass). */}
-            {roomState.status !== 'COMPLETE' && (
-              <div className="space-y-1 rounded border border-gray-800 bg-gray-950 p-2 text-[10px] text-gray-400">
-                <div>
-                  <strong className="text-gray-300">Keeper not running?</strong> Once
-                  an oracle resolves, click <em>Settle</em> on its card. After all
-                  5 cards are settled, finalize to pay out the pot.
+            {/* Finalize controls (keeper bypass). One-shot: scores all 5
+                cards + pays the side-pot in a single tx. No per-card settle. */}
+            {roomState.status !== 'COMPLETE' && (() => {
+              const bothDone =
+                roomState.cardCount > 0 &&
+                roomState.swipes.filter((s) => s.p0Swipe && s.p1Swipe)
+                  .length === roomState.cardCount
+              return (
+                <div className="space-y-2 rounded border border-gray-800 bg-gray-950 p-2 text-[10px] text-gray-400">
+                  <div>
+                    <strong className="text-gray-300">Keeper not running?</strong>{' '}
+                    The new contract finalizes in one shot — it reads the
+                    oracle(s), scores all 5 cards, and pays the winner. No
+                    per-card settle.
+                  </div>
+                  {!bothDone && (
+                    <div className="text-yellow-400/80">
+                      ⏳ Waiting for both players to finish all 5 swipes
+                      (currently{' '}
+                      {
+                        roomState.swipes.filter((s) => s.p0Swipe && s.p1Swipe)
+                          .length
+                      }
+                      /{roomState.cardCount} cards have both sides).
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={stepFinalizeTest}
+                      disabled={busyStep === 'result' || !deck}
+                      className="rounded bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-600 disabled:opacity-40"
+                      title="finalize_test_one_oracle — uses one oracle's settlement_price, or its live spot_price as fallback, applied to all 5 cards. Testnet shortcut: no need to wait for oracles to expire."
+                    >
+                      {busyStep === 'result'
+                        ? 'Finalizing…'
+                        : '⚗️ Finalize (test · spot price)'}
+                    </button>
+                    <button
+                      onClick={stepFinalizeMulti}
+                      disabled={busyStep === 'result' || !deck}
+                      className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-40"
+                      title="finalize_multi — production path. Scores each card against its own oracle's settlement_price; requires all 5 oracles settled + resolves both players' PredictManagers for anti-replay."
+                    >
+                      {busyStep === 'result'
+                        ? 'Finalizing…'
+                        : '🏁 Finalize (production · 5 oracles)'}
+                    </button>
+                  </div>
+                  <div className="text-[9px] text-gray-500">
+                    Production requires all 5 oracles to have settled. If they
+                    haven't expired yet, use the test button — it scores on the
+                    current spot price so the demo never blocks.
+                  </div>
                 </div>
-                {roomState.settledCount === roomState.cardCount && (
-                  <button
-                    onClick={stepManualFinalize}
-                    disabled={busyStep === 'result'}
-                    className="mt-1 rounded bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-40"
-                  >
-                    {busyStep === 'result' ? 'Finalizing…' : '🏁 Finalize duel'}
-                  </button>
-                )}
-              </div>
-            )}
+              )
+            })()}
 
             {roomState.status === 'COMPLETE' && (
               <ResultBanner roomState={roomState} myRole={myRole} />
@@ -2344,10 +2457,12 @@ function CardTile({
   idx,
   card,
   tick,
+  nowMs,
 }: {
   idx: number
   card: DeckCard
   tick?: { spot: string; forward: string }
+  nowMs: number
 }) {
   const upMark = tick ? (BigInt(tick.spot) > BigInt(card.strike) ? 'UP' : 'DOWN') : '—'
   const upColor =
@@ -2356,6 +2471,7 @@ function CardTile({
       : upMark === 'DOWN'
         ? 'text-red-400'
         : 'text-gray-500'
+  const remainingMs = card.expiry ? Number(card.expiry) - nowMs : 0
   return (
     <div className="rounded border border-gray-700 bg-gray-950 p-2 text-center text-[10px]">
       <div className="text-gray-500">card {idx}</div>
@@ -2363,21 +2479,37 @@ function CardTile({
         ${(Number(card.strike) / 1e9).toFixed(0)}
       </div>
       <div className={`mt-0.5 text-[9px] ${upColor}`}>live {upMark}</div>
+      {card.expiry && (
+        <div
+          className={`text-[8px] ${remainingMs <= 0 ? 'text-red-400' : remainingMs < 60_000 ? 'text-yellow-400' : 'text-gray-600'}`}
+          title="oracle expiry"
+        >
+          ⏱ {formatCountdown(remainingMs)}
+        </div>
+      )}
     </div>
   )
 }
 
 /**
- * Card tile used during the swipe phase. Adds: status pill (Active/Pending/Settled),
- * settle price when known, the player's chosen direction (if swiped),
- * inline UP/DOWN buttons for the current card.
+ * Detailed per-card row used during the swipe phase — mirrors the
+ * "Deck Cards & Oracle Status" detail in DuelPanel: index badge, strike,
+ * a 3-state oracle status badge (Active / Awaiting settle / Settled) with
+ * the live spot or settlement price, the full oracle id, the live
+ * UP/DOWN leaning, and an "Expires in" countdown + absolute timestamp —
+ * plus the inline swipe controls / chosen-direction badge.
+ *
+ * Status is derived without an extra oracle read: `Settled` once the
+ * indexer has a cardOutcome, `Awaiting settle` once expiry passes with no
+ * outcome yet, else `Active`.
  */
-function SwipeTile({
+function SwipeRow({
   idx,
   card,
   swipe,
   outcome,
   tick,
+  nowMs,
   isCurrent,
   busy,
   onUp,
@@ -2388,80 +2520,139 @@ function SwipeTile({
   swipe: SwipeResult | undefined
   outcome?: { settlementPrice: string; upWon: boolean }
   tick?: { spot: string; forward: string }
+  nowMs: number
   isCurrent: boolean
   busy: boolean
   onUp: () => void
   onDown: () => void
 }) {
   const settled = !!outcome
-  const upMark = tick
-    ? BigInt(tick.spot) > BigInt(card.strike)
-      ? 'UP'
-      : 'DOWN'
+  const remainingMs = card.expiry ? Number(card.expiry) - nowMs : 0
+  const expired = card.expiry ? remainingMs <= 0 : false
+  const strikeUsd = (Number(card.strike) / 1e9).toFixed(2)
+  const spotUsd = tick && tick.spot !== '0' ? (Number(tick.spot) / 1e9).toFixed(2) : null
+  const fwdUsd =
+    tick && tick.forward !== '0' ? (Number(tick.forward) / 1e9).toFixed(2) : spotUsd
+  // Live leaning: forward (fallback spot) vs strike.
+  const refRaw = tick
+    ? BigInt(tick.forward !== '0' ? tick.forward : tick.spot)
+    : null
+  const leaningUp = refRaw !== null ? refRaw > BigInt(card.strike) : null
+
+  const statusBadge = settled ? (
+    <span className="rounded border border-green-900 bg-green-950 px-1.5 py-0.5 text-[9px] font-mono text-green-400">
+      Settled (${(Number(outcome.settlementPrice) / 1e9).toFixed(2)}) ·{' '}
+      {outcome.upWon ? 'UP won' : 'DOWN won'}
+    </span>
+  ) : expired ? (
+    <span className="animate-pulse rounded border border-yellow-900 bg-yellow-950 px-1.5 py-0.5 text-[9px] font-mono text-yellow-400">
+      Awaiting settle{spotUsd ? ` (Spot: $${spotUsd})` : ''}
+    </span>
+  ) : (
+    <span className="rounded border border-blue-900 bg-blue-950 px-1.5 py-0.5 text-[9px] font-mono text-blue-400">
+      Active{spotUsd ? ` (Spot: $${spotUsd})` : ''}
+    </span>
+  )
+
+  const expiryTime = card.expiry
+    ? new Date(Number(card.expiry)).toLocaleString()
     : '—'
+  const countdownColor =
+    remainingMs <= 0
+      ? 'text-red-400 font-bold'
+      : remainingMs < 60_000
+        ? 'text-yellow-400 font-bold'
+        : 'text-gray-200'
+
   const border = settled
-    ? 'border-purple-700 bg-purple-950/30'
+    ? 'border-purple-800 bg-purple-950/20'
     : swipe
-      ? 'border-emerald-700 bg-emerald-950/30'
+      ? 'border-emerald-800 bg-emerald-950/20'
       : isCurrent
-        ? 'border-blue-600 bg-blue-950/30'
-        : 'border-gray-800 bg-gray-950'
+        ? 'border-blue-600 bg-blue-950/20'
+        : 'border-gray-800 bg-gray-950/40'
+
   return (
-    <div className={`rounded border ${border} p-2 text-center text-[10px]`}>
-      <div className="flex items-center justify-between">
-        <span className="text-gray-500">#{idx}</span>
-        {settled ? (
-          <span className="rounded bg-purple-800 px-1 py-px text-[8px] font-semibold text-purple-100">
-            SET
+    <div
+      className={`flex flex-col gap-2 rounded border ${border} p-2.5 sm:flex-row sm:items-center sm:justify-between`}
+    >
+      {/* Identity + status */}
+      <div className="flex items-start gap-3">
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-800 text-[10px] font-bold text-gray-300">
+          {idx}
+        </span>
+        <div className="space-y-0.5 text-left">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-gray-200">
+              Card {idx} · Strike ${strikeUsd}
+            </span>
+            {statusBadge}
+          </div>
+          <span
+            className="block max-w-[260px] truncate text-[10px] font-mono text-gray-500"
+            title={card.oracle_id}
+          >
+            Oracle: {card.oracle_id}
           </span>
+          {!settled && fwdUsd && leaningUp !== null && (
+            <span className="text-[10px]">
+              <span className="text-gray-500">live ${fwdUsd} → </span>
+              <span className={leaningUp ? 'text-emerald-400' : 'text-red-400'}>
+                {leaningUp ? '⬆ UP leading' : '⬇ DOWN leading'}
+              </span>
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Expiry countdown */}
+      <div className="text-left font-mono text-[10px] sm:text-right">
+        <span className="block text-[9px] uppercase tracking-wider text-gray-500">
+          Expires in
+        </span>
+        <span className={countdownColor}>{formatCountdown(remainingMs)}</span>
+        <span className="block text-[9px] text-gray-600" title={expiryTime}>
+          @ {expiryTime}
+        </span>
+      </div>
+
+      {/* Swipe action / chosen direction */}
+      <div className="shrink-0 sm:w-32">
+        {swipe ? (
+          <div
+            className={`rounded px-2 py-1.5 text-center text-xs font-semibold ${
+              swipe.isUp
+                ? 'bg-emerald-900/40 text-emerald-300'
+                : 'bg-red-900/40 text-red-300'
+            }`}
+          >
+            {swipe.isUp ? '⬆ UP' : '⬇ DOWN'} swiped
+          </div>
+        ) : isCurrent ? (
+          <div className="flex gap-1">
+            <button
+              onClick={onUp}
+              disabled={busy}
+              className="flex-1 rounded bg-emerald-700 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-40"
+              title="Predict UP"
+            >
+              ⬆ UP
+            </button>
+            <button
+              onClick={onDown}
+              disabled={busy}
+              className="flex-1 rounded bg-red-700 py-1.5 text-xs font-semibold text-white hover:bg-red-600 disabled:opacity-40"
+              title="Predict DOWN"
+            >
+              ⬇ DOWN
+            </button>
+          </div>
         ) : (
-          <span className="text-[8px] text-gray-500">live</span>
+          <div className="rounded bg-gray-900 px-2 py-1.5 text-center text-[10px] text-gray-600">
+            🔒 locked (swipe in order)
+          </div>
         )}
       </div>
-      <div className="mt-1 font-semibold text-gray-200">
-        ${(Number(card.strike) / 1e9).toFixed(0)}
-      </div>
-      {settled ? (
-        <div className="mt-0.5 text-[9px] text-purple-300">
-          @ ${(Number(outcome.settlementPrice) / 1e9).toFixed(0)}
-          <br />
-          <span className={outcome.upWon ? 'text-emerald-400' : 'text-red-400'}>
-            {outcome.upWon ? 'UP won' : 'DOWN won'}
-          </span>
-        </div>
-      ) : (
-        <div className="mt-0.5 text-[9px] text-gray-500">spot {upMark}</div>
-      )}
-      {swipe ? (
-        <div
-          className={`mt-1 text-[11px] font-semibold ${
-            swipe.isUp ? 'text-emerald-300' : 'text-red-300'
-          }`}
-        >
-          {swipe.isUp ? '⬆ UP' : '⬇ DOWN'}
-        </div>
-      ) : isCurrent ? (
-        <div className="mt-1 flex gap-0.5">
-          <button
-            onClick={onUp}
-            disabled={busy}
-            className="flex-1 rounded bg-emerald-700 py-1 text-white hover:bg-emerald-600 disabled:opacity-40"
-            title="Predict UP"
-          >
-            ⬆
-          </button>
-          <button
-            onClick={onDown}
-            disabled={busy}
-            className="flex-1 rounded bg-red-700 py-1 text-white hover:bg-red-600 disabled:opacity-40"
-            title="Predict DOWN"
-          >
-            ⬇
-          </button>
-        </div>
-      ) : (
-        <div className="mt-1 text-gray-600">—</div>
-      )}
     </div>
   )
 }
@@ -2531,8 +2722,8 @@ function CardRow({
   oppLivePnl,
   strike,
   forward,
-  onSettle,
-  settling,
+  expiry,
+  nowMs,
 }: {
   cardIdx: number
   outcome: RoomState['cardOutcomes'][number] | null
@@ -2545,8 +2736,8 @@ function CardRow({
   oppLivePnl: bigint | null
   strike: string | undefined
   forward: string | undefined
-  onSettle: () => void
-  settling: boolean
+  expiry: string | undefined
+  nowMs: number
 }) {
   const settled = outcome !== null
   const arrowOf = (isUp: boolean | undefined) =>
@@ -2605,7 +2796,21 @@ function CardRow({
             {strike ? `$${(Number(strike) / 1e9).toFixed(0)}` : '—'}
           </span>
           <span className="col-span-2 text-gray-500">
-            {forward ? `→ $${(Number(forward) / 1e9).toFixed(0)}` : '…'}
+            <span className="block">
+              {forward ? `→ $${(Number(forward) / 1e9).toFixed(0)}` : '…'}
+            </span>
+            {expiry &&
+              (() => {
+                const rem = Number(expiry) - nowMs
+                return (
+                  <span
+                    className={`block text-[9px] ${rem <= 0 ? 'text-red-400' : rem < 60_000 ? 'text-yellow-400' : 'text-gray-600'}`}
+                    title="oracle expiry — production finalize needs all 5 settled"
+                  >
+                    {rem <= 0 ? '⏱ settling…' : `⏱ ${formatCountdown(rem)}`}
+                  </span>
+                )
+              })()}
           </span>
           <span className="col-span-2">
             {strike && forward ? (
@@ -2627,18 +2832,9 @@ function CardRow({
             <span className="text-gray-500">you {myArrow} </span>
             <span className={pnlClass(myLivePnl)}>{fmtBigPnl(myLivePnl)}</span>
           </span>
-          <span className="col-span-2 text-right">
+          <span className="col-span-3 text-right">
             <span className="text-gray-500">opp {oppArrow} </span>
             <span className={pnlClass(oppLivePnl)}>{fmtBigPnl(oppLivePnl)}</span>
-          </span>
-          <span className="col-span-1 text-right">
-            <button
-              onClick={onSettle}
-              disabled={settling}
-              className="rounded bg-indigo-700 px-2 py-1 text-[10px] font-semibold text-white hover:bg-indigo-600 disabled:opacity-40"
-            >
-              {settling ? '…' : 'Settle'}
-            </button>
           </span>
         </>
       )}

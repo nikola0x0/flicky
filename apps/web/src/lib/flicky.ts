@@ -15,6 +15,7 @@ type SuiClient = SuiJsonRpcClient
 
 import * as duelGen from "@/sui/gen/flicky/duel"
 import { CONFIG } from "./config"
+import { DEEPBOOK } from "./deepbook"
 
 const { packageId, deepbookPredictPackageId } = CONFIG
 
@@ -279,21 +280,22 @@ export function buildSwipeTx(args: {
   cardIdx: number
   isUp: boolean
   quantity: bigint
-  premium: bigint
   stakeCoinType?: string
 }): Transaction {
   const tx = new Transaction()
+  // Contract snapshots premium + p_swiped on-chain via get_trade_amounts,
+  // so we pass the Predict shared object + oracle + quantity (no premium).
   tx.add(
     duelGen.recordSwipe({
       package: packageId,
       arguments: [
         args.duelId,
         args.managerId,
+        DEEPBOOK.predictObject,
         args.oracleId,
         args.cardIdx,
         args.isUp,
         args.quantity,
-        args.premium,
       ],
       typeArguments: [args.stakeCoinType ?? CONFIG.stakeType],
     }),
@@ -302,31 +304,34 @@ export function buildSwipeTx(args: {
 }
 
 /**
- * Settle all 5 cards + finalize payout in a single PTB. Pass the deck's
- * cards array (not just one oracleId) so each `settle_card` reads the
- * settlement price from its own card's oracle — decks may span multiple
- * oracles even though today's Deckmaster picks one.
+ * Finalize a duel in a single PTB. The contract scores all 5 cards
+ * one-shot — there is no per-card settle step. `finalize_multi` validates
+ * each card against its own oracle's settlement_price and reads both
+ * players' PredictManagers for anti-replay, so all 5 oracles must be
+ * settled and both managers resolved before calling.
  */
-export function buildSettleAndFinalizeTx(
+export function buildFinalizeTx(
   duelId: string,
   cards: DuelCard[],
+  p0Manager: string,
+  p1Manager: string,
   stakeCoinType: string = CONFIG.stakeType,
 ): Transaction {
-  if (cards.length !== 5) throw new Error("expected 5 cards to settle")
+  if (cards.length !== 5) throw new Error("expected 5 cards to finalize")
   const tx = new Transaction()
-  for (let i = 0; i < 5; i++) {
-    tx.add(
-      duelGen.settleCard({
-        package: packageId,
-        arguments: [duelId, cards[i].oracleId, i],
-        typeArguments: [stakeCoinType],
-      }),
-    )
-  }
   tx.add(
-    duelGen.finalize({
+    duelGen.finalizeMulti({
       package: packageId,
-      arguments: [duelId],
+      arguments: [
+        duelId,
+        p0Manager,
+        p1Manager,
+        cards[0].oracleId,
+        cards[1].oracleId,
+        cards[2].oracleId,
+        cards[3].oracleId,
+        cards[4].oracleId,
+      ],
       typeArguments: [stakeCoinType],
     }),
   )
