@@ -69,6 +69,13 @@ interface DuelLite {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
+  /**
+   * Revealed deck. Empty array until `DeckRevealed` lands on chain;
+   * one entry per slot (5 once revealed). Each card carries the
+   * DeepBook `OracleSVI` id and the strike. Web UI uses these to
+   * render the swipe deck and look up per-card oracle ticks.
+   */
+  cards: Array<{ oracle_id: string; strike: string }>
   p0Payout: bigint
   p0Premium: bigint
   p1Payout: bigint
@@ -221,6 +228,10 @@ async function fetchDuel(
     challenger: f.challenger,
     cardsRevealed: cards.length > 0,
     cardCount: cards.length,
+    cards: cards.map((c) => ({
+      oracle_id: c.fields?.oracle_id ?? "",
+      strike: c.fields?.strike ?? "0",
+    })),
     settledCount: cardOutcomes.length,
     p0Payout: BigInt(f.p0_payout ?? "0"),
     p0Premium: BigInt(f.p0_premium ?? "0"),
@@ -450,6 +461,7 @@ export class DuelIndexer {
       status: d.status,
       cardsRevealed: d.cardsRevealed,
       cardCount: d.cardCount,
+      cards: d.cards,
       settledCount: d.settledCount,
       p0Payout: d.p0Payout.toString(),
       p0Premium: d.p0Premium.toString(),
