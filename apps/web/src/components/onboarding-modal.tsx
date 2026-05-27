@@ -133,9 +133,23 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
-      <div className="w-full max-w-md rounded-md border-2 border-black/55 bg-[#1b2548] p-5 text-white shadow-[0_6px_0_rgba(0,0,0,0.45)]">
-        <h2 className="mb-3 text-xl tracking-[0.2em] uppercase">
+    <div
+      onClick={onClose}
+      className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative w-full max-w-lg rounded-md border-2 border-black/55 bg-[#1b2548] p-5 text-white shadow-[0_6px_0_rgba(0,0,0,0.45)]"
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="close"
+          className="absolute right-3 top-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
+        >
+          ✕
+        </button>
+        <h2 className="mb-3 text-center text-xl tracking-[0.2em] uppercase">
           Prepare to duel
         </h2>
 
