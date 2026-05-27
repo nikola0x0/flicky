@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useState, type CSSProperties } from "react"
 import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import {
@@ -12,6 +12,17 @@ import {
   extractManagerIdFromChanges,
 } from "@/lib/deepbook"
 import { DepositModal } from "@/components/deposit-modal"
+import { PixelButton } from "@/components/pixel-button"
+
+const ORANGE_BRAND_STYLE = {
+  "--btn-bg": "#e08a2b",
+  "--btn-highlight": "#f4b966",
+} as CSSProperties
+
+const BLUE_BRAND_STYLE = {
+  "--btn-bg": "#4094fb",
+  "--btn-highlight": "#7eb6ff",
+} as CSSProperties
 
 /**
  * Per-swipe Predict position size (dUSDC micro-units). Fixed at 1 dUSDC
@@ -252,6 +263,43 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
   )
 }
 
+function WalletToManagerFlow() {
+  // Small visual: [dUSDC icon] → [manager icon].
+  return (
+    <div className="flex items-center justify-center gap-3 py-1">
+      <div className="flex flex-col items-center gap-1">
+        <img
+          src="/tokens/usdc-icon.png"
+          alt="dUSDC"
+          className="size-10 [image-rendering:pixelated]"
+        />
+        <span className="text-[9px] tracking-wider text-white/55 uppercase">
+          wallet
+        </span>
+      </div>
+      <span className="text-2xl text-white/55">&rarr;</span>
+      <div className="flex flex-col items-center gap-1">
+        <img
+          src="/tokens/manager-usdc.png"
+          alt="manager dUSDC"
+          className="size-10 [image-rendering:pixelated]"
+        />
+        <span className="text-[9px] tracking-wider text-white/55 uppercase">
+          manager
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function OneTimeNote() {
+  return (
+    <p className="rounded bg-white/5 px-3 py-2 text-[10px] tracking-wider text-white/55 uppercase">
+      one-time setup. withdraw from manager anytime via profile.
+    </p>
+  )
+}
+
 function NeedsWalletStep({
   needed,
   current,
@@ -266,21 +314,33 @@ function NeedsWalletStep({
   const short = needed - current
   return (
     <div className="space-y-3">
+      <div className="flex items-center justify-center gap-2 py-1">
+        <img
+          src="/tokens/usdc-icon.png"
+          alt="dUSDC"
+          className="size-10 [image-rendering:pixelated]"
+        />
+        <span className="text-[10px] tracking-wider text-white/55 uppercase">
+          wallet dUSDC
+        </span>
+      </div>
       <p className="text-sm text-white/80">
-        Your zkLogin wallet needs <strong>{fmtDusdc(needed)}</strong> total to
-        play this stake: {fmtDusdc(stake)} for the duel escrow plus enough to
-        top your Predict account to {fmtDusdc(MIN_MANAGER_BALANCE)}.
+        Your wallet needs <strong>{fmtDusdc(needed)}</strong> total to play this
+        stake: {fmtDusdc(stake)} for the duel escrow plus the manager top-up to
+        {" "}
+        {fmtDusdc(MIN_MANAGER_BALANCE)}.
       </p>
       <p className="text-xs text-white/55">
-        Have: {fmtDusdc(current)} &nbsp;·&nbsp; need {fmtDusdc(short)} more
+        Have: {fmtDusdc(current)} &nbsp;&middot;&nbsp; need {fmtDusdc(short)}{" "}
+        more
       </p>
-      <button
-        type="button"
+      <PixelButton
         onClick={onTopup}
-        className="w-full rounded-md bg-[#4094fb] px-4 py-2 text-lg font-bold text-white"
+        style={BLUE_BRAND_STYLE}
+        className="h-12 w-full"
       >
         Get dUSDC
-      </button>
+      </PixelButton>
     </div>
   )
 }
@@ -295,15 +355,16 @@ function NeedsManagerStep({
   const [busy, setBusy] = useState(false)
   return (
     <div className="space-y-3">
+      <WalletToManagerFlow />
       <p className="text-sm text-white/80">
         You need a Predict account to swipe. We&rsquo;ll create one, then
-        deposit {fmtDusdc(MIN_MANAGER_BALANCE)}.
+        deposit {fmtDusdc(MIN_MANAGER_BALANCE)} from your wallet.
       </p>
       <p className="text-xs text-white/55">
         Wallet balance: {fmtDusdc(walletDusdc)}
       </p>
-      <button
-        type="button"
+      <OneTimeNote />
+      <PixelButton
         disabled={busy}
         onClick={async () => {
           setBusy(true)
@@ -313,10 +374,11 @@ function NeedsManagerStep({
             setBusy(false)
           }
         }}
-        className="w-full rounded-md bg-[#e08a2b] px-4 py-2 text-lg font-bold text-white disabled:opacity-50"
+        style={ORANGE_BRAND_STYLE}
+        className="h-12 w-full"
       >
-        {busy ? "Creating…" : "Create Predict account"}
-      </button>
+        {busy ? "creating…" : "create predict account"}
+      </PixelButton>
     </div>
   )
 }
@@ -332,13 +394,14 @@ function NeedsDepositStep({
   const needed = MIN_MANAGER_BALANCE - current
   return (
     <div className="space-y-3">
+      <WalletToManagerFlow />
       <p className="text-sm text-white/80">
         Your Predict account has {fmtDusdc(current)}. Depositing{" "}
         {fmtDusdc(needed)} brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} for the
         5-card duel.
       </p>
-      <button
-        type="button"
+      <OneTimeNote />
+      <PixelButton
         disabled={busy}
         onClick={async () => {
           setBusy(true)
@@ -348,10 +411,11 @@ function NeedsDepositStep({
             setBusy(false)
           }
         }}
-        className="w-full rounded-md bg-[#e08a2b] px-4 py-2 text-lg font-bold text-white disabled:opacity-50"
+        style={ORANGE_BRAND_STYLE}
+        className="h-12 w-full"
       >
-        {busy ? "Depositing…" : `Deposit ${fmtDusdc(needed)}`}
-      </button>
+        {busy ? "depositing…" : `deposit ${fmtDusdc(needed)}`}
+      </PixelButton>
     </div>
   )
 }
