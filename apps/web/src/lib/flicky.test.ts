@@ -7,7 +7,7 @@ import {
   buildJoinDuelDusdcTx,
   buildJoinDuelTx,
   buildRevealDeckTx,
-  buildSettleAndFinalizeTx,
+  buildFinalizeTx,
   buildSwipeTx,
   computeDeckHash,
   oracleStrikes,
@@ -277,24 +277,36 @@ describe("PTB builders", () => {
     expect(targets.filter((t) => t.endsWith("::duel::join_duel"))).toHaveLength(1)
   })
 
+  const swipeArgs = {
+    duelId,
+    managerId: "0x2",
+    oracleId,
+    cardIdx: 0,
+    isUp: true,
+    quantity: 20_000n,
+  }
+  const finalizeCards: DeckCard[] = Array.from({ length: 5 }, () => ({
+    oracleId,
+    strike: 100_000_000_000n,
+  }))
+
   test("buildSwipeTx emits exactly one duel::record_swipe call", () => {
-    const tx = buildSwipeTx(duelId, oracleId, 0, true)
+    const tx = buildSwipeTx(swipeArgs)
     const targets = moveCallTargets(tx)
     expect(targets).toHaveLength(1)
     expect(targets[0]).toMatch(/::duel::record_swipe$/)
   })
 
-  test("buildSettleAndFinalizeTx emits 5 settle_card + 1 finalize", () => {
-    const tx = buildSettleAndFinalizeTx(duelId, oracleId)
+  test("buildFinalizeTx emits exactly one duel::finalize_multi call", () => {
+    const tx = buildFinalizeTx(duelId, finalizeCards, "0x10", "0x11")
     const targets = moveCallTargets(tx)
-    const settles = targets.filter((t) => t.endsWith("::duel::settle_card"))
-    const finalizes = targets.filter((t) => t.endsWith("::duel::finalize"))
-    expect(settles).toHaveLength(5)
+    const finalizes = targets.filter((t) => t.endsWith("::duel::finalize_multi"))
+    expect(targets).toHaveLength(1)
     expect(finalizes).toHaveLength(1)
   })
 
   test("builders bake the configured package address into the call target", () => {
-    const tx = buildSwipeTx(duelId, oracleId, 0, true)
+    const tx = buildSwipeTx(swipeArgs)
     const targets = moveCallTargets(tx)
     expect(targets[0].startsWith(CONFIG.packageId)).toBe(true)
   })

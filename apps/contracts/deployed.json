@@ -1,10 +1,10 @@
 {
   "network": "testnet",
-  "packageId": "0x978568176c585ba1bf37c0e02560df3a8da0d2a8689a3fee13a6a8ed70d6f9c6",
-  "originalPackageId": "0x978568176c585ba1bf37c0e02560df3a8da0d2a8689a3fee13a6a8ed70d6f9c6",
-  "publishedAt": "2026-05-24T07:08:21.508Z",
-  "publishTxDigest": "CSnvzaUmttSH5151vWh5vsQcibu56NDrSVuUrrTpvjye",
+  "packageId": "0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44",
+  "originalPackageId": "0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44",
+  "publishedAt": "2026-05-26T07:51:32.957Z",
+  "publishTxDigest": "DdML89kVkeb5acnYdcyU2BsoQ4RdZvnhWcPanKhrvY21",
   "publisherAddress": "0x9826b0895f3adc08f2f4c8907640adf2f29351ec7829281050ded1020e296d5a",
-  "upgradeCap": "0xdd479a892a17af7b3c6b16ed17033e79f61b1b3c265dc14848b036951dc50459",
+  "upgradeCap": "0x87a4a7b59a32a0e0f361c8b974817bb4d48ceaeff24a380646b3fe3b9c7898af",
   "notes": "Written by scripts/publish.ts. originalPackageId is preserved across upgrades."
 }

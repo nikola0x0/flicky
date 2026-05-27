@@ -203,3 +203,44 @@ export function redeemPermissionless(options: RedeemPermissionlessOptions) {
         typeArguments: options.typeArguments
     });
 }
+export interface GetTradeAmountsArguments {
+    Predict: RawTransactionArgument<string>;
+    oracle: RawTransactionArgument<string>;
+    key: TransactionArgument;
+    quantity: RawTransactionArgument<number | bigint>;
+}
+export interface GetTradeAmountsOptions {
+    package?: string;
+    arguments: GetTradeAmountsArguments | [
+        Predict: RawTransactionArgument<string>,
+        oracle: RawTransactionArgument<string>,
+        key: TransactionArgument,
+        quantity: RawTransactionArgument<number | bigint>
+    ];
+}
+/**
+ * On-chain pricing: returns (mint_cost, max_payout) for swiping `quantity` of the
+ * position keyed by `key`. mint_cost is the premium the player pays to mint the
+ * Predict position; max_payout is `quantity`.
+ *
+ * On testnet, dispatched to real `deepbook_predict::predict::get_trade_amounts`.
+ * Locally (tests), computes from `oracle.compute_price` × direction so that
+ * `set_test_price(oracle, p_up)` drives the stub's pricing deterministically.
+ */
+export function getTradeAmounts(options: GetTradeAmountsOptions) {
+    const packageAddress = options.package ?? 'deepbook_predict';
+    const argumentsTypes = [
+        null,
+        null,
+        null,
+        'u64',
+        '0x2::clock::Clock'
+    ] satisfies (string | null)[];
+    const parameterNames = ["Predict", "oracle", "key", "quantity"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'predict',
+        function: 'get_trade_amounts',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+    });
+}

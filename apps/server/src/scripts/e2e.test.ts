@@ -288,61 +288,73 @@ describeFn("e2e duel against testnet", () => {
   // and assert the tie-refund path.
 
   test(
-    "settle 5 cards + finalize → tie (no swipes ⇒ each player refunded)",
+    "legacy settle_card and finalize abort with EDeprecated, finalize_v2 aborts with EAllCardsNotSettled",
     async () => {
       if (!oracle || !duelId) return
-      const tx = new Transaction()
-      for (let i = 0; i < 5; i++) {
+
+      // 1. Verify legacy settle_card aborts with EDeprecated (26)
+      try {
+        const tx = new Transaction()
         tx.moveCall({
           target: `${packageId}::duel::settle_card`,
           typeArguments: ["0x2::sui::SUI"],
           arguments: [
             tx.object(duelId),
             tx.object(oracle.id),
-            tx.pure.u64(BigInt(i)),
+            tx.pure.u64(0n),
           ],
         })
-      }
-      tx.moveCall({
-        target: `${packageId}::duel::finalize`,
-        typeArguments: ["0x2::sui::SUI"],
-        arguments: [tx.object(duelId)],
-      })
-      const res = await client.signAndExecuteTransaction({
-        transaction: tx,
-        signer: admin,
-        options: { showEffects: true, showEvents: true },
-      })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
-
-      // New CardSettled event only carries {duel_id, card_idx, settlement_price}.
-      const cardEvents =
-        res.events?.filter((e) => e.type.endsWith("::duel::CardSettled")) ?? []
-      expect(cardEvents).toHaveLength(5)
-      for (const ev of cardEvents) {
-        const p = ev.parsedJson as { settlement_price: string; card_idx: string }
-        expect(BigInt(p.settlement_price)).toBe(oracle!.settlementPrice!)
-        expect(BigInt(p.card_idx)).toBeGreaterThanOrEqual(0n)
-        expect(BigInt(p.card_idx)).toBeLessThan(5n)
+        await client.signAndExecuteTransaction({
+          transaction: tx,
+          signer: admin,
+        })
+        expect(true).toBe(false) // should have aborted
+      } catch (err: any) {
+        const errMsg = err.message ?? String(err)
+        expect(errMsg).toContain("MoveAbort")
+        expect(errMsg).toContain("26") // EDeprecated = 26
+        console.log("Verified legacy settle_card aborts with EDeprecated (26)")
       }
 
-      const ev = res.events?.find((e) => e.type.endsWith("::duel::DuelFinalized"))
-      expect(ev).toBeDefined()
-      const p = ev!.parsedJson as {
-        winner: string
-        payout_to_p0: string
-        payout_to_p1: string
+      // 2. Verify legacy finalize aborts with EDeprecated (26)
+      try {
+        const tx = new Transaction()
+        tx.moveCall({
+          target: `${packageId}::duel::finalize`,
+          typeArguments: ["0x2::sui::SUI"],
+          arguments: [tx.object(duelId)],
+        })
+        await client.signAndExecuteTransaction({
+          transaction: tx,
+          signer: admin,
+        })
+        expect(true).toBe(false) // should have aborted
+      } catch (err: any) {
+        const errMsg = err.message ?? String(err)
+        expect(errMsg).toContain("MoveAbort")
+        expect(errMsg).toContain("26") // EDeprecated = 26
+        console.log("Verified legacy finalize aborts with EDeprecated (26)")
       }
-      // No swipes ⇒ each player's payout == premium == 0 ⇒
-      //   (p0_payout + p1_premium) == (p1_payout + p0_premium) == 0
-      // ⇒ tie ⇒ each player refunded their own stake.
-      expect(p.winner).toMatch(/^0x0+$/)
-      expect(BigInt(p.payout_to_p0)).toBe(STAKE_MIST)
-      expect(BigInt(p.payout_to_p1)).toBe(STAKE_MIST)
-      console.log(
-        `tie: each player refunded ${(Number(STAKE_MIST) / 1e9).toFixed(4)} SUI`,
-      )
+
+      // 3. Verify finalize_v2 aborts with EAllCardsNotSettled (11) because the 10-minute window hasn't expired
+      try {
+        const tx = new Transaction()
+        tx.moveCall({
+          target: `${packageId}::duel::finalize_v2`,
+          typeArguments: ["0x2::sui::SUI"],
+          arguments: [tx.object(duelId), tx.object("0x6")],
+        })
+        await client.signAndExecuteTransaction({
+          transaction: tx,
+          signer: admin,
+        })
+        expect(true).toBe(false) // should have aborted
+      } catch (err: any) {
+        const errMsg = err.message ?? String(err)
+        expect(errMsg).toContain("MoveAbort")
+        expect(errMsg).toContain("11") // EAllCardsNotSettled = 11
+        console.log("Verified finalize_v2 aborts with EAllCardsNotSettled (11) before timeout")
+      }
     },
     60_000,
   )
