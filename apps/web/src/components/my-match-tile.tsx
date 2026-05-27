@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 import { CONFIG } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { liveCardPnl } from "@/lib/pnl"
+import { PlayerAvatar } from "@/components/player-avatar"
 
 /**
  * Wire shape from `GET /duels/recent?player=…`. Trimmed to fields the
@@ -121,7 +122,13 @@ export function MyMatchTile() {
         <StatusBadge live={isLive} />
       </header>
 
-      <PnlChart pick={pick} myIsP0={myIsP0} ticks={ticks} />
+      <PnlChart
+        pick={pick}
+        myIsP0={myIsP0}
+        ticks={ticks}
+        youAddress={address}
+        oppAddress={opponentAddr}
+      />
 
       <footer className="mt-2 flex items-center justify-between text-xs tracking-wider uppercase">
         <div className="flex flex-col">
@@ -243,10 +250,14 @@ function PnlChart({
   pick,
   myIsP0,
   ticks,
+  youAddress,
+  oppAddress,
 }: {
   pick: DuelLite
   myIsP0: boolean
   ticks: Record<string, Tick>
+  youAddress: string
+  oppAddress: string
 }) {
   const slots = Math.max(pick.cardCount, CARD_SLOTS)
   const you = useMemo(
@@ -340,6 +351,7 @@ function PnlChart({
 
         <SeriesLine
           color="#f08585"
+          address={oppAddress}
           points={opp.map((p, i) => ({
             x: xFor(i),
             y: p === null ? null : yFor(p.value),
@@ -348,6 +360,7 @@ function PnlChart({
         />
         <SeriesLine
           color="#7eb6ff"
+          address={youAddress}
           points={you.map((p, i) => ({
             x: xFor(i),
             y: p === null ? null : yFor(p.value),
@@ -370,17 +383,80 @@ function PnlChart({
   )
 }
 
+/**
+ * Eases the y-coordinate of each point toward its target every frame.
+ * Oracle ticks update the underlying value instantaneously, so without
+ * this the polyline + avatar would *snap* between tick values. We use
+ * an exponential decay so updates land within ~300ms but stay smooth
+ * if multiple ticks arrive in quick succession. Snaps (no animation)
+ * for null→value transitions and for changes ≥ ~half the chart height
+ * — those are settlement jumps, not streaming updates.
+ */
+function useSmoothedPoints(
+  points: Array<{ x: number; y: number | null; live: boolean }>,
+): Array<{ x: number; y: number | null; live: boolean }> {
+  const targetRef = useRef(points)
+  targetRef.current = points
+  const [display, setDisplay] = useState(points)
+
+  useEffect(() => {
+    let raf = 0
+    let lastTime = performance.now()
+    const tick = (now: number) => {
+      const dt = Math.min(now - lastTime, 100)
+      lastTime = now
+      // ~80ms time-constant — reaches ~98% of target in ~320ms.
+      const alpha = 1 - Math.exp(-dt / 80)
+      setDisplay((prev) => {
+        const target = targetRef.current
+        let changed = false
+        const next = target.map((t, i) => {
+          if (t.y === null) {
+            if (prev[i]?.y !== null) changed = true
+            return t
+          }
+          const cur = prev[i]
+          if (!cur || cur.y === null) {
+            changed = true
+            return t
+          }
+          const diff = t.y - cur.y
+          if (Math.abs(diff) < 0.05) {
+            // Already at target — preserve any x/live changes.
+            if (cur.x !== t.x || cur.live !== t.live) {
+              changed = true
+              return { x: t.x, y: t.y, live: t.live }
+            }
+            return cur
+          }
+          changed = true
+          return { x: t.x, y: cur.y + diff * alpha, live: t.live }
+        })
+        return changed || next.length !== prev.length ? next : prev
+      })
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  return display
+}
+
 function SeriesLine({
   color,
+  address,
   points,
 }: {
   color: string
+  address: string
   points: Array<{ x: number; y: number | null; live: boolean }>
 }) {
+  const smoothed = useSmoothedPoints(points)
   // Build connected segments split where y is null.
   const segments: Array<Array<{ x: number; y: number; live: boolean }>> = []
   let cur: Array<{ x: number; y: number; live: boolean }> = []
-  for (const p of points) {
+  for (const p of smoothed) {
     if (p.y === null) {
       if (cur.length) segments.push(cur)
       cur = []
@@ -389,6 +465,18 @@ function SeriesLine({
     }
   }
   if (cur.length) segments.push(cur)
+
+  // Index of the last visible point — the "current price" marker that
+  // gets an avatar instead of a plain dot. Reads off the smoothed array
+  // so the avatar rides the eased line, not the raw target.
+  let lastVisibleIdx = -1
+  for (let i = smoothed.length - 1; i >= 0; i--) {
+    if (smoothed[i].y !== null) {
+      lastVisibleIdx = i
+      break
+    }
+  }
+  const avatarSize = 18
 
   return (
     <>
@@ -411,8 +499,10 @@ function SeriesLine({
           />
         )
       })}
-      {points.map((p, i) =>
-        p.y === null ? null : (
+      {smoothed.map((p, i) => {
+        if (p.y === null) return null
+        if (i === lastVisibleIdx) return null
+        return (
           <circle
             key={i}
             cx={p.x}
@@ -423,7 +513,18 @@ function SeriesLine({
             strokeWidth={1.5}
             opacity={p.live ? 0.85 : 1}
           />
-        ),
+        )
+      })}
+      {lastVisibleIdx >= 0 && smoothed[lastVisibleIdx].y !== null && (
+        <foreignObject
+          x={smoothed[lastVisibleIdx].x - avatarSize / 2}
+          y={(smoothed[lastVisibleIdx].y as number) - avatarSize / 2}
+          width={avatarSize}
+          height={avatarSize}
+          style={{ overflow: "visible" }}
+        >
+          <PlayerAvatar address={address} size={avatarSize} />
+        </foreignObject>
       )}
     </>
   )
