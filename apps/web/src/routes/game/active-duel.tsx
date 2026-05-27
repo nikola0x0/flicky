@@ -80,7 +80,9 @@ export function ActiveDuel({
   role,
   tier,
   managerId,
-  wsOpen,
+  // wsOpen is in the Props for future status indicators but the player
+  // doesn't need to see the connection state during a match.
+  wsOpen: _wsOpen,
   send,
   onMessage,
   onExit,
@@ -90,10 +92,7 @@ export function ActiveDuel({
   const sign = useFlickySign()
   const [phase, setPhase] = useState<Phase>({
     kind: "ENTRY",
-    reason:
-      role === "creator"
-        ? "Waiting for deck hash…"
-        : "Waiting for opponent to create the duel…",
+    reason: "Setting up the match…",
   })
   const [roomState, setRoomState] = useState<RoomState | null>(null)
   // Live oracle prices, keyed by oracle id. Powers mark-to-market PnL.
@@ -274,9 +273,8 @@ export function ActiveDuel({
           Exit
         </button>
       </div>
-      <div className="text-sm text-white/55">
-        role: {role} &middot; tier: {tier} &middot; ws:{" "}
-        {wsOpen ? "open" : "closed"}
+      <div className="text-sm tracking-wider text-white/55 uppercase">
+        stake {Number(STAKE_TIERS[tier]) / 1e6} dUSDC
       </div>
 
       {phase.kind === "ENTRY" && <PhaseEntry reason={phase.reason} />}
@@ -328,21 +326,16 @@ function PhaseEntry({ reason }: { reason: string }) {
 }
 
 function PhaseAwaitReveal({
-  duelId,
   roomState,
 }: {
   duelId: string
   roomState: RoomState | null
 }) {
+  const ready = roomState?.cards.length ?? 0
   return (
-    <div className="rounded border border-white/10 bg-white/5 p-4">
-      <p className="text-base text-white/70">
-        Duel {duelId.slice(0, 10)}&hellip; preparing&hellip;
-      </p>
-      <p className="mt-1 text-sm text-white/40">
-        status: {roomState?.status ?? "—"} &middot; cards:{" "}
-        {roomState?.cards.length ?? 0}/5
-      </p>
+    <div className="rounded border border-white/10 bg-white/5 p-4 text-center">
+      <p className="text-base text-white/70">Shuffling the deck&hellip;</p>
+      <p className="mt-2 text-sm text-white/40">{ready} / 5 cards ready</p>
     </div>
   )
 }
