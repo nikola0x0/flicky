@@ -16,6 +16,7 @@ import {
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import { liveCardPnl, runningPnl, fmtDusdcSigned } from "@/lib/pnl"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
+import { WsErrorBanner } from "@/components/ws-error-banner"
 
 interface Props {
   role: "creator" | "challenger"
@@ -263,6 +264,7 @@ export function ActiveDuel({
 
   return (
     <div className="flex h-full flex-col gap-4 px-4 py-4 text-white">
+      <WsErrorBanner onMessage={onMessage} />
       <div className="flex items-center justify-between">
         <h2 className="text-xl tracking-[0.2em] uppercase">Active Match</h2>
         <button

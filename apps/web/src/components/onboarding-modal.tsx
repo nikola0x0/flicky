@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties } from "react"
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
 import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
 import { useFlickySign } from "@/lib/use-flicky-sign"
@@ -127,8 +127,20 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
     if (open) void recheck()
   }, [open, recheck])
 
+  // Fire onReady at most ONCE per modal-open cycle. Without this guard
+  // the effect re-runs whenever the parent re-renders (inline `onReady`
+  // callback → new ref → effect deps change) and StrictMode double-
+  // invokes it in dev — both paths cause duplicate `queue_join` sends
+  // and a benign rate_limit error toast.
+  const firedRef = useRef(false)
   useEffect(() => {
-    if (phase.kind === "ready") onReady(phase.managerId)
+    if (!open) firedRef.current = false
+  }, [open])
+  useEffect(() => {
+    if (phase.kind !== "ready") return
+    if (firedRef.current) return
+    firedRef.current = true
+    onReady(phase.managerId)
   }, [phase, onReady])
 
   // Escape-to-close + body-scroll lock, matching DepositModal/WithdrawModal.

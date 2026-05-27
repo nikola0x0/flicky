@@ -57,14 +57,18 @@ export const env = {
     "0x51ea0f29321f3c25f8b2f530ecd3ed3dec569d954c8832d318de7e203653a936",
 
   // Deckmaster: minimum headroom each card's oracle must clear at the
-  // moment of duel creation. PRD says >10 min, but on testnet that short
-  // a TTL makes BTC options near-degenerate (a 5% strike offset is
-  // 30+ sigmas, so SVI rounds the binary probability to exactly 0 or 1
-  // and `pricing_config::quote_spread_from_fair_price` aborts with
-  // EFairPriceAlreadySettled). 30 min keeps strikes inside the
-  // (0, 1) probability range for the bucket widths we use.
+  // moment of duel creation. PRD says >10 min. On testnet the upstream
+  // BTC oracle cron creates a new oracle every 15 min with a 1h45m
+  // lifetime, so requiring 30 min of headroom yields a steady-state
+  // count of exactly 4 eligible oracles — one short of the 5-card deck
+  // and matchmaking deadlocks. 10 min consistently exposes 5 oracles.
+  // Cards with very short TTL may have their PRG-chosen strike rejected
+  // by `pricing_config::quote_spread_from_fair_price` (probability
+  // rounds to 0/1 → EFairPriceAlreadySettled); `buildAndProbeDeck`
+  // already falls back to ATM on probe failure so the deck still
+  // generates — just with less difficulty variety on tight-TTL cards.
   deckCardMinHeadroomMs: Number(
-    process.env.DECK_CARD_MIN_HEADROOM_MS ?? 30 * 60 * 1000,
+    process.env.DECK_CARD_MIN_HEADROOM_MS ?? 10 * 60 * 1000,
   ),
   deckmasterStorePath:
     process.env.DECKMASTER_STORE_PATH ??

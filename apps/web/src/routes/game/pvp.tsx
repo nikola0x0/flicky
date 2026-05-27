@@ -6,6 +6,7 @@ import { MatchButton } from "@/components/match-button"
 import { ModeModal } from "@/components/mode-modal"
 import { OnboardingModal } from "@/components/onboarding-modal"
 import { PixelButton } from "@/components/pixel-button"
+import { WsErrorBanner } from "@/components/ws-error-banner"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { ActiveDuel } from "./active-duel"
 import { STAKE_TIERS, type Tier } from "@/lib/protocol"
@@ -86,9 +87,11 @@ export default function GamePvp() {
     setOnboardingOpen(true)
   }
 
-  // If a match is found, render the Active Duel phase.
+  // Single render path so the WS error banner stays mounted across
+  // queue → match transitions and never loses its subscription.
+  let content: React.ReactNode
   if (matched && managerId) {
-    return (
+    content = (
       <ActiveDuel
         role={matched.role}
         tier={tier}
@@ -102,13 +105,8 @@ export default function GamePvp() {
         }}
       />
     )
-  }
-
-  // While in queue, take over the full PvP view with a dedicated
-  // "searching" screen — keeps the player oriented on what's happening
-  // and gives the wait some game-like presence.
-  if (queueSize !== null) {
-    return (
+  } else if (queueSize !== null) {
+    content = (
       <QueueScreen
         tier={tier}
         stake={stake}
@@ -116,8 +114,47 @@ export default function GamePvp() {
         onCancel={onQueueMatch}
       />
     )
+  } else {
+    content = (
+      <StandbyView
+        stake={stake}
+        setStake={setStake}
+        onQueueMatch={onQueueMatch}
+        onOpenMode={() => setModeOpen(true)}
+      />
+    )
   }
 
+  return (
+    <>
+      <WsErrorBanner onMessage={onMessage} />
+      {content}
+      <ModeModal open={modeOpen} onClose={() => setModeOpen(false)} />
+      <OnboardingModal
+        open={onboardingOpen}
+        stake={STAKE_TIERS[tier]}
+        onClose={() => setOnboardingOpen(false)}
+        onReady={(mgrId) => {
+          setManagerId(mgrId)
+          setOnboardingOpen(false)
+          send({ type: "queue_join", tier })
+        }}
+      />
+    </>
+  )
+}
+
+function StandbyView({
+  stake,
+  setStake,
+  onQueueMatch,
+  onOpenMode,
+}: {
+  stake: Stake
+  setStake: (s: Stake) => void
+  onQueueMatch: () => void
+  onOpenMode: () => void
+}) {
   return (
     <div className="flex h-full flex-col gap-5 px-4 py-4">
       <img
@@ -154,25 +191,13 @@ export default function GamePvp() {
         <MatchButton
           label={<span className="text-2xl">game mode</span>}
           style={MODE_BRAND_STYLE}
-          onClick={() => setModeOpen(true)}
+          onClick={onOpenMode}
         />
       </div>
 
       <p className="text-center text-xs tracking-[0.18em] text-white/45 uppercase">
         match starts when an opponent joins
       </p>
-
-      <ModeModal open={modeOpen} onClose={() => setModeOpen(false)} />
-      <OnboardingModal
-        open={onboardingOpen}
-        stake={STAKE_TIERS[tier]}
-        onClose={() => setOnboardingOpen(false)}
-        onReady={(mgrId) => {
-          setManagerId(mgrId)
-          setOnboardingOpen(false)
-          send({ type: "queue_join", tier })
-        }}
-      />
     </div>
   )
 }

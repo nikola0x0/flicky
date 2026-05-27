@@ -66,7 +66,10 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
   })
   const deck = await buildAndProbeDeck(client, oracles, seed)
   rememberDeck(deck.hash, deck.cards, seed)
-  return "0x" + deck.hashHex
+  // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields
+  // `0x0x…` which decodes to 33 bytes and trips create_duel's 32-byte
+  // assert.
+  return deck.hashHex
 }
 
 export function setDeckHashProvider(fn: DeckHashProvider): void {
@@ -219,6 +222,9 @@ export function leaveQueue(ws: AnyWs): void {
   send(ws, { type: "queue_left" })
 }
 
+/** Retry delay when matchPair fails during deck-gen (e.g. transient oracle shortage). */
+const MATCH_RETRY_MS = 15_000
+
 async function matchPair(
   creator: AnyWs,
   challenger: AnyWs,
@@ -245,11 +251,16 @@ async function matchPair(
     log.warn(
       `deck-gen failed for ${tier} match: ${e instanceof Error ? e.message : String(e)}`,
     )
-    // Surface to both players and don't proceed — they're free to retry
-    // queue_join immediately; we already cleared their queuedTier above.
+    // Don't drop the players — put them back in the queue so they remain
+    // searchable, surface a soft error, and schedule a retry. Without
+    // this both sockets would silently leave the queue on a transient
+    // oracle-availability blip and the UI would still show "searching".
     const msg = `match failed during deck setup: ${e instanceof Error ? e.message : String(e)}`
+    requeue(creator, tier)
+    requeue(challenger, tier)
     send(creator, { type: "error", code: "match_setup_failed", message: msg })
     send(challenger, { type: "error", code: "match_setup_failed", message: msg })
+    scheduleRetryPair(creator, challenger, tier)
     return
   }
   // Remember the pairing so the indexer can push `duel_assigned` to the
@@ -271,6 +282,42 @@ async function matchPair(
     opponent: creatorAddr ?? "",
     deckHash: deckHashHex,
   })
+}
+
+/**
+ * Restore `ws` to the FIFO queue for `tier` without re-running MMR
+ * pairing. Used by the deck-gen failure path so a transient oracle
+ * shortage doesn't silently drop both players off the queue. Preserves
+ * `queuedAt` if already set so MMR-window growth isn't reset.
+ */
+function requeue(ws: AnyWs, tier: Tier): void {
+  if (!ws.data.address) return
+  if (ws.data.queuedTier !== null) return // already requeued / never cleared
+  ws.data.queuedTier = tier
+  if (!ws.data.queuedAt) ws.data.queuedAt = Date.now()
+  let q = queues.get(tier)
+  if (!q) {
+    q = []
+    queues.set(tier, q)
+  }
+  if (!q.includes(ws)) q.push(ws)
+  send(ws, { type: "queue_status", tier, size: q.length, waitMs: Date.now() - ws.data.queuedAt })
+}
+
+/**
+ * After a failed `matchPair`, try the same two sockets again after
+ * `MATCH_RETRY_MS`. If either has left the queue / disconnected / been
+ * matched with someone else by then, abort silently.
+ */
+function scheduleRetryPair(a: AnyWs, b: AnyWs, tier: Tier): void {
+  setTimeout(() => {
+    if (a.data.queuedTier !== tier || b.data.queuedTier !== tier) return
+    const q = queues.get(tier)
+    if (!q || !q.includes(a) || !q.includes(b)) return
+    q.splice(q.indexOf(a), 1)
+    q.splice(q.indexOf(b), 1)
+    void matchPair(a, b, tier)
+  }, MATCH_RETRY_MS)
 }
 
 /**
