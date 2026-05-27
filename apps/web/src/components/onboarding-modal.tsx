@@ -130,6 +130,20 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
     if (phase.kind === "ready") onReady(phase.managerId)
   }, [phase, onReady])
 
+  // Escape-to-close + body-scroll lock, matching DepositModal/WithdrawModal.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    }
+    document.body.style.overflow = "hidden"
+    window.addEventListener("keydown", onKey)
+    return () => {
+      document.body.style.overflow = ""
+      window.removeEventListener("keydown", onKey)
+    }
+  }, [open, onClose])
+
   if (!open) return null
 
   return (
@@ -371,8 +385,8 @@ function NeedsManagerStep({
     <div className="space-y-3">
       <WalletToManagerFlow />
       <p className="text-base text-white/80">
-        You need a Predict account to swipe. We&rsquo;ll create one, then
-        deposit {fmtDusdc(MIN_MANAGER_BALANCE)} from your wallet.
+        You need a manager to swipe. We&rsquo;ll create one, then deposit{" "}
+        {fmtDusdc(MIN_MANAGER_BALANCE)} from your wallet.
       </p>
       <p className="text-sm text-white/55">
         Wallet balance: {fmtDusdc(walletDusdc)}
@@ -391,7 +405,7 @@ function NeedsManagerStep({
         style={ORANGE_BRAND_STYLE}
         className="h-12 w-full"
       >
-        {busy ? "creating…" : "create predict account"}
+        {busy ? "creating…" : "create manager"}
       </PixelButton>
     </div>
   )
@@ -410,9 +424,8 @@ function NeedsDepositStep({
     <div className="space-y-3">
       <WalletToManagerFlow />
       <p className="text-base text-white/80">
-        Your Predict account has {fmtDusdc(current)}. Depositing{" "}
-        {fmtDusdc(needed)} brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} for the
-        5-card duel.
+        Your manager has {fmtDusdc(current)}. Depositing {fmtDusdc(needed)}{" "}
+        brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} for the 5-card duel.
       </p>
       <OneTimeNote />
       <PixelButton
