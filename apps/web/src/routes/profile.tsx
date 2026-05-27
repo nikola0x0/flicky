@@ -5,10 +5,15 @@ import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"
+import { WithdrawModal } from "@/components/withdraw-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
-import { useDusdcBalance, useSuiBalance } from "@/hooks/use-wallet-balances"
+import {
+  useDusdcBalance,
+  useManagerBalance,
+  useSuiBalance,
+} from "@/hooks/use-wallet-balances"
 
 const BLUE_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -28,7 +33,10 @@ export default function Profile() {
   const navigate = useNavigate()
   const { data: suiBalance = 0 } = useSuiBalance()
   const { data: dusdcBalance = 0 } = useDusdcBalance()
+  const { data: managerInfo } = useManagerBalance()
+  const managerBalance = managerInfo?.balance ?? 0
   const [depositOpen, setDepositOpen] = useState(false)
+  const [withdrawOpen, setWithdrawOpen] = useState(false)
 
   // Signed out — bounce back to /game/home where they can sign in.
   if (!account) {
@@ -45,7 +53,11 @@ export default function Profile() {
   return (
     <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
       <div className="pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl bg-[#1b2548] font-pixel text-white sm:max-h-[900px]">
-        <ProfileHeader onBack={() => navigate(-1)} dusdc={dusdcBalance} />
+        <ProfileHeader
+          onBack={() => navigate(-1)}
+          dusdc={dusdcBalance}
+          managerDusdc={managerBalance}
+        />
 
         <main className="flex-1 overflow-y-auto px-4 pb-6">
           <section className="flex items-start gap-4 pt-2">
@@ -102,7 +114,7 @@ export default function Profile() {
             <Stat
               icon="/tokens/manager-usdc.png"
               label="manager dusdc"
-              value="0.00"
+              value={managerBalance.toFixed(2)}
             />
           </section>
 
@@ -134,7 +146,7 @@ export default function Profile() {
             <ActionTile
               label="withdraw"
               icon="/icons/disk_load.png"
-              onClick={() => {}}
+              onClick={() => setWithdrawOpen(true)}
             />
             <ActionTile
               label="export pk"
@@ -173,6 +185,11 @@ export default function Profile() {
         address={address}
         onClose={() => setDepositOpen(false)}
       />
+      <WithdrawModal
+        open={withdrawOpen}
+        address={address}
+        onClose={() => setWithdrawOpen(false)}
+      />
     </div>
   )
 }
@@ -180,9 +197,11 @@ export default function Profile() {
 function ProfileHeader({
   onBack,
   dusdc,
+  managerDusdc,
 }: {
   onBack: () => void
   dusdc: number
+  managerDusdc: number
 }) {
   return (
     <header className="flex items-center justify-between gap-2 px-3 py-3">
@@ -211,7 +230,7 @@ function ProfileHeader({
           />
           <BalanceChip
             icon="/tokens/manager-usdc.png"
-            amount="0.00"
+            amount={managerDusdc.toFixed(2)}
             label="manager"
             to="/game/shop"
           />

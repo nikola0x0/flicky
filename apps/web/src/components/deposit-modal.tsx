@@ -7,10 +7,12 @@ import {
 } from "react"
 import { createPortal } from "react-dom"
 import { createPaymentTransactionUri } from "@mysten/payment-kit"
+import { useSuiClient } from "@mysten/dapp-kit"
 
 import {
   useDusdcBalance,
   useInvalidateWalletBalances,
+  useManagerBalance,
   useSuiBalance,
 } from "@/hooks/use-wallet-balances"
 import {
@@ -19,16 +21,23 @@ import {
   SUI_COIN_TYPE,
   SUI_DECIMALS,
 } from "@/lib/swap"
+import {
+  buildCreateManagerTx,
+  buildDepositDusdcTx,
+  extractManagerIdFromChanges,
+  writeManagerCache,
+} from "@/lib/deepbook"
+import { useFlickySign } from "@/lib/use-flicky-sign"
 
 const BLUE_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
   "--btn-highlight": "#7eb6ff",
 } as CSSProperties
 
-type Token = "SUI" | "DUSDC"
+type Tab = "SUI" | "DUSDC" | "MANAGER"
 
-const TOKEN_META: Record<
-  Token,
+const RECEIVE_META: Record<
+  "SUI" | "DUSDC",
   { label: string; icon: string; coinType: string; decimals: number }
 > = {
   SUI: {
@@ -43,6 +52,11 @@ const TOKEN_META: Record<
     coinType: DUSDC_COIN_TYPE,
     decimals: DUSDC_DECIMALS,
   },
+}
+
+const MANAGER_TAB_META = {
+  label: "manager",
+  icon: "/tokens/manager-usdc.png",
 }
 
 export interface DepositModalProps {
@@ -68,13 +82,17 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
   const invalidateBalances = useInvalidateWalletBalances()
   const { data: suiBalance = 0 } = useSuiBalance()
   const { data: dusdcBalance = 0 } = useDusdcBalance()
-  const [token, setToken] = useState<Token>("SUI")
+  const [tab, setTab] = useState<Tab>("SUI")
   const [amount, setAmount] = useState("1")
   const [copied, setCopied] = useState(false)
   const [received, setReceived] = useState<number | null>(null)
 
-  const meta = TOKEN_META[token]
-  const currentBalance = token === "SUI" ? suiBalance : dusdcBalance
+  // Resolve the receive-flow metadata when we're on SUI/DUSDC tabs.
+  // The MANAGER tab is a different UX (signed deposit, no QR) and
+  // doesn't use this — it has its own render branch below.
+  const receiveMeta = tab === "MANAGER" ? null : RECEIVE_META[tab]
+  const currentBalance =
+    tab === "SUI" ? suiBalance : tab === "DUSDC" ? dusdcBalance : 0
 
   // Snapshot the balance for the active token when the modal opens
   // (or when the user switches token tabs). Subsequent positive
@@ -83,18 +101,18 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
   // present at snapshot time, not a later refetch.
   const initialBalanceRef = useRef<number | null>(null)
 
-  // Build the Sui Payment URI. Returns null when the amount is
-  // missing/invalid so the QR block can render a placeholder instead
-  // of a misleading address-only QR (which also renders chunkier
-  // because of the shorter encoded payload).
+  // Build the Sui Payment URI for the SUI/DUSDC receive flow. Null
+  // when amount is missing/invalid OR when we're on the MANAGER tab
+  // (which has its own UX, no QR).
   const paymentUri = useMemo<string | null>(() => {
+    if (!receiveMeta) return null
     const parsed = parseFloat(amount)
     if (!isFinite(parsed) || parsed <= 0) return null
     try {
-      const raw = BigInt(Math.floor(parsed * 10 ** meta.decimals))
+      const raw = BigInt(Math.floor(parsed * 10 ** receiveMeta.decimals))
       return createPaymentTransactionUri({
         amount: raw,
-        coinType: meta.coinType,
+        coinType: receiveMeta.coinType,
         nonce: Date.now().toString(),
         receiverAddress: address,
       })
@@ -102,11 +120,11 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
       console.error("payment uri build failed", err)
       return null
     }
-  }, [amount, address, meta])
+  }, [amount, address, receiveMeta])
 
   // Reset state when the modal opens/closes. Snapshot the current
   // balance the first time the modal opens (or when the user changes
-  // tokens) so subsequent positive deltas can be celebrated.
+  // tabs) so subsequent positive deltas can be celebrated.
   useEffect(() => {
     if (!open) {
       initialBalanceRef.current = null
@@ -117,7 +135,7 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
     initialBalanceRef.current = currentBalance
     setReceived(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, token])
+  }, [open, tab])
 
   // Watch the live (polled) balance and surface deposits the moment
   // they cross the snapshot baseline.
@@ -187,43 +205,54 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
         </header>
 
         <div className="space-y-4 px-6 pb-6">
-          <TokenTabs value={token} onChange={setToken} />
+          <TabRow value={tab} onChange={setTab} />
 
-          <AmountField
-            token={meta}
-            value={amount}
-            onChange={setAmount}
-          />
+          {receiveMeta && (
+            <>
+              <AmountField
+                token={receiveMeta}
+                value={amount}
+                onChange={setAmount}
+              />
 
-          <QRBlock data={paymentUri} />
+              <QRBlock data={paymentUri} />
 
-          <AddressRow
-            address={address}
-            copied={copied}
-            onCopy={handleCopy}
-          />
+              <AddressRow
+                address={address}
+                copied={copied}
+                onCopy={handleCopy}
+              />
 
-          <p className="text-center text-[10px] tracking-wider text-white/55 uppercase">
-            scan with slush, or send directly to the address
-          </p>
+              <p className="text-center text-[10px] tracking-wider text-white/55 uppercase">
+                scan with slush, or send directly to the address
+              </p>
 
-          {received !== null ? (
-            <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-xs text-emerald-200">
-              received +{received.toFixed(4)} {meta.label}
-            </div>
-          ) : (
-            <div className="flex items-center justify-center gap-2 text-[10px] tracking-wider text-white/55 uppercase">
-              <span className="size-1.5 animate-pulse rounded-full bg-white/55" />
-              waiting for deposit
-            </div>
+              {received !== null ? (
+                <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-xs text-emerald-200">
+                  received +{received.toFixed(4)} {receiveMeta.label}
+                </div>
+              ) : (
+                <div className="flex items-center justify-center gap-2 text-[10px] tracking-wider text-white/55 uppercase">
+                  <span className="size-1.5 animate-pulse rounded-full bg-white/55" />
+                  waiting for deposit
+                </div>
+              )}
+
+              <div className="flex items-center justify-between text-[10px] tracking-wider text-white/55 uppercase">
+                <span>current balance</span>
+                <span className="text-sm tabular-nums text-white">
+                  {currentBalance.toFixed(4)} {receiveMeta.label}
+                </span>
+              </div>
+            </>
           )}
 
-          <div className="flex items-center justify-between text-[10px] tracking-wider text-white/55 uppercase">
-            <span>current balance</span>
-            <span className="text-sm tabular-nums text-white">
-              {currentBalance.toFixed(4)} {meta.label}
-            </span>
-          </div>
+          {tab === "MANAGER" && (
+            <ManagerDepositTab
+              address={address}
+              walletDusdc={dusdcBalance}
+            />
+          )}
         </div>
       </div>
     </div>,
@@ -231,36 +260,44 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
   )
 }
 
-function TokenTabs({
+function TabRow({
   value,
   onChange,
 }: {
-  value: Token
-  onChange: (t: Token) => void
+  value: Tab
+  onChange: (t: Tab) => void
 }) {
+  const tabs: Array<{ id: Tab; label: string; icon: string }> = [
+    { id: "SUI", label: RECEIVE_META.SUI.label, icon: RECEIVE_META.SUI.icon },
+    {
+      id: "DUSDC",
+      label: RECEIVE_META.DUSDC.label,
+      icon: RECEIVE_META.DUSDC.icon,
+    },
+    { id: "MANAGER", label: MANAGER_TAB_META.label, icon: MANAGER_TAB_META.icon },
+  ]
   return (
-    <div className="grid grid-cols-2 gap-2">
-      {(Object.keys(TOKEN_META) as Token[]).map((t) => {
-        const meta = TOKEN_META[t]
-        const active = value === t
+    <div className="grid grid-cols-3 gap-2">
+      {tabs.map((t) => {
+        const active = value === t.id
         return (
           <button
-            key={t}
+            key={t.id}
             type="button"
-            onClick={() => onChange(t)}
-            className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm tracking-wider uppercase transition ${
+            onClick={() => onChange(t.id)}
+            className={`flex items-center justify-center gap-2 rounded-xl px-2 py-2 text-xs tracking-wider uppercase transition ${
               active
                 ? "bg-white/15 text-white"
                 : "bg-white/5 text-white/55 hover:text-white"
             }`}
           >
             <img
-              src={meta.icon}
+              src={t.icon}
               alt=""
               aria-hidden
               className="size-5 [image-rendering:pixelated]"
             />
-            {meta.label}
+            {t.label}
           </button>
         )
       })}
@@ -409,6 +446,168 @@ function AddressRow({
         {copied ? "copied" : "copy"}
       </span>
     </button>
+  )
+}
+
+/**
+ * On-chain deposit from the zk-wallet dUSDC into the player's
+ * PredictManager. Different UX from the receive-into-wallet flow:
+ * amount input + signed deposit tx (sponsored via useFlickySign).
+ * Creates the manager on-the-fly if the user doesn't have one yet.
+ */
+function ManagerDepositTab({
+  address,
+  walletDusdc,
+}: {
+  address: string
+  walletDusdc: number
+}) {
+  const client = useSuiClient()
+  const sign = useFlickySign()
+  const invalidateBalances = useInvalidateWalletBalances()
+  const { data: managerInfo, refetch: refetchManager } = useManagerBalance()
+  const managerBalance = managerInfo?.balance ?? 0
+  const managerId = managerInfo?.managerId ?? null
+  const [amount, setAmount] = useState("5")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<number | null>(null)
+
+  const parsed = parseFloat(amount)
+  const validAmount = isFinite(parsed) && parsed > 0
+  const insufficient = validAmount && parsed > walletDusdc + 1e-9
+
+  const doDeposit = async () => {
+    setBusy(true)
+    setError(null)
+    setSuccess(null)
+    try {
+      // 1. Resolve a manager id — create one if missing. The new manager
+      //    starts at 0 dUSDC; we then deposit in step 2.
+      let mgrId = managerId
+      if (!mgrId) {
+        const createTx = buildCreateManagerTx()
+        const res = await sign.mutateAsync({ transaction: createTx })
+        mgrId = extractManagerIdFromChanges(
+          (
+            res as {
+              objectChanges?: Array<{
+                type: string
+                objectType?: string
+                objectId?: string
+              }>
+            }
+          ).objectChanges ?? [],
+        )
+        if (!mgrId) {
+          throw new Error(
+            "create_manager succeeded but PredictManager id missing from objectChanges",
+          )
+        }
+        writeManagerCache(address, mgrId)
+      }
+      // 2. Build + sign the deposit. `buildDepositDusdcTx` reads the
+      //    user's dUSDC coins from chain, merges if needed, splits the
+      //    deposit amount.
+      const microAmount = BigInt(Math.floor(parsed * 1e6))
+      const depositTx = await buildDepositDusdcTx(
+        client,
+        address,
+        mgrId,
+        microAmount,
+      )
+      await sign.mutateAsync({ transaction: depositTx })
+      setSuccess(parsed)
+      setAmount("0")
+      void refetchManager()
+      invalidateBalances()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-2xl bg-black/35 px-4 py-3 ring-1 ring-white/5">
+        <div className="text-[10px] tracking-[0.18em] text-white/55 uppercase">
+          amount
+        </div>
+        <div className="mt-1 flex items-center gap-3">
+          <input
+            type="number"
+            value={amount}
+            onChange={(e) => {
+              const v = e.target.value
+              if (v === "" || parseFloat(v) >= 0) setAmount(v)
+            }}
+            placeholder="0.0"
+            inputMode="decimal"
+            min={0}
+            step="any"
+            className="w-full bg-transparent text-2xl tabular-nums text-white focus:outline-none"
+          />
+          <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pl-1.5 pr-2">
+            <img
+              src="/tokens/manager-usdc.png"
+              alt=""
+              aria-hidden
+              className="size-6 [image-rendering:pixelated]"
+            />
+            <span className="text-sm tracking-wider text-white uppercase">
+              mgr
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl bg-white/5 px-3 py-2 text-[10px] tracking-wider text-white/55 uppercase">
+        <div className="flex justify-between">
+          <span>wallet dUSDC</span>
+          <span className="text-sm tabular-nums text-white">
+            {walletDusdc.toFixed(4)}
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span>manager dUSDC</span>
+          <span className="text-sm tabular-nums text-white">
+            {managerBalance.toFixed(4)}
+          </span>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        disabled={busy || !validAmount || insufficient}
+        onClick={() => void doDeposit()}
+        className="w-full rounded-xl bg-[#e08a2b] px-4 py-3 text-lg font-bold tracking-wider uppercase text-white disabled:opacity-50"
+      >
+        {busy
+          ? "depositing…"
+          : insufficient
+            ? "insufficient dUSDC in wallet"
+            : `deposit ${validAmount ? parsed.toFixed(2) : "—"} dUSDC`}
+      </button>
+
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      {success !== null && (
+        <div className="rounded-xl bg-emerald-500/15 px-3 py-2 text-center text-xs text-emerald-200">
+          deposited +{success.toFixed(4)} dUSDC into manager
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={() => {
+          void refetchManager()
+          invalidateBalances()
+        }}
+        className="text-[10px] tracking-wider text-white/40 uppercase hover:text-white/70"
+      >
+        refresh
+      </button>
+    </div>
   )
 }
 
