@@ -78,7 +78,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         }
         if (msg.tier === "practice") {
           // joinQueue itself rejects practice; let it emit the canonical error.
-          joinQueue(ws, msg.tier)
+          await joinQueue(ws, msg.tier)
           return
         }
         if (!ws.data.address) {
@@ -116,7 +116,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           }
           return
         }
-        joinQueue(ws, msg.tier)
+        await joinQueue(ws, msg.tier)
         return
       }
       case "queue_leave": {

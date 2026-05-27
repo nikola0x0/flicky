@@ -51,6 +51,13 @@ export type ServerMsg =
       tier: Tier
       role: "creator" | "challenger"
       opponent: string
+      /**
+       * sha2_256 hash of the 5-card deck the server pre-generated for
+       * this match. The plaintext stays server-side until reveal_deck
+       * lands on chain — the creator commits THIS hash in `create_duel`,
+       * the keeper reveals later. "0x"-prefixed hex string.
+       */
+      deckHash: string
     }
   | {
       /**

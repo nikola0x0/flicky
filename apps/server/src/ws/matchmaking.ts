@@ -23,11 +23,55 @@
  */
 import type { ServerWebSocket } from "bun"
 import { getPlayerRating } from "../db"
+import {
+  buildAndProbeDeck,
+  deriveSeed,
+  findDeckOracles,
+  hashToHex,
+  rememberDeck,
+} from "../deckmaster"
 import { env } from "../env"
+import { getSuiClient } from "../lib/sui"
 import { makeLogger, shortId } from "../log"
 import { findClosestOpponent } from "../mmr"
 import type { ServerMsg, Tier } from "./protocol"
 import { STAKE_TIERS } from "./protocol"
+
+/**
+ * Pluggable deck-hash generator. Default hits chain via Deckmaster.
+ * Tests override with `setDeckHashProvider` to avoid network and to
+ * keep `joinQueue` deterministic. Returns the "0x"-prefixed sha2_256
+ * hex string the creator commits in `create_duel`.
+ */
+type DeckHashProvider = (opts: {
+  tier: Tier
+  creatorAddr: string | undefined
+}) => Promise<string>
+
+let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
+  const client = getSuiClient()
+  const oracles = await findDeckOracles(client, "BTC", 5)
+  if (oracles.length < 5) {
+    throw new Error(
+      `not enough live oracles (${oracles.length}/5) — retry in a few minutes`,
+    )
+  }
+  const nonceHex = hashToHex(crypto.getRandomValues(new Uint8Array(16)))
+  const seed = deriveSeed({
+    sender: creatorAddr,
+    asset: "BTC",
+    tier,
+    timestampMs: Date.now(),
+    nonceHex,
+  })
+  const deck = await buildAndProbeDeck(client, oracles, seed)
+  rememberDeck(deck.hash, deck.cards, seed)
+  return "0x" + deck.hashHex
+}
+
+export function setDeckHashProvider(fn: DeckHashProvider): void {
+  deckHashProvider = fn
+}
 
 const log = makeLogger("match")
 
@@ -112,7 +156,7 @@ function unregisterAddress(ws: AnyWs): void {
 
 // ─── Queue ──────────────────────────────────────────────────────────────────
 
-export function joinQueue(ws: AnyWs, tier: Tier): void {
+export async function joinQueue(ws: AnyWs, tier: Tier): Promise<void> {
   if (!ws.data.address) {
     send(ws, { type: "error", code: "no_address", message: "send `hello` with your address first" })
     return
@@ -153,7 +197,7 @@ export function joinQueue(ws: AnyWs, tier: Tier): void {
     const opponent = candidates.find((c) => c.address === pick.address)?.ws
     if (opponent) {
       q.splice(q.indexOf(opponent), 1)
-      matchPair(opponent, ws, tier)
+      await matchPair(opponent, ws, tier)
       return
     }
   }
@@ -175,7 +219,11 @@ export function leaveQueue(ws: AnyWs): void {
   send(ws, { type: "queue_left" })
 }
 
-function matchPair(creator: AnyWs, challenger: AnyWs, tier: Tier): void {
+async function matchPair(
+  creator: AnyWs,
+  challenger: AnyWs,
+  tier: Tier,
+): Promise<void> {
   creator.data.queuedTier = null
   challenger.data.queuedTier = null
   const creatorAddr = creator.data.address
@@ -183,6 +231,27 @@ function matchPair(creator: AnyWs, challenger: AnyWs, tier: Tier): void {
   log.info(
     `match ${tier}: creator=${shortId(creatorAddr ?? "?")} vs challenger=${shortId(challengerAddr ?? "?")}`,
   )
+  // Generate the deck server-side BEFORE announcing the match. The
+  // creator gets only the hash (commits it in create_duel); the
+  // plaintext stays cached against the hash and is later read by the
+  // keeper for reveal_deck.
+  let deckHashHex: string
+  try {
+    deckHashHex = await deckHashProvider({
+      tier,
+      creatorAddr: creatorAddr ?? undefined,
+    })
+  } catch (e) {
+    log.warn(
+      `deck-gen failed for ${tier} match: ${e instanceof Error ? e.message : String(e)}`,
+    )
+    // Surface to both players and don't proceed — they're free to retry
+    // queue_join immediately; we already cleared their queuedTier above.
+    const msg = `match failed during deck setup: ${e instanceof Error ? e.message : String(e)}`
+    send(creator, { type: "error", code: "match_setup_failed", message: msg })
+    send(challenger, { type: "error", code: "match_setup_failed", message: msg })
+    return
+  }
   // Remember the pairing so the indexer can push `duel_assigned` to the
   // challenger the moment the creator's `DuelCreated` event surfaces.
   if (creatorAddr && challengerAddr) {
@@ -193,12 +262,14 @@ function matchPair(creator: AnyWs, challenger: AnyWs, tier: Tier): void {
     tier,
     role: "creator",
     opponent: challengerAddr ?? "",
+    deckHash: deckHashHex,
   })
   send(challenger, {
     type: "match_found",
     tier,
     role: "challenger",
     opponent: creatorAddr ?? "",
+    deckHash: deckHashHex,
   })
 }
 
