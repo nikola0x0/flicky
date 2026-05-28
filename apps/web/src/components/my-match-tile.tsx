@@ -58,7 +58,7 @@ function useDemoChart(): boolean {
 const DEMO_OPP_ADDRESS =
   "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 const DEMO_STRIKE = "100000000000" // 100.0 on 1e9 scale
-const DEMO_QUANTITY = "1000000000" // 1.0 quantity
+const DEMO_QUANTITY = "100000000000" // 100x quantity → BTC-scale PnL
 
 function buildDemoDuel(address: string): DuelLite {
   return {
@@ -70,8 +70,8 @@ function buildDemoDuel(address: string): DuelLite {
     settledCount: 2,
     startedAtMs: Date.now() - 60_000,
     cardOutcomes: [
-      { cardIdx: 0, p0Pnl: "500000", p1Pnl: "-500000" },
-      { cardIdx: 1, p0Pnl: "-250000", p1Pnl: "250000" },
+      { cardIdx: 0, p0Pnl: "50000000", p1Pnl: "-50000000" },
+      { cardIdx: 1, p0Pnl: "-30000000", p1Pnl: "30000000" },
     ],
     swipes: [
       {
@@ -139,24 +139,33 @@ export function MyMatchTile() {
   }, [address, demo])
 
   // Demo: synthetic oracle-tick stream so the chart visibly moves
-  // without a real game in flight. Drives a slow sine wave plus light
-  // noise — looks like an actual price chart, not a random twitch.
+  // without a real game in flight. Ornstein-Uhlenbeck process: each
+  // tick the deviation random-walks with normal noise and is gently
+  // pulled back toward zero — the standard mean-reverting model for
+  // bounded asset prices. Ticks at 2 s to match the server's real
+  // `oracleTickIntervalMs`; the chart's client-side easing fills in
+  // motion between ticks.
   useEffect(() => {
     if (!demo) return
     const strike = BigInt(DEMO_STRIKE)
-    const start = performance.now()
+    let dev = 0 // current deviation from strike, in 1e9 raw units
+    const sigma = 28_000_000 // per-tick stddev (~$0.028 on quantity 1)
+    const kappa = 0.04 // mean-reversion strength
+    const cap = 600_000_000 // soft clamp
     const interval = setInterval(() => {
-      const t = (performance.now() - start) / 1000
-      // Two stacked sines for organic-feeling motion, amp ~0.5 on 1e9 scale.
-      const wave =
-        Math.sin(t * 0.6) * 350_000_000 + Math.sin(t * 1.7 + 1.2) * 120_000_000
-      const noise = (Math.random() - 0.5) * 30_000_000
-      const forward = strike + BigInt(Math.round(wave + noise))
+      // Box-Muller normal draw.
+      const u1 = Math.max(Math.random(), 1e-9)
+      const u2 = Math.random()
+      const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2)
+      dev = dev * (1 - kappa) + z * sigma
+      if (dev > cap) dev = cap
+      if (dev < -cap) dev = -cap
+      const forward = strike + BigInt(Math.round(dev))
       setTicks((prev) => ({
         ...prev,
         "demo-oracle-2": { spot: forward.toString(), forward: forward.toString() },
       }))
-    }, 60)
+    }, 2000)
     return () => clearInterval(interval)
   }, [demo])
 
@@ -288,6 +297,7 @@ interface Boundary {
 
 const SAMPLE_INTERVAL_MS = 100
 const MAX_SAMPLES = 600 // ~60 s rolling window at 10 Hz
+const WINDOW_MS = 60_000 // x-axis visible window
 const MIN_AMP_MICRO = 500_000n // 0.5 dUSDC y-axis floor
 
 /**
@@ -334,13 +344,56 @@ function useChartHistory(
   ticks: Record<string, Tick>,
 ): { samples: Sample[]; boundaries: Boundary[] } {
   const pickRef = useRef(pick)
-  const ticksRef = useRef(ticks)
+  // Latest raw tick values from the server (the target).
+  const targetTicksRef = useRef(ticks)
+  // Eased version of `targetTicksRef` updated each animation frame —
+  // this is what the sampler reads so the line continuously slides
+  // between sparse server ticks instead of stepping every 2 s.
+  const smoothedTicksRef = useRef<Record<string, Tick>>({})
   useEffect(() => {
     pickRef.current = pick
   }, [pick])
   useEffect(() => {
-    ticksRef.current = ticks
+    targetTicksRef.current = ticks
   }, [ticks])
+
+  // Continuous RAF loop: every frame, ease each smoothed forward
+  // toward its target. ~600 ms time-constant — reaches ~96 % of target
+  // in 2 s, matching the server's `ORACLE_TICK_INTERVAL_MS` cadence.
+  useEffect(() => {
+    let raf = 0
+    let last = performance.now()
+    const step = (now: number) => {
+      const dt = Math.min(now - last, 100)
+      last = now
+      const alpha = 1 - Math.exp(-dt / 600)
+      const target = targetTicksRef.current
+      const smoothed = smoothedTicksRef.current
+      for (const id in target) {
+        const t = target[id]
+        const cur = smoothed[id]
+        if (!cur) {
+          smoothed[id] = t
+          continue
+        }
+        const targetF = Number(t.forward)
+        const curF = Number(cur.forward)
+        const diff = targetF - curF
+        if (Math.abs(diff) < 1) {
+          smoothed[id] = t
+          continue
+        }
+        const newF = curF + diff * alpha
+        smoothed[id] = {
+          spot: t.spot,
+          forward: BigInt(Math.round(newF)).toString(),
+        }
+      }
+      raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [])
 
   // History is tagged with the duelId it belongs to. When the active
   // duel changes, render derives empty arrays until the next sampling
@@ -385,7 +438,7 @@ function useChartHistory(
     const interval = setInterval(() => {
       const cur = pickRef.current
       if (!cur) return
-      const ts = ticksRef.current
+      const ts = smoothedTicksRef.current
       const p0 = currentRunningPnl(cur, "p0", ts)
       const p1 = currentRunningPnl(cur, "p1", ts)
       const sample: Sample = { t: Date.now(), p0, p1 }
@@ -433,11 +486,11 @@ function StreamingPnlChart({
   oppAddress: string
 }) {
   const W = 320
-  const H = 132
-  const ml = 36
+  const H = 140
+  const ml = 50
   const mr = 12
-  const mt = 8
-  const mb = 22
+  const mt = 10
+  const mb = 28
   const iw = W - ml - mr
   const ih = H - mt - mb
 
@@ -446,7 +499,6 @@ function StreamingPnlChart({
 
   const { ampNum, xDomain } = useMemo(() => {
     let absMax = 0n
-    let tMin = Number.POSITIVE_INFINITY
     let tMax = Number.NEGATIVE_INFINITY
     for (const s of samples) {
       const y = youOf(s)
@@ -455,18 +507,16 @@ function StreamingPnlChart({
       const oa = o < 0n ? -o : o
       if (ya > absMax) absMax = ya
       if (oa > absMax) absMax = oa
-      if (s.t < tMin) tMin = s.t
       if (s.t > tMax) tMax = s.t
     }
     // 20% headroom so the live head doesn't kiss the top/bottom rails.
     const padded = ((absMax > MIN_AMP_MICRO ? absMax : MIN_AMP_MICRO) * 12n) / 10n
-    // Placeholder domain when there's no data — scales aren't rendered
-    // in that branch anyway (we gate on `hasData`).
-    const domain: [number, number] = !isFinite(tMin)
+    // Fixed-width 60 s window anchored to the right edge — the chart
+    // scrolls continuously instead of growing leftward until full.
+    // Placeholder domain when there's no data; not rendered.
+    const domain: [number, number] = !isFinite(tMax)
       ? [0, 1]
-      : tMin === tMax
-        ? [tMin - 1000, tMax]
-        : [tMin, tMax]
+      : [tMax - WINDOW_MS, tMax]
     return { ampNum: Number(padded), xDomain: domain }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [samples, myIsP0])
@@ -493,7 +543,7 @@ function StreamingPnlChart({
   const hasData = samples.length > 0
 
   return (
-    <div className="relative rounded bg-black/25 px-1 py-1">
+    <div className="crt-screen relative rounded bg-black/25 px-1 py-1">
       {!hasData && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center">
           <p className="text-[10px] tracking-[0.18em] text-white/55 uppercase">
@@ -507,9 +557,9 @@ function StreamingPnlChart({
         role="img"
         aria-label="match PnL over time"
       >
-        <text x={ml - 6} y={mt + 4} fill="#ffffffaa" fontSize="9" textAnchor="end" fontFamily="monospace">{yTopLabel}</text>
-        <text x={ml - 6} y={mt + yZero + 3} fill="#ffffffcc" fontSize="9" textAnchor="end" fontFamily="monospace">$0.00</text>
-        <text x={ml - 6} y={H - mb + 3} fill="#ffffffaa" fontSize="9" textAnchor="end" fontFamily="monospace">{yBotLabel}</text>
+        <text x={ml - 6} y={mt} fill="#ffffffaa" fontSize="11" textAnchor="end" dominantBaseline="hanging">{yTopLabel}</text>
+        <text x={ml - 6} y={mt + yZero} fill="#ffffffcc" fontSize="11" textAnchor="end" dominantBaseline="middle">$0</text>
+        <text x={ml - 6} y={H - mb} fill="#ffffffaa" fontSize="11" textAnchor="end" dominantBaseline="auto">{yBotLabel}</text>
 
         <Group left={ml} top={mt}>
           <line x1={0} x2={iw} y1={0} y2={0} stroke="#ffffff20" strokeWidth={1} />
@@ -522,12 +572,36 @@ function StreamingPnlChart({
             return (
               <g key={`${b.idx}-${b.t}`} opacity={0.65}>
                 <line x1={x} x2={x} y1={0} y2={ih} stroke="#ffffff40" strokeDasharray="2 2" />
-                <text x={x} y={ih + 10} fill="#ffffff80" fontSize="9" textAnchor="middle" fontFamily="monospace">
+                <text x={x} y={ih + 12} fill="#ffffff80" fontSize="11" textAnchor="middle" dominantBaseline="hanging">
                   c{b.idx + 1}
                 </text>
               </g>
             )
           })}
+
+          {/* Relative time ticks: -60s, -30s, now. Anchor each label
+              so the text never crosses the inner-chart edge — the
+              leftmost would otherwise extend past x=0 into the y-axis
+              gutter and get visually clipped. */}
+          {hasData &&
+            (
+              [
+                { ago: 60_000, anchor: "start" as const },
+                { ago: 30_000, anchor: "middle" as const },
+                { ago: 0, anchor: "end" as const },
+              ]
+            ).map(({ ago, anchor }) => {
+              const tx = xDomain[1] - ago
+              const x = xScale(tx)
+              return (
+                <g key={ago} opacity={0.55}>
+                  <line x1={x} x2={x} y1={ih} y2={ih + 3} stroke="#ffffff55" />
+                  <text x={x} y={ih + 18} fill="#ffffff70" fontSize="11" textAnchor={anchor} dominantBaseline="hanging">
+                    {ago === 0 ? "now" : `-${ago / 1000}s`}
+                  </text>
+                </g>
+              )
+            })}
 
           {hasData && (
             <>
@@ -591,11 +665,11 @@ function StreamingPnlChart({
 function fmtUsd(micro: bigint): string {
   const sign = micro < 0n ? "-" : ""
   const abs = micro < 0n ? -micro : micro
-  return `${sign}$${(Number(abs) / 1_000_000).toFixed(2)}`
+  return `${sign}$${Math.round(Number(abs) / 1_000_000)}`
 }
 
 function fmtSigned(micro: bigint): string {
   const sign = micro < 0n ? "-" : micro > 0n ? "+" : ""
   const abs = micro < 0n ? -micro : micro
-  return `${sign}$${(Number(abs) / 1_000_000).toFixed(2)}`
+  return `${sign}$${Math.round(Number(abs) / 1_000_000)}`
 }
