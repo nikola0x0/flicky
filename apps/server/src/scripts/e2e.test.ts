@@ -124,6 +124,32 @@ async function findSettledBtcOracle(client: SuiJsonRpcClient): Promise<OracleSVI
   return null
 }
 
+/**
+ * Resolve an address's PredictManager object id via the
+ * `predict_manager::PredictManagerCreated` events filtered by owner.
+ * Returns null when no manager exists for that owner — caller skips.
+ */
+async function findManagerObject(
+  client: SuiJsonRpcClient,
+  owner: string,
+): Promise<string | null> {
+  const evts = await client.queryEvents({
+    query: {
+      MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::predict_manager::PredictManagerCreated`,
+    },
+    limit: 50,
+    order: "descending",
+  })
+  const normalized = normalizeSuiAddress(owner).toLowerCase()
+  for (const e of evts.data) {
+    const p = e.parsedJson as { manager_id: string; owner: string }
+    if (normalizeSuiAddress(p.owner).toLowerCase() === normalized) {
+      return normalizeSuiObjectId(p.manager_id)
+    }
+  }
+  return null
+}
+
 const describeFn = hasAdmin ? describe : describe.skip
 
 describeFn("e2e duel against testnet", () => {
@@ -203,7 +229,11 @@ describeFn("e2e duel against testnet", () => {
       tx.moveCall({
         target: `${packageId}::duel::create_duel`,
         typeArguments: ["0x2::sui::SUI"],
-        arguments: [stake, tx.pure.vector("u8", Array.from(hash))],
+        arguments: [
+          stake,
+          tx.pure.vector("u8", Array.from(hash)),
+          tx.pure.u64(BigInt(cards.length)),
+        ],
       })
       const res = await client.signAndExecuteTransaction({
         transaction: tx,
@@ -278,85 +308,86 @@ describeFn("e2e duel against testnet", () => {
   )
 
   // Why no `record_swipe` step:
-  // 1. The new contract requires the player to have minted a Predict
-  //    position first (the swipe takes a `&PredictManager` reference and
-  //    a `quantity` that's verified via `predict_manager::position`).
-  // 2. Setting up a real PredictManager + dUSDC funding + mint inside an
-  //    e2e here would more than double the test's footprint. That whole
-  //    path is the FE's job in production.
-  // We instead skip ahead to settle_card + finalize on an unsweped duel
-  // and assert the tie-refund path.
+  // 1. The contract requires the player to have minted a Predict position
+  //    first (`record_swipe` takes a `&PredictManager` reference and
+  //    verifies `position(key) >= quantity`).
+  // 2. Setting up a real PredictManager + dUSDC funding + mint here would
+  //    more than double the test's footprint. That path is exercised by
+  //    the FE in the playground.
+  // We instead skip ahead to `settle_card × deck_size` against the
+  // already-settled oracle and verify the per-card settle state.
+  //
+  // Why no `finalize` step either: finalize only completes when (a) both
+  // players swiped all `deck_size` cards (covered in Move unit tests with
+  // a mocked-active oracle) or (b) the 10-minute swipe window has elapsed.
+  // Forcing (b) inside a test means real-clock waiting; the Move unit suite
+  // covers the time-expired branches directly.
 
   test(
-    "legacy settle_card and finalize abort with EDeprecated, finalize_v2 aborts with EAllCardsNotSettled",
+    "settle_card × deck_size succeeds against a settled oracle",
     async () => {
       if (!oracle || !duelId) return
-
-      // 1. Verify legacy settle_card aborts with EDeprecated (26)
-      try {
-        const tx = new Transaction()
+      // One settle_card per card. All cards reference the same settled
+      // oracle here, so we can re-issue the same oracle ref in each call.
+      // Anti-replay reads `position(key)` on the two managers — since
+      // neither player ever minted, position is 0 < swipe.quantity. But
+      // there's also no swipe in the slot, so `score_staked_card` returns
+      // (0, 0) early via the `is_none()` short-circuit. Net: each call
+      // ticks `cards_settled[i] = true` and emits CardSettled with zeros.
+      // Note: settle_card asserts `manager.owner() == sender` is NOT
+      // required — only `record_swipe` enforces that. settle_card just
+      // reads the manager's position. So passing dummy managers (admin's
+      // own object) works as long as those objects exist. We use admin's
+      // own PredictManager if it exists, otherwise we skip.
+      const adminManagerId = await findManagerObject(client, adminAddr)
+      const challengerManagerId = await findManagerObject(client, challengerAddr)
+      if (!adminManagerId || !challengerManagerId) {
+        console.log(
+          "no PredictManagers for admin+challenger — skipping settle_card sub-test",
+        )
+        return
+      }
+      const tx = new Transaction()
+      for (let i = 0; i < revealCards.length; i++) {
         tx.moveCall({
           target: `${packageId}::duel::settle_card`,
           typeArguments: ["0x2::sui::SUI"],
           arguments: [
             tx.object(duelId),
+            tx.object(adminManagerId),
+            tx.object(challengerManagerId),
             tx.object(oracle.id),
-            tx.pure.u64(0n),
+            tx.pure.u64(BigInt(i)),
           ],
         })
-        await client.signAndExecuteTransaction({
-          transaction: tx,
-          signer: admin,
-        })
-        expect(true).toBe(false) // should have aborted
-      } catch (err: any) {
-        const errMsg = err.message ?? String(err)
-        expect(errMsg).toContain("MoveAbort")
-        expect(errMsg).toContain("26") // EDeprecated = 26
-        console.log("Verified legacy settle_card aborts with EDeprecated (26)")
       }
+      const res = await client.signAndExecuteTransaction({
+        transaction: tx,
+        signer: admin,
+        options: { showEffects: true },
+      })
+      expect(res.effects?.status.status).toBe("success")
+      await client.waitForTransaction({ digest: res.digest })
 
-      // 2. Verify legacy finalize aborts with EDeprecated (26)
-      try {
-        const tx = new Transaction()
-        tx.moveCall({
-          target: `${packageId}::duel::finalize`,
-          typeArguments: ["0x2::sui::SUI"],
-          arguments: [tx.object(duelId)],
-        })
-        await client.signAndExecuteTransaction({
-          transaction: tx,
-          signer: admin,
-        })
-        expect(true).toBe(false) // should have aborted
-      } catch (err: any) {
-        const errMsg = err.message ?? String(err)
-        expect(errMsg).toContain("MoveAbort")
-        expect(errMsg).toContain("26") // EDeprecated = 26
-        console.log("Verified legacy finalize aborts with EDeprecated (26)")
+      // Verify on-chain: settled_count == deck_size, every cards_settled[i] true.
+      const after = await client.getObject({
+        id: duelId,
+        options: { showContent: true },
+      })
+      if (after.data?.content?.dataType !== "moveObject") {
+        throw new Error("duel object disappeared after settle")
       }
-
-      // 3. Verify finalize_v2 aborts with EAllCardsNotSettled (11) because the 10-minute window hasn't expired
-      try {
-        const tx = new Transaction()
-        tx.moveCall({
-          target: `${packageId}::duel::finalize_v2`,
-          typeArguments: ["0x2::sui::SUI"],
-          arguments: [tx.object(duelId), tx.object("0x6")],
-        })
-        await client.signAndExecuteTransaction({
-          transaction: tx,
-          signer: admin,
-        })
-        expect(true).toBe(false) // should have aborted
-      } catch (err: any) {
-        const errMsg = err.message ?? String(err)
-        expect(errMsg).toContain("MoveAbort")
-        expect(errMsg).toContain("11") // EAllCardsNotSettled = 11
-        console.log("Verified finalize_v2 aborts with EAllCardsNotSettled (11) before timeout")
+      const fields = after.data.content.fields as {
+        settled_count: string
+        cards_settled: boolean[]
       }
+      expect(BigInt(fields.settled_count)).toBe(BigInt(revealCards.length))
+      expect(fields.cards_settled.every((b) => b === true)).toBe(true)
+      console.log(
+        `settle_card × ${revealCards.length} OK · digest ${res.digest.slice(0, 10)}…`,
+      )
     },
-    60_000,
+    120_000,
   )
 
   afterAll(async () => {

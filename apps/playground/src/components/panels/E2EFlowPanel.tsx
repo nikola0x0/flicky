@@ -31,11 +31,12 @@ import { CONFIG } from '../../config'
 import { client } from '../../lib/client'
 import {
   txCreateDuel,
-  txFinalizeDuelMulti,
+  txFinalizeDuel,
   txFinalizeDuelTestOneOracle,
   txJoinDuel,
   txRecordSwipe,
   txRevealDeck,
+  txSettleCard,
 } from '../../lib/duel-txb'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -304,7 +305,7 @@ function parseMoveAbort(msg: string): {
     7: { label: 'ECardIndexOOB', hint: 'Card index out of range (must be 0-4).' },
     8: { label: 'EOracleMismatch', hint: 'Oracle id doesn\'t match the card\'s recorded oracle.' },
     9: { label: 'EOutOfTurn', hint: 'You\'re swiping the wrong card next — chain enforces order 0→4.' },
-    11: { label: 'EAllCardsNotSettled', hint: 'Finalize precondition not met — both players must complete all 5 swipes (or the swipe window must expire for a forfeit/refund). For finalize_multi, all 5 oracles must also be settled.' },
+    11: { label: 'EAllCardsNotSettled', hint: 'Finalize precondition not met — both players have completed all swipes but at least one card is still unsettled. Each card needs its own settle_card(oracle, idx) before finalize can run.' },
     13: { label: 'EZeroStake', hint: 'Stake amount must be > 0.' },
     14: { label: 'EOracleNotLive', hint: 'Oracle missing settlement_price. For production finalize, wait for the oracle to settle — or use the test finalize (spot-price fallback).' },
     15: { label: 'EInvalidDeckHash', hint: 'Deck hash must be exactly 32 bytes (sha2_256).' },
@@ -1127,8 +1128,16 @@ export default function E2EFlowPanel({ onOutput }: Props) {
         const [stake] = tx.splitCoins(primary, [tx.pure.u64(stakeAmount)])
         // Use the backend's hash directly — it's already BCS(cards) →
         // sha2_256, and committing exactly that guarantees the keeper's
-        // reveal succeeds without FE-side drift.
-        txCreateDuel(tx, stake, hexToBytes(deck.hash), DUSDC_COIN_TYPE)
+        // reveal succeeds without FE-side drift. `deck.cards.length`
+        // becomes the on-chain `deck_size` (bounded [1, 20] by the
+        // contract); reveal will assert this equals the cards vector.
+        txCreateDuel(
+          tx,
+          stake,
+          hexToBytes(deck.hash),
+          deck.cards.length,
+          DUSDC_COIN_TYPE,
+        )
         const res = await signAndExecute({
           transaction: tx,
         })
@@ -1191,20 +1200,22 @@ export default function E2EFlowPanel({ onOutput }: Props) {
     }
   }, [duelId])
 
-  // ─── Finalize (one-shot; keeper bypass) ──────────────────────────────
+  // ─── Finalize (two-phase; keeper bypass) ─────────────────────────────
   //
-  // The new contract has NO per-card settle step. `finalize*` reads the
-  // oracle(s), scores all 5 cards inline, compares aggregate PnL
-  // (val0 = p0_payout + p1_premium  vs  val1 = p1_payout + p0_premium),
-  // and pays the whole side-pot to the winner — all in one tx.
+  // The contract finalizes in two phases:
+  //   1. `settle_card(card_idx, &oracle)` × `deck_size` — once each card's
+  //      oracle has published `settlement_price`, anyone calls this to
+  //      score both players' swipes on that card and accumulate per-card
+  //      payout/premium onto the Duel. Each call emits `CardSettled`.
+  //   2. `finalize(duel)` — compares aggregate PnL (val0 = p0_payout +
+  //      p1_premium  vs  val1 = p1_payout + p0_premium) and pays the
+  //      side-pot to the winner.
   //
-  //   • Test mode (finalize_test_one_oracle): one oracle's price applied
-  //     to all 5 cards. Uses settlement_price if settled, else falls back
-  //     to the live spot_price — so you can finalize immediately without
-  //     waiting for any oracle to expire. No managers, no anti-replay.
-  //   • Production (finalize_multi): each card scored against its own
-  //     oracle's settlement_price; both managers passed for anti-replay.
-  //     Requires all 5 oracles settled.
+  // Production path (`stepFinalize`) chains all `deck_size` settle_card
+  // calls + finalize into ONE PTB so the whole resolution is atomic.
+  // Test path (`stepFinalizeTest`) bypasses per-card settle: applies one
+  // oracle's spot/settlement price to every card regardless of mismatch,
+  // skips anti-replay — useful for demos where oracles haven't expired.
   const stepFinalizeTest = useCallback(
     () =>
       runStep('result', async () => {
@@ -1218,7 +1229,7 @@ export default function E2EFlowPanel({ onOutput }: Props) {
         onOutput({
           type: 'success',
           title: 'duel::finalize_test_one_oracle',
-          data: 'scored 5 cards on spot/settlement price · side-pot paid to winner',
+          data: `scored ${deck.cards.length} cards on one oracle's spot/settlement · side-pot paid to winner`,
           txDigest: res.digest,
         })
         await refreshFromBackend()
@@ -1226,34 +1237,37 @@ export default function E2EFlowPanel({ onOutput }: Props) {
     [duelId, deck, runStep, signAndExecute, onOutput, refreshFromBackend],
   )
 
-  const stepFinalizeMulti = useCallback(
+  const stepFinalize = useCallback(
     () =>
       runStep('result', async () => {
         if (!duelId || !deck) throw new Error('no duel/deck')
         if (!roomState?.creator || !isChallengerJoined(roomState))
-          throw new Error('need both players resolved for finalize_multi')
-        if (deck.cards.length !== 5) throw new Error('deck must have 5 cards')
+          throw new Error('need both players resolved for finalize')
+        if (deck.cards.length === 0)
+          throw new Error('deck has no cards (not yet revealed)')
         const [p0Mgr, p1Mgr] = await Promise.all([
           findManagerForOwner(roomState.creator),
           findManagerForOwner(roomState.challenger),
         ])
         if (!p0Mgr || !p1Mgr)
-          throw new Error('could not resolve both players\' PredictManagers')
-        const oracleIds = deck.cards.map((c) => c.oracle_id) as [
-          string,
-          string,
-          string,
-          string,
-          string,
-        ]
+          throw new Error("could not resolve both players' PredictManagers")
+        // Single PTB: settle every card (each with its own oracle) then
+        // finalize. The contract reads accumulated p{0,1}_payout/premium
+        // fields filled by settle_card to pick the winner. If any oracle
+        // hasn't published settlement_price yet, the matching settle_card
+        // aborts EOracleNotLive — surface that as a normal error so the
+        // user knows to wait or use the test path.
         const tx = new Transaction()
-        txFinalizeDuelMulti(tx, duelId, p0Mgr, p1Mgr, oracleIds, DUSDC_COIN_TYPE)
+        deck.cards.forEach((c, idx) => {
+          txSettleCard(tx, duelId, p0Mgr, p1Mgr, c.oracle_id, idx, DUSDC_COIN_TYPE)
+        })
+        txFinalizeDuel(tx, duelId, DUSDC_COIN_TYPE)
         const res = await signAndExecute({ transaction: tx })
         await client.waitForTransaction({ digest: res.digest })
         onOutput({
           type: 'success',
-          title: 'duel::finalize_multi',
-          data: 'scored 5 cards on per-oracle settlement · side-pot paid to winner',
+          title: 'duel::settle_card × N + duel::finalize',
+          data: `settled ${deck.cards.length} cards on per-oracle settlement · side-pot paid to winner`,
           txDigest: res.digest,
         })
         await refreshFromBackend()
@@ -2312,20 +2326,21 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                         : '⚗️ Finalize (test · spot price)'}
                     </button>
                     <button
-                      onClick={stepFinalizeMulti}
+                      onClick={stepFinalize}
                       disabled={busyStep === 'result' || !deck}
                       className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-40"
-                      title="finalize_multi — production path. Scores each card against its own oracle's settlement_price; requires all 5 oracles settled + resolves both players' PredictManagers for anti-replay."
+                      title="settle_card × deck_size + finalize — production path. One PTB scores each card against its own oracle's settlement_price (anti-replay via both PredictManagers), then distributes the pot."
                     >
                       {busyStep === 'result'
                         ? 'Finalizing…'
-                        : '🏁 Finalize (production · 5 oracles)'}
+                        : `🏁 Finalize (production · ${deck?.cards.length ?? '?'} oracles)`}
                     </button>
                   </div>
                   <div className="text-[9px] text-gray-500">
-                    Production requires all 5 oracles to have settled. If they
-                    haven't expired yet, use the test button — it scores on the
-                    current spot price so the demo never blocks.
+                    Production requires every card's oracle to have settled
+                    (settle_card aborts EOracleNotLive otherwise). If they
+                    haven't expired yet, use the test button — it skips
+                    per-card settle and scores on a single live spot price.
                   </div>
                 </div>
               )

@@ -70,6 +70,9 @@ function makeDuelObject(overrides: Partial<Record<string, unknown>> = {}): SuiOb
         fields: {
           id: { id: "0xabc000000000000000000000000000000000000000000000000000000000beef" },
           status: "2",
+          tier: "1",
+          deck_size: "5",
+          deck_hash: new Array(32).fill(0xab),
           cards: Array.from({ length: 5 }, (_, i) => ({
             type: `${CONFIG.packageId}::duel::Card`,
             fields: {
@@ -81,19 +84,27 @@ function makeDuelObject(overrides: Partial<Record<string, unknown>> = {}): SuiOb
           challenger: "0xbbbbbb",
           p0_stake: { type: "0x2::balance::Balance<0x2::sui::SUI>", fields: { value: "10000000" } },
           p1_stake: { type: "0x2::balance::Balance<0x2::sui::SUI>", fields: { value: "10000000" } },
-          p0_score: "3000000000",
-          p1_score: "2500000000",
+          // Per-card settle state — card 0 settled @ 80_000_001 / 1e9.
+          cards_settled: [true, false, false, false, false],
+          card_settlement_prices: ["80000001000000000", "0", "0", "0", "0"],
+          settled_count: "1",
+          // Net PnL accumulators: p0 won card 0, p1 lost it.
+          p0_payout: "20000",
+          p0_premium: "8000",
+          p1_payout: "0",
+          p1_premium: "12000",
           p0_next_card_idx: "2",
           p1_next_card_idx: "1",
-          p0_last_swipe_or_start_ms: "100",
-          p1_last_swipe_or_start_ms: "150",
-          settled_count: "1",
           started_at_ms: "1000",
-          card_settlements: ["80000001000000000", null, null, null, null],
           p0_swipes: [
             {
               type: `${CONFIG.packageId}::duel::Swipe`,
-              fields: { is_up: true, p_swiped: "499000000", decide_time_ms: "2000" },
+              fields: {
+                is_up: true,
+                quantity: "20000",
+                premium: "8000",
+                p_swiped: "400000000",
+              },
             },
             null,
             null,
@@ -112,19 +123,21 @@ describe("parseDuel", () => {
   test("parses every top-level field", () => {
     const d = parseDuel(makeDuelObject())
     expect(d.status).toBe("ACTIVE")
+    expect(d.tier).toBe(1)
     expect(d.creator).toBe("0xaaaaaa")
     expect(d.challenger).toBe("0xbbbbbb")
     expect(d.stakeCoinType).toBe("0x2::sui::SUI")
+    expect(d.deckSize).toBe(5n)
     expect(d.p0Stake).toBe(10_000_000n)
     expect(d.p1Stake).toBe(10_000_000n)
-    expect(d.p0Score).toBe(3_000_000_000n)
-    expect(d.p1Score).toBe(2_500_000_000n)
+    expect(d.p0Payout).toBe(20_000n)
+    expect(d.p0Premium).toBe(8_000n)
+    expect(d.p1Payout).toBe(0n)
+    expect(d.p1Premium).toBe(12_000n)
     expect(d.p0NextCardIdx).toBe(2n)
     expect(d.p1NextCardIdx).toBe(1n)
     expect(d.settledCount).toBe(1n)
     expect(d.startedAtMs).toBe(1000n)
-    expect(d.p0LastSwipeOrStartMs).toBe(100n)
-    expect(d.p1LastSwipeOrStartMs).toBe(150n)
   })
 
   test("parses 5 cards with strikes", () => {
@@ -134,18 +147,20 @@ describe("parseDuel", () => {
     expect(d.cards[4].strike).toBe(80_000_000_000_000n + 4_000_000_000n)
   })
 
-  test("parses card_settlements as Option (string | null)", () => {
+  test("parses per-card settle state (cardsSettled + cardSettlementPrices)", () => {
     const d = parseDuel(makeDuelObject())
-    expect(d.cardSettlements[0]).toBe(80_000_001_000_000_000n)
-    expect(d.cardSettlements[1]).toBeNull()
+    expect(d.cardsSettled).toEqual([true, false, false, false, false])
+    expect(d.cardSettlementPrices[0]).toBe(80_000_001_000_000_000n)
+    expect(d.cardSettlementPrices[1]).toBe(0n)
   })
 
   test("parses p0/p1 swipes Option array", () => {
     const d = parseDuel(makeDuelObject())
     expect(d.p0Swipes[0]).toEqual({
       isUp: true,
-      pSwiped: 499_000_000n,
-      decideTimeMs: 2_000n,
+      quantity: 20_000n,
+      premium: 8_000n,
+      pSwiped: 400_000_000n,
     })
     expect(d.p0Swipes[1]).toBeNull()
     expect(d.p1Swipes.every((s) => s === null)).toBe(true)
@@ -297,12 +312,14 @@ describe("PTB builders", () => {
     expect(targets[0]).toMatch(/::duel::record_swipe$/)
   })
 
-  test("buildFinalizeTx emits exactly one duel::finalize_multi call", () => {
+  test("buildFinalizeTx emits N settle_card calls + exactly one finalize", () => {
     const tx = buildFinalizeTx(duelId, finalizeCards, "0x10", "0x11")
     const targets = moveCallTargets(tx)
-    const finalizes = targets.filter((t) => t.endsWith("::duel::finalize_multi"))
-    expect(targets).toHaveLength(1)
+    const settles = targets.filter((t) => t.endsWith("::duel::settle_card"))
+    const finalizes = targets.filter((t) => t.endsWith("::duel::finalize"))
+    expect(settles).toHaveLength(finalizeCards.length)
     expect(finalizes).toHaveLength(1)
+    expect(targets).toHaveLength(finalizeCards.length + 1)
   })
 
   test("builders bake the configured package address into the call target", () => {

@@ -156,7 +156,7 @@ export interface CardOutcomeInput {
  * oracle has settled, compute `upWon` (strict `>`, matching the
  * contract) and signed-decimal per-player PnL. Cards whose oracle
  * hasn't settled yet are omitted — the array grows as settlements
- * roll in, even before `finalize_multi` lands. Pure / synchronous so
+ * roll in, even before `settle_card` / `finalize` land. Pure / synchronous so
  * it's trivially testable.
  */
 export function computeCardOutcomes(input: CardOutcomeInput): CardOutcome[] {
@@ -344,7 +344,16 @@ export class DuelIndexer {
       `${packageId}::duel::DuelJoined`,
       `${packageId}::duel::DeckRevealed`,
       `${packageId}::duel::SwipeRecorded`,
+      // CardSettled fires once per `settle_card` call. Tracking it gives
+      // WS subscribers a live "card N settled" push instead of waiting
+      // for the eventual DuelFinalized event.
+      `${packageId}::duel::CardSettled`,
       `${packageId}::duel::DuelFinalized`,
+      // DuelRefunded / DuelForfeited terminate a duel without going
+      // through `finalize`. Track so the DB mirror flips status to
+      // COMPLETE and WS subscribers see the terminal state.
+      `${packageId}::duel::DuelRefunded`,
+      `${packageId}::duel::DuelForfeited`,
     ]
   }
 
@@ -422,18 +431,18 @@ export class DuelIndexer {
             }
           }
         }
-        // DuelFinalized — the new one-shot event carries `winner` +
-        // `settlement_price`. We surface the price so `refreshDuel` can
-        // reconstruct per-card outcomes (the object no longer stores
-        // per-card settlements), and (winner, creator, challenger) so MMR
-        // can attribute the result. creator/challenger aren't in the
-        // event — pull from the mirror (written by DuelCreated).
+        // DuelFinalized carries `winner` + `primary_settlement_price`
+        // (echo of card 0's settlement, as a proof anchor). We surface
+        // the price + (winner, creator, challenger) so MMR can attribute
+        // the result. creator/challenger aren't in the event — pull from
+        // the mirror (written by DuelCreated). Per-card detail lives in
+        // separate CardSettled events.
         if (eventType.endsWith("::DuelFinalized") && p && id) {
           const duelId = normalizeSuiObjectId(id)
           const winner = p.winner as string | undefined
           if (winner) {
             const settlementPrice =
-              (p.settlement_price as string | undefined) ?? null
+              (p.primary_settlement_price as string | undefined) ?? null
             const row = (() => {
               try {
                 return getDuel(duelId)

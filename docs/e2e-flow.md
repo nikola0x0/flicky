@@ -9,22 +9,23 @@ Read alongside `docs/oracle-selection.md` (which picks the OracleSVI
 the duel pins to) and `docs/prd.md` (which states the product
 requirements being satisfied).
 
-> **⚠️ Divergence from the current PRD direction.** This doc describes
-> the code as **currently shipped**. The locked PRD direction (see
-> `docs/prd.md`) has since diverged from it on several mechanics — the
-> as-built behavior described below is being replanned to match the
-> new spec. Treat sections below as "what the code does today," not
-> "what the product is targeting." Key deltas:
+> **✓ Re-aligned with the contract refactor (2026-05-29).** This doc was
+> previously diverged from the PRD on settlement mechanics. The contract
+> rewrite landed those updates:
 >
-> - **Stake tiers:** doc reflects 1 / 5 / 10 dUSDC; new spec is **1 / 3 / 5 / 10 dUSDC** (4 tiers), all gated by `PredictManager` balance ≥ 5 dUSDC.
-> - **Scoring:** doc describes odds-weighted score (`1/p_swiped × speed_multiplier`) computed in `duel::settle_card` from a snapshotted `p_swiped` + `decide_time_ms`. New spec replaces this with **real PnL** (Σ `predict_redeem − premium_paid`) across the 5 Predict positions. `compute_card_score`, the speed multiplier, and the `Swipe.p_swiped` / `decide_time_ms` fields are legacy.
-> - **Card oracles:** doc describes one oracle pinned per duel (`findLatestOracleSvi` → `argmin(expiry)`). New spec picks the **5 nearest oracle resolutions strictly >10 min out**, one per card — each card carries its own expiry. See the banner in `docs/oracle-selection.md`.
-> - **Free tier vs Practice:** doc describes a Free PvP tier sharing matchmaking with virtual positions. New spec replaces this with **Practice Mode = solo vs. a bot** (no PvP queue, no on-chain state). The on-chain "free duel" path (`Duel<SUI>`, virtual swipes via `record_swipe`-only) becomes legacy.
-> - **Swap module:** new spec adds a fixed-rate **1 SUI ↔ 10 dUSDC** in-app swap (`apps/contracts/sources/swap.move`) backing the Deposit screen. Not yet shipped — this doc's Phase B describes the dUSDC-only top-up path.
-> - **Predict Manager bootstrap:** doc treats it as a separate user-initiated step. New spec **sponsors** manager creation on first sign-in (via Enoki + sponsored gas) so the player never signs that tx separately.
-> - **Lockup phase:** doc describes a single "wait for `now > oracle.expiry`". New spec waits per-card — `duel::settle_duel` only runs once all 5 cards have settled.
+> - **Scoring** — now real PnL: `Swipe { is_up, quantity, premium, p_swiped }` snapshotted on-chain by `predict::get_trade_amounts`. Per-card payout = correct? quantity : 0; per-card premium = swipe.premium. `settle_card(card_idx, &oracle)` accumulates these onto the Duel. `finalize` compares aggregate `val0 = p0_payout + p1_premium` vs `val1 = p1_payout + p0_premium`. No more speed multiplier or `decide_time_ms`.
+> - **Card oracles** — each `Card { oracle_id, strike }` pins its OWN oracle. A 5-card deck spans 5 different oracles with 5 different expiries. `settle_card` is called once per card.
+> - **Deckmaster amplitude** — backend now probes ±0.5%–±20% in parallel per oracle and picks the most aggressive viable offset. Deck-level sign balance ensures every duel mixes UP-favoring + DOWN-favoring strikes (never all one side).
+> - **Variable deck size** — `deck_size` chosen at create-time, bounded `[1, 20]`. Default 5.
 >
-> The Duel object's swipe ordering, commit-reveal, escrow / payout half, and the keeper-PTB shape (`settle × 5` + `redeem × N` + `finalize`, all permissionless) all carry forward unchanged.
+> Still diverged from PRD (out of scope of this refactor):
+>
+> - **Stake tiers** — code currently uses whatever the FE picks; PRD spec is **1 / 3 / 5 / 10 dUSDC** (4 tiers) gated by `PredictManager` balance ≥ 5 dUSDC.
+> - **Free tier vs Practice** — on-chain Free tier exists (`create_duel_free` / `settle_card_free` / `finalize_free`); PRD replaces with solo-vs-bot Practice Mode (no chain).
+> - **Swap module** — separate package at `0x51ea0f29…` already published, FE not fully wired.
+> - **Predict Manager bootstrap** — PRD says sponsor it on first sign-in; today still a separate user step.
+>
+> The Duel object's swipe ordering, commit-reveal, escrow / payout half, and the keeper PTB shape (`settle_card × N` + `redeem × N` + `finalize`, all permissionless) match the current code.
 
 > **Status legend:** ✓ shipped · ◐ partial · ✗ not implemented · 🜲 superseded by new PRD direction
 
@@ -44,34 +45,38 @@ requirements being satisfied).
    ▼
 [lobby]
    │
-   │ 1. Pick oracle (argmin expiry, headroom ≥ 90 s)            → OracleSVI
-   │ 2. Generate deck (POST /deckmaster/generate)              → 5 strikes + hash
-   │ 3. duel::create_duel<T>(stake, deck_hash)                 → Duel<T> PENDING
+   │ 1. Pick N oracles (nearest-expiry BTC, headroom ≥ 10 min)  → OracleSVI[N]
+   │ 2. Generate deck (POST /deckmaster/generate)
+   │    - per oracle: probe ±0.5%–±20% in parallel, pick most aggressive viable
+   │    - deck-level: balanced sign mix (e.g. 3 UP-fav + 2 DOWN-fav for N=5)
+   │                                                            → N strikes + hash
+   │ 3. duel::create_duel<T>(stake, deck_hash, deck_size)       → Duel<T> PENDING
    │
    ▼
 [wait]
    │
    │ 4. challenger join_duel<T>(stake)                          → Duel ACTIVE, started_at_ms
-   │ 5. keeper reveal_deck<T>(plaintext)                       → cards populated
+   │ 5. keeper reveal_deck<T>(plaintext)                        → cards populated
    │
    ▼
-[swipe ×5 each]
+[swipe × N each]
    │
    │ 6. record_swipe (free)  OR  mint + record_swipe (staked)
-   │    snapshots p_swiped, decide_time_ms                     → SwipeRecorded
+   │    snapshots quantity, premium, p_swiped on-chain          → SwipeRecorded
    │
    ▼
 [lockup]
    │
-   │ 7. wait now > oracle.expiry
-   │    DeepBook publishes settlement_price (~+8 s after expiry)
+   │ 7. wait for EACH card's oracle to publish settlement_price
+   │    (different cards may settle at different times — that's fine,
+   │    settle_card is per-card)
    │
    ▼
-[settle + finalize + redeem — single keeper PTB]
+[settle + finalize + redeem — single keeper PTB once all oracles settled]
    │
-   │ 8a. settle_card × 5 (one per card.oracle_id)
-   │ 8b. predict::redeem_permissionless × N (dUSDC only)
-   │ 8c. duel::finalize → status = COMPLETE, payout
+   │ 8a. settle_card × N (one per card with its own oracle)     → CardSettled events
+   │ 8b. duel::finalize (no oracle args)                         → status = COMPLETE, payout
+   │ 8c. predict::redeem_permissionless × M (dUSDC only)         → Predict positions paid
    │
    ▼
 [result]
@@ -91,34 +96,46 @@ Knowing which side a function lives on tells you who guards what.
 
 ### Flicky package (`apps/contracts/sources/`)
 
-Published at `0x505cdc9868df09c5a3cbfa469971feb795a17ecd2fec35405dd951e10d624f26`.
+Source of truth for the current `packageId` is [`apps/contracts/deployed.json`](../apps/contracts/deployed.json).
 
 | Module · function | Purpose | Side effect |
 |---|---|---|
-| `duel::create_duel<T>(stake, deck_hash)` | Open a new duel, lock creator's stake, commit deck hash | New `Duel<T>` shared object, status PENDING, escrows `p0_stake: Balance<T>` |
+| `duel::create_duel<T>(stake, deck_hash, deck_size)` | Open a new duel, lock creator's stake, commit deck hash, pick deck size [1, 20] | New `Duel<T>` shared object, status PENDING, escrows `p0_stake` |
+| `duel::create_duel_free<T>(deck_hash, deck_size)` | Free-tier counterpart, zero stake | New `Duel<T>` with `tier = FREE` |
 | `duel::join_duel<T>(duel, stake, clock)` | Challenger matches stake | status → ACTIVE, `started_at_ms` set, escrows `p1_stake` |
-| `duel::reveal_deck<T>(duel, cards)` | Verify `sha2_256(bcs(cards)) == deck_hash`, populate cards | `duel.cards` filled, anti-front-run gate lifted |
-| `duel::record_swipe<T>(duel, oracle, card_idx, is_up, clock)` | Snapshot `p_swiped = pricing::p_up(oracle, strike)` and `decide_time_ms`, store per-player swipe | `Swipe` appended to `p{N}_swipes[card_idx]`, idx pointer advances |
-| `duel::settle_card<T>(duel, oracle, card_idx)` | Read `oracle.settlement_price`, compute card scores for both players | `card_settlements[i] = Some(price)`, `settled_count++`, scores ↑ |
-| `duel::finalize<T>(duel)` | Determine winner, pay out pot via `Balance.split + transfer` | status → COMPLETE, winner gets `Coin<T>`, tie → refund |
-| `duel::new_card(oracle_id, strike, ctx)` | Pure constructor for `Card` struct (used by reveal_deck callers to build the vector) | none — produces value |
+| `duel::join_duel_free<T>(duel, clock)` | Free-tier join | same, no stake |
+| `duel::reveal_deck<T>(duel, cards)` | Verify `sha2_256(bcs(cards)) == deck_hash` + `cards.length() == deck_size`, populate cards | `duel.cards` filled |
+| `duel::record_swipe<T>(duel, mgr, predict, oracle, card_idx, is_up, quantity, clock)` | Snapshot `premium` from `predict::get_trade_amounts`, derive `p_swiped`, store per-player swipe; checks `mgr.position(key) >= quantity` (anti-replay) | `Swipe { is_up, quantity, premium, p_swiped }` appended to `p{N}_swipes[card_idx]` |
+| `duel::record_swipe_free<T>(duel, predict, oracle, card_idx, is_up, clock)` | Free-tier swipe — same pricing snapshot, no manager check, normalized `quantity = 1e9` | same as above |
+| `duel::settle_card<T>(duel, p0_mgr, p1_mgr, oracle, card_idx)` | Read `oracle.settlement_price`, score both players' swipes on this card, accumulate per-player payout / premium on the duel. Anti-replay via `mgr.position(key)` | `cards_settled[i] = true`, `card_settlement_prices[i] = price`, `settled_count++`, `p{0,1}_payout/_premium` ↑. Emits `CardSettled` |
+| `duel::settle_card_free<T>(duel, oracle, card_idx)` | Free-tier counterpart, no managers | same |
+| `duel::finalize<T>(duel, clock)` | Compare `val0 = p0_payout + p1_premium` vs `val1 = p1_payout + p0_premium`, distribute pot | status → COMPLETE, winner gets pot via `Balance.split + transfer`. Emits `DuelFinalized` |
+| `duel::finalize_free<T>(duel, clock)` | Same, free tier (no stake transfers) | status → COMPLETE |
+| `duel::finalize_test_one_oracle<T>(duel, oracle, clock)` | **DEV**: internally settles every unsettled card with one oracle's `settlement_price` (or `spot_price` fallback), then finalizes. Skips anti-replay | full settle + finalize in one call |
+| `duel::refund_duel<T>(duel, clock)` | PENDING: creator cancels; ACTIVE 1h+: either player refunds (blocked if both N/N — finalize is the only path) | status → COMPLETE, stakes returned |
+| `duel::claim_reveal_timeout<T>(duel, clock)` | Challenger sweeps pot if host didn't reveal within 5 min of join | status → COMPLETE, pot → challenger. Emits `DuelForfeited` |
+| `duel::new_card(oracle, strike)` | Pure constructor for `Card` (used by reveal callers to build the vector) | none — produces value |
 
 **State Flicky stores per `Duel<T>`:**
-- `cards: vector<Card>` — { oracle_id, strike } × 5
+- `cards: vector<Card>` — `{ oracle_id, strike } × deck_size`
 - `deck_hash: vector<u8>` — sha2-256 commitment
+- `deck_size: u64` — chosen at create-time, [1, 20]
+- `tier: u8` — 1=STAKED, 2=FREE
 - `p0_stake, p1_stake: Balance<T>` — escrowed pot
-- `p0_swipes, p1_swipes: vector<Option<Swipe>>` — { is_up, p_swiped, decide_time_ms }
-- `p0_score, p1_score: u64` — 9-decimal fixed-point
-- `card_settlements: vector<Option<u64>>` — terminal price per card
-- `p{0,1}_last_swipe_or_start_ms: u64` — decide-time baseline
+- `p0_swipes, p1_swipes: vector<Option<Swipe>>` — `Swipe { is_up, quantity, premium, p_swiped }`
+- `cards_settled: vector<bool>` — flips true per `settle_card`
+- `card_settlement_prices: vector<u64>` — per-card settlement_price snapshot (0 = unsettled)
+- `settled_count: u64` — `finalize` requires == `deck_size`
+- `p0_payout, p0_premium, p1_payout, p1_premium: u64` — accumulated per `settle_card`
 - `p{0,1}_next_card_idx: u64` — turn ordering
+- `started_at_ms: u64` — set when challenger joins
 
 **Events Flicky emits:**
-- `DuelCreated`, `DuelJoined`, `DeckRevealed`, `SwipeRecorded`, `CardSettled`, `DuelFinalized`
+- `DuelCreated`, `DuelJoined`, `DeckRevealed`, `SwipeRecorded`, `CardSettled`, `DuelFinalized`, `DuelRefunded`, `DuelForfeited`
 
 **What Flicky never touches:**
-- DeepBook prices, SVI params, settlement_price (only reads via `pricing::p_up` and `oracle.settlement_price()`)
-- PredictManager objects — no field references, no calls. Mint payout / redeem flow happens entirely outside the Duel.
+- DeepBook prices, SVI params, settlement_price (only reads via `predict::get_trade_amounts` and `oracle::settlement_price`)
+- PredictManager **mutation** — only reads `position(key)` for anti-replay. Redeem flow happens entirely outside the Duel (via `predict::redeem_permissionless`, keeper-driven).
 
 ---
 
@@ -168,10 +185,11 @@ Published at `0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138
 | Lock player stake | `p{0,1}_stake: Balance<T>` ✓ | — |
 | Match opponent (PvP) | `creator + challenger` fields ✓ | — |
 | Read live oracle price | — | `OracleSVI.prices` ✓ |
-| Snapshot implied probability | calls `pricing::p_up` | provides `p_up(oracle, strike)` |
+| Snapshot premium + implied prob | reads `predict::get_trade_amounts` inside `record_swipe` | provides `get_trade_amounts(predict, oracle, key, qty, clock) → (ask, bid)` |
 | Open binary position | — | `predict::mint` ✓ |
-| Score a card | `compute_card_score` (uses snapshot) ✓ | — |
-| Decide winner / tie-break | `finalize` ✓ | — |
+| Anti-replay | `record_swipe` + `settle_card` read `mgr.position(key)` | provides `predict_manager::position(mgr, key)` |
+| Score a card | `settle_card` → real PnL `payout - premium` per side ✓ | — |
+| Decide winner / tie-break | `finalize` compares `val0 vs val1` ✓ | — |
 | Pay out PvP pot | `Balance.split + transfer` ✓ | — |
 | Pay out binary position | — | `redeem_permissionless` ✓ |
 | Anti-front-run via commit-reveal | `deck_hash` + `reveal_deck` ✓ | — |
@@ -180,8 +198,8 @@ Published at `0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138
 ### Why this separation matters
 
 - **Predict's mint invariant** (`sender == owner`) is why staked swipes must be player-signed PTBs — Flicky can't route mint through a keeper or shared bot wallet.
-- **Flicky never references PredictManager** — so a player who never created one can still play free tier; and a player whose manager runs out of balance only breaks staked, not free.
-- **Settlement timing is DeepBook's contract, not Flicky's** — the keeper waits for `settlement_price` to be `Some`, then runs Flicky's `settle_card` (which reads that price) + DeepBook's `redeem_permissionless` (which pays the position) in one PTB.
+- **Each card pins its own oracle** — different expiries within one deck. `settle_card` is per-card so the keeper can settle each as its oracle's `settlement_price` becomes available, without blocking on the slowest one.
+- **Settlement timing is DeepBook's contract, not Flicky's** — the keeper waits for each card's oracle to publish `settlement_price` (~+8 s after expiry), then runs `settle_card` (which reads that price). Once `settled_count == deck_size`, anyone can call `finalize` to distribute the pot. `predict::redeem_permissionless` materialises each player's Predict position payout into their PredictManager.
 
 ### Typical staked-swipe PTB (composition of both)
 
@@ -189,28 +207,31 @@ Published at `0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138
 PTB[
   market_key::up(oracle, expiry, strike)           ─┐  DeepBook
   predict::mint<DUSDC>(predict, manager, oracle, mk, qty)  ─┤  DeepBook
-  duel::record_swipe<DUSDC>(duel, oracle, idx, is_up)  ─┤  Flicky
+  duel::record_swipe<DUSDC>(duel, mgr, predict, oracle, idx, is_up, qty)  ─┤  Flicky
 ]                                                  ─┘
   ↑
   signed once by player
   atomic: any abort rolls back all three
+  manager.owner() == sender enforced by record_swipe (anti-spoof)
 ```
 
-### Typical settle PTB (composition of both)
+### Typical close-out PTB (composition of both)
 
 ```text
 PTB[
-  duel::settle_card<DUSDC>(duel, oracle, 0)        ─┐
-  duel::settle_card<DUSDC>(duel, oracle, 1)        ─┤  Flicky × 5
-  ...                                              ─┤
-  duel::settle_card<DUSDC>(duel, oracle, 4)        ─┘
-  market_key::up(oracle, expiry, strike_for_swipe) ─┐
-  predict::redeem_permissionless<DUSDC>(predict, mgr_p0, oracle, mk, qty)  ─┤  DeepBook × N
-  ...                                              ─┘  (N swipes total)
-  duel::finalize<DUSDC>(duel)                      ─── Flicky
+  duel::settle_card<DUSDC>(duel, p0_mgr, p1_mgr, oracle_0, 0)      ─┐
+  duel::settle_card<DUSDC>(duel, p0_mgr, p1_mgr, oracle_1, 1)      ─┤  Flicky × deck_size
+  …                                                                ─┤
+  duel::settle_card<DUSDC>(duel, p0_mgr, p1_mgr, oracle_(N-1), N-1)─┘
+  duel::finalize<DUSDC>(duel, clock)                               ─── Flicky
+  market_key::up(oracle_i, expiry_i, strike_i)                     ─┐
+  predict::redeem_permissionless<DUSDC>(predict, mgr_x, oracle_i, mk, qty)  ─┤  DeepBook × M
+  …                                                                ─┘  (M = total swipes both sides)
 ]
   ↑
-  signed by keeper (any wallet — permissionless on both sides)
+  signed by keeper (any wallet — permissionless on every step)
+  settle_card MUST run before finalize; finalize MUST run before redeem (so
+  finalize's anti-replay read sees live positions, not zeroed ones).
 ```
 
 ---
@@ -374,12 +395,12 @@ have `card_idx == p{N}_next_card_idx`.
 
 Successful effects (`apps/contracts/sources/duel.move::record_swipe`):
 
-- `p_swiped = pricing::p_up(oracle, strike)` if `is_up`, else `1e9 − p_up`
-- `decide_time_ms = max(0, now − baseline)` where `baseline = p{N}_last_swipe_or_start_ms`
-- `p{N}_swipes[card_idx] = Some(Swipe { is_up, p_swiped, decide_time_ms })`
-- `p{N}_next_card_idx += 1`
-- `p{N}_last_swipe_or_start_ms = now`
-- `SwipeRecorded { duel_id, player, card_idx, is_up, p_swiped, decide_time_ms }` event
+- `(premium, _) = predict::get_trade_amounts(predict, oracle, key, quantity, clock)` (asserts `premium > 0`)
+- `p_swiped = premium × 1e9 / quantity` (asserts `0 < p_swiped < 1e9`)
+- `assert mgr.position(key) >= quantity` (anti-replay — player must have minted in the same PTB)
+- `p{N}_swipes[card_idx] = Some(Swipe { is_up, quantity, premium, p_swiped })`
+- `p{N}_next_card_idx = card_idx + 1`
+- `SwipeRecorded { duel_id, player, card_idx, is_up, quantity, premium, p_swiped }` event
 
 | Status | ✓ shipped with hard gate for dUSDC manager + balance |
 
@@ -389,53 +410,57 @@ Successful effects (`apps/contracts/sources/duel.move::record_swipe`):
 
 | Concern | Detail |
 |---|---|
-| Entry | both players have swiped all 5 cards (or one is stuck — see PRD gap "forfeit on timeout") |
-| Wait condition | `now > oracle.expiry` AND `oracle.settlement_price.is_some()` |
+| Entry | both players have swiped all `deck_size` cards |
+| Wait condition | for EACH card: `oracle.settlement_price.is_some()`. Cards on different oracles may satisfy this at different times |
 | Latency | DeepBook stops price ticks ~5 s before expiry; publishes `settlement_price` ~ +8 s after expiry. 1/6 testnet samples observed a 10 min outlier |
-| UI | `LockupView` — static "🔒 watching the oracle tick toward settlement…" |
-| Transactions | none from app side |
-| Status | ✓ wait logic shipped · ✗ no live oracle tick streaming (PRD gap §Lockup) |
+| UI | `LockupView` — shows per-card settle progress as oracles tick into `Some` |
+| Transactions | none from app side (keeper drives `settle_card` as each oracle becomes ready) |
+| Status | ✓ wait logic shipped · ◐ per-card UI surfaces via `CardSettled` event stream |
 
 See `docs/oracle-selection.md` § "When does the oracle actually
 settle?" for measured latencies.
 
 ---
 
-## Phase 8 — Settle + redeem + finalize (single keeper PTB)
+## Phase 8 — Settle + finalize + redeem (single keeper PTB once ready)
 
-The keeper bundles three categories of move calls into one PTB to
-minimise round-trips and avoid partial state.
+The keeper builds one PTB containing all three categories of move calls
+once every card's oracle has settled. Settle MUST run before finalize
+(finalize reads accumulated `p{0,1}_payout/_premium`), and finalize
+MUST run before redeem (redeem zeroes the Predict positions that
+`settle_card`'s anti-replay check reads).
 
-### 8a. `duel::settle_card<T>(duel, &OracleSVI, card_idx)` × 5
+### 8a. `duel::settle_card<T>(duel, p0_mgr, p1_mgr, &OracleSVI, card_idx)` × deck_size
 
 | Concern | Detail |
 |---|---|
-| Caller | keeper (default) — `apps/server/src/scripts/keeper.ts::tryClose` |
-| Move guards | `EDuelNotActive` · `EOracleNotSettled` if `oracle.settlement_price.is_none()` · `EOracleMismatch` if oracle id ≠ `duel.cards[card_idx].oracle_id` · `ECardAlreadySettled` |
-| Per-card oracle | the keeper loops `duel.cards[i].oracle_id` (multi-oracle aware — see `oracle-selection.md`). Today's Deckmaster picks a single oracle for all 5 cards but the path no longer hardcodes that |
-| Effect | `card_settlements[i] = Some(settlement_price)` · `settled_count += 1` · awards `card_score_from_swipe(p_swiped, decide_time_ms)` if direction correct, else 0 |
-| Event | `CardSettled { duel_id, card_idx, settlement_price, p0_card_score, p1_card_score }` |
+| Caller | keeper (default) — `apps/server/src/scripts/keeper.ts::tryClose` · also exposed in playground / web "Finalize" buttons |
+| Move guards | `EDuelNotActive` · `EWrongTier` · `EDeckNotRevealed` · `ECardIndexOOB` · `EAlreadySettled` · `EOracleMismatch` if `oracle_id ≠ duel.cards[card_idx].oracle_id` · `EOracleNotLive` if `settlement_price.is_none()` |
+| Per-card oracle | the keeper loops `duel.cards[i].oracle_id` — each card pins its own oracle |
+| Anti-replay | `score_swipe` checks `mgr.position(key) < swipe.quantity` ⇒ player redeemed early ⇒ payout = 0 (premium still counts) |
+| Effect | `cards_settled[i] = true`, `card_settlement_prices[i] = price`, `settled_count += 1`, accumulates `p{0,1}_payout/_premium` |
+| Event | `CardSettled { duel_id, card_idx, oracle_id, settlement_price, actual_up, p0_payout, p0_premium, p1_payout, p1_premium }` |
 
-### 8b. `predict::redeem_permissionless<DUSDC>(predict, manager, oracle, key, quantity)` × N
+### 8b. `duel::finalize<T>(duel, clock)` — no oracle args
+
+| Concern | Detail |
+|---|---|
+| Move guards | `EWrongTier` · `EDuelNotActive` · `EAllCardsNotSettled` if `settled_count ≠ deck_size` (normal path) · `ESwipesNotComplete` if partial swipes + window not expired (refund path) |
+| Winner logic | normal: compare `val0 = p0_payout + p1_premium` vs `val1 = p1_payout + p0_premium`; higher takes pot, tie refunds. Forfeit: one side swiped more after 10-min window ⇒ that side wins. Refund: both stuck mid-deck after timeout ⇒ tie refund |
+| Effect | pays winner via `Balance.split` + `transfer` · `status = COMPLETE` |
+| Event | `DuelFinalized { duel_id, winner, payout_to_p0, payout_to_p1, p0_payout_total, p0_premium_total, p1_payout_total, p1_premium_total, primary_oracle_id, primary_settlement_price }` |
+
+### 8c. `predict::redeem_permissionless<DUSDC>(predict, manager, oracle, key, quantity)` × M
 
 | Concern | Detail |
 |---|---|
 | Only for | `stake_coin_type == DUSDC` (free tier skipped) |
-| N | count of non-null swipes across both players (max 10 if both swiped all 5) |
-| Quantity | matches mint quantity per (player, card) — `(playerStake × 2n) / 100n` |
+| M | count of non-null swipes across both players (max `2 × deck_size`) |
+| Quantity | matches mint quantity per (player, card), recorded in `Swipe.quantity` |
 | Manager discovery | keeper walks `PredictManagerCreated` events filtered by `owner == playerAddress` (same pattern as web `findPredictManager`) |
 | Permission | permissionless — keeper signs, but payout goes back to manager owner's balance, not keeper |
 | Effect | manager's dUSDC balance ↑ payout amount |
-| Status | ✓ shipped — keeper-redeem block was the missing piece flagged in earlier audit |
-
-### 8c. `duel::finalize<T>(duel)`
-
-| Concern | Detail |
-|---|---|
-| Move guards | `EAllCardsNotSettled` if `settled_count ≠ 5` · `EDuelAlreadyFinalized` |
-| Winner logic | higher score wins · score-tied ⇒ lower `total_decide_time` wins (with `None` swipes contributing the slow-cap to defeat skip-grief — see [tie-break fix](../apps/contracts/sources/duel.move)) · time-tied ⇒ each refunded own stake |
-| Effect | pays winner via `Balance.split` + `transfer` · `status = COMPLETE` |
-| Event | `DuelFinalized { duel_id, p0_score, p1_score, winner, payout_to_p0, payout_to_p1 }` |
+| Status | ✓ shipped — keeper bundles after finalize |
 
 | Status of phase 8 | ✓ all three sub-phases shipped in one keeper PTB |
 
@@ -472,17 +497,15 @@ balance currently need to issue a withdraw PTB manually.
 
 ## What is NOT yet implemented (PRD gap delta)
 
-Tracked in detail in the prior audit (`Lobby` chat). Brief list:
-
 - ✗ Bot 30 s queue timeout (currently 5 s race-join, no human grace)
-- ✗ Matchmaking queue + MMR + tier buckets
+- ◐ Matchmaking queue + MMR + tier buckets (basic queue + MMR shipped; tier buckets per PRD spec partial)
 - ✗ Lockup phase live oracle ticks + emoji reactions (`/ws` is an echo server)
-- ✗ AI Deckmaster v2 (SVI-informed, 2/2/1 difficulty split, on-chain-seeded RNG, template selection)
+- ◐ AI Deckmaster v2 — max-amplitude probe + sign-balance shipped (`buildAndProbeDeck`). SVI-informed difficulty split + on-chain-seeded RNG still PRD gaps.
 - ✗ Win counter for free tier
-- ✗ On-chain forfeit-on-timeout (currently relies on oracle expiry to bound stalls)
+- ✓ On-chain forfeit-on-timeout — `claim_reveal_timeout` (5 min, challenger sweeps) + finalize's swipe-window forfeit branch (10 min)
 - ◐ zkLogin: Google works; Apple env-gated; no "Sign in with Google" first-class CTA
 - ◐ Share card is PNG download only (no `navigator.share`, no OG link)
-- ✗ Range cards (Card has no `low/high` fields; `compute_card_score` only handles directional binaries)
+- ✗ Range cards (`Card` has no `low/high` fields; `score_swipe` only handles directional binaries)
 - ◐ PredictManager withdraw button (builder shipped, no UI)
 
 ---

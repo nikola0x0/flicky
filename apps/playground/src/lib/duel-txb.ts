@@ -6,6 +6,7 @@ export const txCreateDuel = (
   tx: Transaction,
   stakeCoin: any,
   deckHash: number[],
+  deckSize: number,
   coinType: string
 ) => {
   if (!CONFIG.flickyPackageId) {
@@ -18,6 +19,7 @@ export const txCreateDuel = (
     arguments: [
       stakeCoin,
       tx.pure.vector('u8', deckHash),
+      tx.pure.u64(BigInt(deckSize)),
     ],
   })
 }
@@ -25,6 +27,7 @@ export const txCreateDuel = (
 export const txCreateDuelFree = (
   tx: Transaction,
   deckHash: number[],
+  deckSize: number,
   coinType: string = '0x2::sui::SUI'
 ) => {
   if (!CONFIG.flickyPackageId) {
@@ -33,7 +36,10 @@ export const txCreateDuelFree = (
   return tx.moveCall({
     target: `${CONFIG.flickyPackageId}::duel::create_duel_free`,
     typeArguments: [coinType],
-    arguments: [tx.pure.vector('u8', deckHash)],
+    arguments: [
+      tx.pure.vector('u8', deckHash),
+      tx.pure.u64(BigInt(deckSize)),
+    ],
   })
 }
 
@@ -176,15 +182,65 @@ export const txRecordSwipeFree = (
   })
 }
 
-// ========== Duel: Finalize ==========
-// One-shot: reads oracle.settlement_price, scores all 5 cards inline,
-// computes PnL, distributes the stake. No per-card settle step.
-export const txFinalizeDuel = (
+// ========== Duel: Per-card Settle ==========
+// Settles one card. Reads the supplied oracle's settlement_price + scores
+// both players' swipes on `cardIdx` + accumulates payout/premium onto the
+// Duel. Permissionless. Each card in a deck pins its OWN oracle, so a full
+// settle PTB chains `txSettleCard × deckSize` with the matching
+// `cards[i].oracle_id` per call.
+export const txSettleCard = (
   tx: Transaction,
   duelId: string,
   p0Manager: string,
   p1Manager: string,
   oracleId: string,
+  cardIdx: number,
+  coinType: string = '0x2::sui::SUI'
+) => {
+  if (!CONFIG.flickyPackageId) {
+    throw new Error('FLICKY_PACKAGE_ID not configured')
+  }
+  return tx.moveCall({
+    target: `${CONFIG.flickyPackageId}::duel::settle_card`,
+    typeArguments: [coinType],
+    arguments: [
+      tx.object(duelId),
+      tx.object(p0Manager),
+      tx.object(p1Manager),
+      tx.object(oracleId),
+      tx.pure.u64(BigInt(cardIdx)),
+    ],
+  })
+}
+
+export const txSettleCardFree = (
+  tx: Transaction,
+  duelId: string,
+  oracleId: string,
+  cardIdx: number,
+  coinType: string = '0x2::sui::SUI'
+) => {
+  if (!CONFIG.flickyPackageId) {
+    throw new Error('FLICKY_PACKAGE_ID not configured')
+  }
+  return tx.moveCall({
+    target: `${CONFIG.flickyPackageId}::duel::settle_card_free`,
+    typeArguments: [coinType],
+    arguments: [
+      tx.object(duelId),
+      tx.object(oracleId),
+      tx.pure.u64(BigInt(cardIdx)),
+    ],
+  })
+}
+
+// ========== Duel: Finalize ==========
+// Two-phase model: caller must have already landed `settle_card × deckSize`
+// (one per card with that card's oracle). `finalize` then compares the
+// accumulated per-player PnL and distributes the pot in one tx.
+export const txFinalizeDuel = (
+  tx: Transaction,
+  duelId: string,
   coinType: string = '0x2::sui::SUI'
 ) => {
   if (!CONFIG.flickyPackageId) {
@@ -195,49 +251,15 @@ export const txFinalizeDuel = (
     typeArguments: [coinType],
     arguments: [
       tx.object(duelId),
-      tx.object(p0Manager),
-      tx.object(p1Manager),
-      tx.object(oracleId),
       tx.object(CONFIG.CLOCK_ID)
     ]
   })
 }
 
-// Production multi-oracle finalize: takes 5 oracle ids (one per card in
-// `Duel.cards`). All 5 must be Settled on-chain. Validates per-card
-// `card[i].oracle_id == oracle_i.id` and uses each oracle's
-// settlement_price + expiry for anti-replay.
-export const txFinalizeDuelMulti = (
-  tx: Transaction,
-  duelId: string,
-  p0Manager: string,
-  p1Manager: string,
-  oracleIds: [string, string, string, string, string],
-  coinType: string = '0x2::sui::SUI'
-) => {
-  if (!CONFIG.flickyPackageId) {
-    throw new Error('FLICKY_PACKAGE_ID not configured')
-  }
-  return tx.moveCall({
-    target: `${CONFIG.flickyPackageId}::duel::finalize_multi`,
-    typeArguments: [coinType],
-    arguments: [
-      tx.object(duelId),
-      tx.object(p0Manager),
-      tx.object(p1Manager),
-      tx.object(oracleIds[0]),
-      tx.object(oracleIds[1]),
-      tx.object(oracleIds[2]),
-      tx.object(oracleIds[3]),
-      tx.object(oracleIds[4]),
-      tx.object(CONFIG.CLOCK_ID)
-    ]
-  })
-}
-
-// TEST/DEV ONLY: finalize using a single settled oracle, applied to all 5
-// cards regardless of each card's actual oracle_id. Skips anti-replay.
-// Useful when waiting for all 5 oracles to settle is impractical.
+// TEST/DEV ONLY: settle every unsettled card against a single oracle's
+// price (spot fallback if not yet settled) then finalize, ignoring per-card
+// oracle_id. Skips anti-replay. Useful when waiting for all oracles to
+// settle is impractical.
 export const txFinalizeDuelTestOneOracle = (
   tx: Transaction,
   duelId: string,
@@ -261,7 +283,6 @@ export const txFinalizeDuelTestOneOracle = (
 export const txFinalizeDuelFree = (
   tx: Transaction,
   duelId: string,
-  oracleId: string,
   coinType: string = '0x2::sui::SUI'
 ) => {
   if (!CONFIG.flickyPackageId) {
@@ -272,7 +293,6 @@ export const txFinalizeDuelFree = (
     typeArguments: [coinType],
     arguments: [
       tx.object(duelId),
-      tx.object(oracleId),
       tx.object(CONFIG.CLOCK_ID)
     ]
   })

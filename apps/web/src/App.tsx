@@ -1476,7 +1476,6 @@ function SwipingView({
   duelId,
   oracle,
   myNextIdx,
-  isCreator,
   address,
 }: {
   duel: DuelState
@@ -1491,9 +1490,10 @@ function SwipingView({
   const queryClient = useQueryClient()
   const now = useNow(250)
   const card = duel.cards[myNextIdx]
-  const baselineMs = Number(
-    isCreator ? duel.p0LastSwipeOrStartMs : duel.p1LastSwipeOrStartMs,
-  )
+  // Contract no longer tracks per-player "last swipe ms" — the new design
+  // bounds the whole match with a single 10-min `SWIPE_WINDOW_MS` from
+  // `started_at_ms`. Per-card pacing UI uses join-time as the baseline.
+  const baselineMs = Number(duel.startedAtMs)
   const elapsedMs = Math.max(0, now - baselineMs)
   const timerMs = Math.max(0, SWIPE_PHASE_MS - elapsedMs)
   const speed = speedMultiplier(elapsedMs)
@@ -1962,8 +1962,10 @@ function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
   async function settle() {
     setErr(null)
     try {
-      // One-shot finalize. finalize_multi reads both players' Predict
-      // managers for anti-replay, so resolve them first.
+      // Two-phase: settle_card × deck_size reads both players' Predict
+      // managers for anti-replay (and that card's oracle for the
+      // settlement_price), then finalize compares the accumulated PnL.
+      // All chained into one PTB by `buildFinalizeTx`.
       const [p0Manager, p1Manager] = await Promise.all([
         findPredictManager(client, duel.creator),
         findPredictManager(client, duel.challenger),
@@ -2018,9 +2020,16 @@ function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
 
 function ResultView({ duel, address }: { duel: DuelState; address: string }) {
   const isCreator = duel.creator === address
-  const myScore = isCreator ? duel.p0Score : duel.p1Score
-  const oppScore = isCreator ? duel.p1Score : duel.p0Score
-  const tie = duel.p0Score === duel.p1Score
+  // Contract picks the winner by comparing `payout_0 + premium_1` vs
+  // `payout_1 + premium_0`. That's equivalent to comparing each side's
+  // net PnL `payout - premium`, which is also what we show in the UI.
+  const myScore = isCreator
+    ? duel.p0Payout - duel.p0Premium
+    : duel.p1Payout - duel.p1Premium
+  const oppScore = isCreator
+    ? duel.p1Payout - duel.p1Premium
+    : duel.p0Payout - duel.p0Premium
+  const tie = myScore === oppScore
   const won = !tie && myScore > oppScore
   const lost = !tie && myScore < oppScore
 
@@ -2033,12 +2042,14 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
       ? { emoji: "💀", text: "you lost", tone: "text-red-500" }
       : { emoji: "🤝", text: "tie", tone: "text-amber-500" }
 
-  // Per-card outcome — needs the strike + settlement + your swipe
+  // Per-card outcome — needs the strike + settlement + your swipe. We
+  // treat `cardsSettled[i] = false` as "no proof yet" (null settle).
   const myCards = useMemo(() => {
     const swipes = isCreator ? duel.p0Swipes : duel.p1Swipes
     return duel.cards.map((c, i) => {
       const swipe = swipes[i]
-      const settle = duel.cardSettlements[i]
+      const settled = duel.cardsSettled[i] === true
+      const settle = settled ? duel.cardSettlementPrices[i] : null
       const actualUp = settle !== null && settle > c.strike
       const correct = swipe !== null && actualUp === swipe.isUp
       return { card: c, swipe, settle, actualUp, correct }
@@ -2176,20 +2187,21 @@ function SpectatorView({ duel }: { duel: DuelState }) {
       </p>
       <div className="grid grid-cols-2 gap-3 text-base">
         <div className="bg-muted/40 rounded p-3">
-          <div className="text-muted-foreground text-sm">creator</div>
+          <div className="text-muted-foreground text-sm">creator net</div>
           <div className="font-semibold">
-            {(Number(duel.p0Score) / 1e9).toFixed(2)}
+            {fmtStake(duel.p0Payout - duel.p0Premium, duel.stakeCoinType)}
           </div>
         </div>
         <div className="bg-muted/40 rounded p-3">
-          <div className="text-muted-foreground text-sm">challenger</div>
+          <div className="text-muted-foreground text-sm">challenger net</div>
           <div className="font-semibold">
-            {(Number(duel.p1Score) / 1e9).toFixed(2)}
+            {fmtStake(duel.p1Payout - duel.p1Premium, duel.stakeCoinType)}
           </div>
         </div>
       </div>
       <p className="text-muted-foreground text-sm">
-        swipes {Number(duel.p0NextCardIdx)}/5 · {Number(duel.p1NextCardIdx)}/5 · settled{" "}
+        swipes {Number(duel.p0NextCardIdx)}/{Number(duel.deckSize)} ·{" "}
+        {Number(duel.p1NextCardIdx)}/{Number(duel.deckSize)} · settled{" "}
         {duel.settledCount.toString()}/5
       </p>
     </div>

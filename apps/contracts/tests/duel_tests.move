@@ -60,7 +60,7 @@ fun create_seeded_oracle(scenario: &mut Scenario, clock: &Clock): ID {
 
 fun atm_deck(oracle: &OracleSVI): vector<duel::Card> {
     let mut deck = vector<duel::Card>[];
-    duel::test_deck_size().do!(|_| deck.push_back(duel::new_card(oracle, ATM_STRIKE)));
+    duel::test_default_deck_size().do!(|_| deck.push_back(duel::new_card(oracle, ATM_STRIKE)));
     deck
 }
 
@@ -89,7 +89,7 @@ fun create_duel_with_alice(scenario: &mut Scenario, clock: &Clock): ID {
     let cards = atm_deck(&oracle_ref);
     let h = deck_hash_of(&cards);
     ts::return_shared(oracle_ref);
-    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, scenario), h, scenario.ctx())
+    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, scenario), h, 5, scenario.ctx())
 }
 
 fun reveal_atm_deck(scenario: &mut Scenario) {
@@ -158,7 +158,7 @@ fun create_duel_rejects_wrong_hash_length() {
     create_seeded_oracle(&mut scenario, &clock);
     scenario.next_tx(ALICE);
     let bad = vector[0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), bad, scenario.ctx());
+    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), bad, 5, scenario.ctx());
     abort 999
 }
 
@@ -169,7 +169,7 @@ fun create_duel_rejects_zero_stake() {
     let oracle_ref = take_oracle(&mut scenario, ALICE);
     let h = deck_hash_of(&atm_deck(&oracle_ref));
     ts::return_shared(oracle_ref);
-    duel::create_duel<SUI>(mint_sui(0, &mut scenario), h, scenario.ctx());
+    duel::create_duel<SUI>(mint_sui(0, &mut scenario), h, 5, scenario.ctx());
     abort 999
 }
 
@@ -308,7 +308,7 @@ fun run_full_duel(
     reveal_atm_deck(scenario);
 
     let mut t = clock.timestamp_ms();
-    let deck_size = duel::test_deck_size();
+    let deck_size = duel::test_default_deck_size();
     let expiry = START_MS + ORACLE_TTL_MS;
     let mut i = 0;
     while (i < deck_size) {
@@ -354,27 +354,59 @@ fun run_full_duel(
         i = i + 1;
     };
 
-    // Server admin sees both done, oracle settles, finalizes in one tx.
+    // Server admin sees both done, oracle settles, settles each card, then
+    // finalizes. All `deck_size` cards in this fixture share one oracle so
+    // the same `oracle_s` reference works for every settle_card call.
     clock.set_for_testing(expiry + 1_000);
     let mut oracle_s = take_oracle(scenario, ADMIN);
     db_oracle::settle_for_testing(&mut oracle_s, settlement_price);
     ts::return_shared(oracle_s);
 
+    settle_all_cards(scenario, deck_size);
+
     scenario.next_tx(ADMIN);
-    let manager_a = scenario.take_from_address<PredictManager>(ALICE);
-    let manager_b = scenario.take_from_address<PredictManager>(BOB);
-    let oracle_f = take_oracle(scenario, ADMIN);
     let mut d = take_duel(scenario, ADMIN);
-    d.finalize(&manager_a, &manager_b, &oracle_f, clock, scenario.ctx());
+    d.finalize(clock, scenario.ctx());
     assert_eq!(d.status(), duel::status_complete());
     ts::return_shared(d);
-    ts::return_shared(oracle_f);
-    ts::return_to_address(ALICE, manager_a);
-    ts::return_to_address(BOB, manager_b);
 
     let alice_payout = get_payout_amount(ALICE, scenario);
     let bob_payout = get_payout_amount(BOB, scenario);
     (alice_payout, bob_payout)
+}
+
+/// Settle every card on the duel via `settle_card`. Assumes the test
+/// fixture pinned all cards to the same oracle (true for every helper in
+/// this file) so we can re-use one `OracleSVI` reference.
+fun settle_all_cards(scenario: &mut Scenario, deck_size: u64) {
+    let mut k = 0;
+    while (k < deck_size) {
+        scenario.next_tx(ADMIN);
+        let manager_a_s = scenario.take_from_address<PredictManager>(ALICE);
+        let manager_b_s = scenario.take_from_address<PredictManager>(BOB);
+        let oracle_s = take_oracle(scenario, ADMIN);
+        let mut d = take_duel(scenario, ADMIN);
+        d.settle_card(&manager_a_s, &manager_b_s, &oracle_s, k);
+        ts::return_shared(d);
+        ts::return_shared(oracle_s);
+        ts::return_to_address(ALICE, manager_a_s);
+        ts::return_to_address(BOB, manager_b_s);
+        k = k + 1;
+    }
+}
+
+/// Free-tier counterpart to `settle_all_cards` — no PredictManagers.
+fun settle_all_cards_free(scenario: &mut Scenario, deck_size: u64) {
+    let mut k = 0;
+    while (k < deck_size) {
+        scenario.next_tx(ADMIN);
+        let oracle_s = take_oracle(scenario, ADMIN);
+        let mut d = take_duel(scenario, ADMIN);
+        d.settle_card_free(&oracle_s, k);
+        ts::return_shared(d);
+        ts::return_shared(oracle_s);
+        k = k + 1;
+    }
 }
 
 #[test]
@@ -474,11 +506,11 @@ fun record_swipe_rejects_after_expiry() {
     scenario.next_tx(ALICE);
     let oracle_ref = scenario.take_shared<OracleSVI>();
     let mut cards = vector<duel::Card>[];
-    duel::test_deck_size().do!(|_| cards.push_back(duel::new_card(&oracle_ref, ATM_STRIKE)));
+    duel::test_default_deck_size().do!(|_| cards.push_back(duel::new_card(&oracle_ref, ATM_STRIKE)));
     let h = deck_hash_of(&cards);
     ts::return_shared(oracle_ref);
 
-    let duel_id = duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), h, scenario.ctx());
+    let duel_id = duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), h, 5, scenario.ctx());
 
     scenario.next_tx(BOB);
     let mut duel = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
@@ -523,7 +555,7 @@ fun early_redemption_penalty() {
     reveal_atm_deck(&mut scenario);
 
     let mut t = clock.timestamp_ms();
-    let deck_size = duel::test_deck_size();
+    let deck_size = duel::test_default_deck_size();
     let expiry = START_MS + ORACLE_TTL_MS;
     let mut i = 0;
 
@@ -580,17 +612,13 @@ fun early_redemption_penalty() {
     db_oracle::settle_for_testing(&mut oracle_s, ATM_STRIKE + 1_000_000);
     ts::return_shared(oracle_s);
 
+    settle_all_cards(&mut scenario, duel::test_default_deck_size());
+
     scenario.next_tx(ADMIN);
-    let manager_a = scenario.take_from_address<PredictManager>(ALICE);
-    let manager_b = scenario.take_from_address<PredictManager>(BOB);
-    let oracle_f = take_oracle(&mut scenario, ADMIN);
     let mut d = take_duel(&mut scenario, ADMIN);
-    d.finalize(&manager_a, &manager_b, &oracle_f, &clock, scenario.ctx());
+    d.finalize(&clock, scenario.ctx());
     assert_eq!(d.status(), duel::status_complete());
     ts::return_shared(d);
-    ts::return_shared(oracle_f);
-    ts::return_to_address(ALICE, manager_a);
-    ts::return_to_address(BOB, manager_b);
 
     let alice_payout = get_payout_amount(ALICE, &mut scenario);
     let bob_payout = get_payout_amount(BOB, &mut scenario);
@@ -662,23 +690,15 @@ fun finalize_forfeit_wins() {
     ts::return_shared(oracle_b);
     ts::return_to_address(BOB, manager_b);
 
-    // Settle oracle, then finalize after the 10-minute window — forfeit wins.
+    // Past the 10-minute window — finalize hits the forfeit branch without
+    // needing any cards settled (no settle_card calls).
     clock.set_for_testing(expiry + 1_000);
-    let mut oracle_s = take_oracle(&mut scenario, ADMIN);
-    db_oracle::settle_for_testing(&mut oracle_s, ATM_STRIKE + 1_000_000);
-    ts::return_shared(oracle_s);
 
     scenario.next_tx(ADMIN);
-    let manager_a = scenario.take_from_address<PredictManager>(ALICE);
-    let manager_b = scenario.take_from_address<PredictManager>(BOB);
-    let oracle_f = take_oracle(&mut scenario, ADMIN);
     let mut d = take_duel(&mut scenario, ADMIN);
-    d.finalize(&manager_a, &manager_b, &oracle_f, &clock, scenario.ctx());
+    d.finalize(&clock, scenario.ctx());
     assert_eq!(d.status(), duel::status_complete());
     ts::return_shared(d);
-    ts::return_shared(oracle_f);
-    ts::return_to_address(ALICE, manager_a);
-    ts::return_to_address(BOB, manager_b);
 
     let alice_payout = get_payout_amount(ALICE, &mut scenario);
     let bob_payout = get_payout_amount(BOB, &mut scenario);
@@ -690,59 +710,71 @@ fun finalize_forfeit_wins() {
 
 // === refund_duel ===
 
-// === finalize_multi (5 oracles, one per card) ===
+// === variable deck size ===
 
 #[test]
-fun finalize_multi_with_same_oracle_passed_five_times_matches_finalize() {
-    // Smoke test: passing the same oracle 5 times to `finalize_multi`
-    // (since the test deck uses one oracle for all 5 cards) should produce
-    // the same outcome as the single-oracle `finalize`.
+fun variable_deck_size_three_cards_works() {
+    // Create a 3-card duel; verify full lifecycle works with N != 5.
     let (mut scenario, mut clock) = setup_scenario();
     create_manager_for(ALICE, &mut scenario);
     create_manager_for(BOB, &mut scenario);
-    create_duel_with_alice(&mut scenario, &clock);
+    let oracle_id = create_seeded_oracle(&mut scenario, &clock);
 
-    let mut duel = take_duel(&mut scenario, BOB);
+    // Build a 3-card deck.
+    scenario.next_tx(ALICE);
+    let oracle_ref = scenario.take_shared_by_id<OracleSVI>(oracle_id);
+    let mut cards = vector<duel::Card>[];
+    3u64.do!(|_| cards.push_back(duel::new_card(&oracle_ref, ATM_STRIKE)));
+    let h = deck_hash_of(&cards);
+    ts::return_shared(oracle_ref);
+
+    let duel_id = duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), h, 3, scenario.ctx());
+
+    // Bob joins.
+    scenario.next_tx(BOB);
+    let mut duel = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
     duel.join_duel(mint_sui(STAKE_AMOUNT, &mut scenario), &clock, scenario.ctx());
+    assert_eq!(duel.deck_size(), 3);
     ts::return_shared(duel);
-    reveal_atm_deck(&mut scenario);
 
+    // Reveal.
+    scenario.next_tx(ADMIN);
+    let mut duel = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
+    duel.reveal_deck(cards);
+    ts::return_shared(duel);
+
+    // Both players swipe 3 cards each.
     let mut t = clock.timestamp_ms();
     let expiry = START_MS + ORACLE_TTL_MS;
-    let deck_size = duel::test_deck_size();
     let mut i = 0;
-    while (i < deck_size) {
+    while (i < 3) {
         t = t + 2_000;
         clock.set_for_testing(t);
 
-        let duel_a = take_duel(&mut scenario, ALICE);
-        let card = *duel_a.deck().borrow(i);
-        ts::return_shared(duel_a);
-
-        let key_a = deepbook_predict::market_key::new(duel::card_oracle_id(&card), expiry, duel::card_strike(&card), true);
+        let key_a = deepbook_predict::market_key::new(oracle_id, expiry, ATM_STRIKE, true);
         set_manager_qty(ALICE, key_a, 100, &mut scenario);
         scenario.next_tx(ALICE);
         let manager_a = scenario.take_from_address<PredictManager>(ALICE);
         let mut oracle_a = take_oracle(&mut scenario, ALICE);
         set_oracle_p_up(&mut oracle_a, 400_000_000);
         let predict_a = take_predict(&mut scenario, ALICE);
-        let mut duel_a2 = take_duel(&mut scenario, ALICE);
-        duel_a2.record_swipe(&manager_a, &predict_a, &oracle_a, i, true, 100, &clock, scenario.ctx());
-        ts::return_shared(duel_a2);
+        let mut duel_a = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
+        duel_a.record_swipe(&manager_a, &predict_a, &oracle_a, i, true, 100, &clock, scenario.ctx());
+        ts::return_shared(duel_a);
         ts::return_shared(predict_a);
         ts::return_shared(oracle_a);
         ts::return_to_address(ALICE, manager_a);
 
-        let key_b = deepbook_predict::market_key::new(duel::card_oracle_id(&card), expiry, duel::card_strike(&card), false);
+        let key_b = deepbook_predict::market_key::new(oracle_id, expiry, ATM_STRIKE, false);
         set_manager_qty(BOB, key_b, 100, &mut scenario);
         scenario.next_tx(BOB);
         let manager_b = scenario.take_from_address<PredictManager>(BOB);
         let mut oracle_b = take_oracle(&mut scenario, BOB);
         set_oracle_p_up(&mut oracle_b, 400_000_000);
         let predict_b = take_predict(&mut scenario, BOB);
-        let mut duel_b2 = take_duel(&mut scenario, BOB);
-        duel_b2.record_swipe(&manager_b, &predict_b, &oracle_b, i, false, 100, &clock, scenario.ctx());
-        ts::return_shared(duel_b2);
+        let mut duel_b = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
+        duel_b.record_swipe(&manager_b, &predict_b, &oracle_b, i, false, 100, &clock, scenario.ctx());
+        ts::return_shared(duel_b);
         ts::return_shared(predict_b);
         ts::return_shared(oracle_b);
         ts::return_to_address(BOB, manager_b);
@@ -750,35 +782,49 @@ fun finalize_multi_with_same_oracle_passed_five_times_matches_finalize() {
         i = i + 1;
     };
 
+    // Settle each card via per-card settle_card, then finalize.
     clock.set_for_testing(expiry + 1_000);
     let mut oracle_s = take_oracle(&mut scenario, ADMIN);
     db_oracle::settle_for_testing(&mut oracle_s, ATM_STRIKE + 1_000_000);
     ts::return_shared(oracle_s);
 
-    // Finalize via the multi-oracle path, passing the same oracle 5 times.
+    settle_all_cards(&mut scenario, 3);
+
     scenario.next_tx(ADMIN);
-    let manager_a = scenario.take_from_address<PredictManager>(ALICE);
-    let manager_b = scenario.take_from_address<PredictManager>(BOB);
-    let oracle_f = take_oracle(&mut scenario, ADMIN);
-    let mut d = take_duel(&mut scenario, ADMIN);
-    d.finalize_multi(
-        &manager_a, &manager_b,
-        &oracle_f, &oracle_f, &oracle_f, &oracle_f, &oracle_f,
-        &clock, scenario.ctx(),
-    );
+    let mut d = scenario.take_shared_by_id<Duel<SUI>>(duel_id);
+    d.finalize(&clock, scenario.ctx());
     assert_eq!(d.status(), duel::status_complete());
     ts::return_shared(d);
-    ts::return_shared(oracle_f);
-    ts::return_to_address(ALICE, manager_a);
-    ts::return_to_address(BOB, manager_b);
 
     let alice_payout = get_payout_amount(ALICE, &mut scenario);
     let bob_payout = get_payout_amount(BOB, &mut scenario);
-    // Settled price (UP) means Alice (all UP) wins on every card.
+    // Settlement > strike → all UP correct → Alice wins.
     assert_eq!(alice_payout, STAKE_AMOUNT * 2);
     assert_eq!(bob_payout, 0);
 
     teardown(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = duel::EInvalidDeckSizeBounds)]
+fun create_duel_rejects_deck_size_zero() {
+    let (mut scenario, clock) = setup_scenario();
+    create_seeded_oracle(&mut scenario, &clock);
+    let oracle_ref = take_oracle(&mut scenario, ALICE);
+    let h = deck_hash_of(&atm_deck(&oracle_ref));
+    ts::return_shared(oracle_ref);
+    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), h, 0, scenario.ctx());
+    abort 999
+}
+
+#[test, expected_failure(abort_code = duel::EInvalidDeckSizeBounds)]
+fun create_duel_rejects_deck_size_above_max() {
+    let (mut scenario, clock) = setup_scenario();
+    create_seeded_oracle(&mut scenario, &clock);
+    let oracle_ref = take_oracle(&mut scenario, ALICE);
+    let h = deck_hash_of(&atm_deck(&oracle_ref));
+    ts::return_shared(oracle_ref);
+    duel::create_duel<SUI>(mint_sui(STAKE_AMOUNT, &mut scenario), h, 21, scenario.ctx());
+    abort 999
 }
 
 // === finalize_test_one_oracle (DEV ONLY) ===
@@ -800,7 +846,7 @@ fun finalize_test_one_oracle_resolves_without_managers() {
 
     let mut t = clock.timestamp_ms();
     let expiry = START_MS + ORACLE_TTL_MS;
-    let deck_size = duel::test_deck_size();
+    let deck_size = duel::test_default_deck_size();
     let mut i = 0;
     while (i < deck_size) {
         t = t + 2_000;
@@ -1011,7 +1057,7 @@ fun refund_rejected_when_both_completed_all_swipes() {
     reveal_atm_deck(&mut scenario);
 
     let mut t = clock.timestamp_ms();
-    let deck_size = duel::test_deck_size();
+    let deck_size = duel::test_default_deck_size();
     let expiry = START_MS + ORACLE_TTL_MS;
     let mut i = 0;
     while (i < deck_size) {
@@ -1070,7 +1116,7 @@ fun create_free_duel_with_alice(scenario: &mut Scenario, clock: &Clock): ID {
     let cards = atm_deck(&oracle_ref);
     let h = deck_hash_of(&cards);
     ts::return_shared(oracle_ref);
-    duel::create_duel_free<SUI>(h, scenario.ctx())
+    duel::create_duel_free<SUI>(h, 5, scenario.ctx())
 }
 
 #[test]
@@ -1088,7 +1134,7 @@ fun free_tier_full_duel_runs_with_no_stake_and_no_manager() {
     reveal_atm_deck(&mut scenario);
 
     let mut t = clock.timestamp_ms();
-    let deck_size = duel::test_deck_size();
+    let deck_size = duel::test_default_deck_size();
     let mut i = 0;
     while (i < deck_size) {
         t = t + 2_000;
@@ -1123,13 +1169,13 @@ fun free_tier_full_duel_runs_with_no_stake_and_no_manager() {
     db_oracle::settle_for_testing(&mut oracle_s, ATM_STRIKE + 1_000_000);
     ts::return_shared(oracle_s);
 
+    settle_all_cards_free(&mut scenario, duel::test_default_deck_size());
+
     scenario.next_tx(ADMIN);
-    let oracle_f = take_oracle(&mut scenario, ADMIN);
     let mut d = take_duel(&mut scenario, ADMIN);
-    d.finalize_free(&oracle_f, &clock, scenario.ctx());
+    d.finalize_free(&clock, scenario.ctx());
     assert_eq!(d.status(), duel::status_complete());
     ts::return_shared(d);
-    ts::return_shared(oracle_f);
 
     let alice_payout = get_payout_amount(ALICE, &mut scenario);
     let bob_payout = get_payout_amount(BOB, &mut scenario);

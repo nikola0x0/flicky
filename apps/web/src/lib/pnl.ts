@@ -3,7 +3,8 @@
  *
  * Settled cards use the contract's binary PnL — `payout - premium`,
  * available through `room_state.p{0,1}Payout` / `p{0,1}Premium` once
- * `finalize_multi` lands. Unsettled-but-swiped cards use a smooth
+ * `settle_card` lands (accumulated incrementally per card; `finalize`
+ * then distributes the pot). Unsettled-but-swiped cards use a smooth
  * mark-to-market projection from `oracle_tick`'s live forward price:
  *
  *   diff = isUp ? (forward - strike) : (strike - forward)
