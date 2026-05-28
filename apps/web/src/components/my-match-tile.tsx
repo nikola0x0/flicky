@@ -165,7 +165,40 @@ export function MyMatchTile() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [oracleKey, onMessage, send, demo])
 
-  if (!address || !pick) return null
+  if (!address) return null
+
+  if (!pick) {
+    return (
+      <section className="w-full rounded-xl border-2 border-black/55 bg-black/35 p-4 font-pixel text-white shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md">
+        <header className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm tracking-[0.2em] uppercase">your match</h3>
+          <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] tracking-[0.18em] text-white/55 uppercase">
+            idle
+          </span>
+        </header>
+        <div className="flex flex-col items-center gap-2 py-4 text-center">
+          <img
+            src="/icons/swords.png"
+            alt=""
+            aria-hidden
+            className="size-10 opacity-60 [image-rendering:pixelated]"
+          />
+          <p className="text-sm tracking-wider text-white/75 uppercase">
+            no active duel
+          </p>
+          <p className="max-w-[24ch] text-xs leading-relaxed tracking-wider text-white/50">
+            your live pvp match will show up here once you start one
+          </p>
+          <Link
+            to="/game/pvp"
+            className="mt-2 rounded border border-white/30 bg-white/5 px-3 py-1 text-xs tracking-wider uppercase hover:bg-white/10"
+          >
+            find a duel
+          </Link>
+        </div>
+      </section>
+    )
+  }
 
   const myIsP0 = pick.creator === address
   const opponentAddr = myIsP0 ? pick.challenger : pick.creator

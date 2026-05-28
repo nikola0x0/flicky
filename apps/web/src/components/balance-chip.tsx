@@ -1,5 +1,4 @@
 import type { CSSProperties } from "react"
-import { useNavigate } from "react-router"
 
 import { PixelButton } from "@/components/pixel-button"
 
@@ -11,21 +10,20 @@ const PLUS_BUTTON_STYLE = {
 /**
  * Game-currency chip — dark capsule with the token icon poking out the
  * left side, the amount centered in the dark fill, and a chunky blue
- * pixel-art "+" button on the right that navigates to `to` (typically
- * the deposit/swap page).
+ * pixel-art "+" button on the right that fires `onClick` (typically
+ * opens the manager-USDC deposit modal).
  */
 export function BalanceChip({
   icon,
   amount,
-  to,
+  onClick,
   label,
 }: {
   icon: string
   amount: string
-  to: string
+  onClick: () => void
   label?: string
 }) {
-  const navigate = useNavigate()
   return (
     <div className="flex items-center">
       <div className="relative flex h-8 items-center rounded-lg bg-[#1f1812] pr-5 pl-8 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_-1px_0_rgba(0,0,0,0.4)]">
@@ -40,7 +38,7 @@ export function BalanceChip({
         </span>
       </div>
       <PixelButton
-        onClick={() => navigate(to)}
+        onClick={onClick}
         style={PLUS_BUTTON_STYLE}
         aria-label={label ? `add ${label}` : "add"}
         className="-ml-2 size-7 !p-0 text-base"

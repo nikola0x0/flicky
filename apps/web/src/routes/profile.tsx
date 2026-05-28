@@ -64,6 +64,7 @@ export default function Profile() {
       <div className="pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl bg-[#1b2548] font-pixel text-white sm:max-h-[900px]">
         <ProfileHeader
           onBack={() => navigate(-1)}
+          onAdd={() => setDepositOpen(true)}
           dusdc={dusdcBalance}
           managerDusdc={managerBalance}
         />
@@ -157,7 +158,7 @@ export default function Profile() {
             </div>
           </section>
 
-          <section className="mt-5 grid grid-cols-3 gap-2">
+          <section className="mt-5 grid grid-cols-2 gap-2">
             <ActionTile
               label="deposit"
               icon="/icons/disk_save.png"
@@ -167,11 +168,6 @@ export default function Profile() {
               label="withdraw"
               icon="/icons/disk_load.png"
               onClick={() => setWithdrawOpen(true)}
-            />
-            <ActionTile
-              label="export pk"
-              icon="/icons/key_t.png"
-              onClick={() => {}}
             />
           </section>
 
@@ -216,10 +212,12 @@ export default function Profile() {
 
 function ProfileHeader({
   onBack,
+  onAdd,
   dusdc,
   managerDusdc,
 }: {
   onBack: () => void
+  onAdd: () => void
   dusdc: number
   managerDusdc: number
 }) {
@@ -246,13 +244,13 @@ function ProfileHeader({
             icon="/tokens/usdc-icon.png"
             amount={dusdc.toFixed(2)}
             label="wallet"
-            to="/game/shop"
+            onClick={onAdd}
           />
           <BalanceChip
             icon="/tokens/manager-usdc.png"
             amount={managerDusdc.toFixed(2)}
             label="manager"
-            to="/game/shop"
+            onClick={onAdd}
           />
         </div>
       </div>
