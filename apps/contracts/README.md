@@ -21,7 +21,9 @@ Move 2024 smart contract package for **Flicky** — a Tinder-style PvP predictio
 
 ## 🎯 Overview
 
-Two players lock equal dUSDC stakes into a shared `Duel<T>` object, swipe UP/DOWN on 5 binary-option cards backed by **DeepBook Predict's `OracleSVI`** + `PredictManager`, then a one-shot `finalize` reads each oracle's `settlement_price` and pays the winner.
+Two players lock equal dUSDC stakes into a shared `Duel<T>` object, swipe UP/DOWN on **N** binary-option cards (N chosen at create time, 1–20) backed by **DeepBook Predict's `OracleSVI`** + `PredictManager`, then a one-shot `finalize` reads the oracle's `settlement_price` and pays the winner.
+
+All cards in a deck share a single oracle (the creator picks one — by default the BTC oracle with the nearest expiry); different strike prices per card cover the spread.
 
 Two tiers share the same engine:
 
@@ -44,11 +46,11 @@ Two tiers share the same engine:
 
 | Item | ID | Role |
 |---|---|---|
-| **Package ID** (current) | `0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44` | Active version — call all `flicky::duel::*` entries against this |
-| **Original Package ID** | `0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44` | Type identity — stable across upgrades (currently == current) |
-| **UpgradeCap** | `0x87a4a7b59a32a0e0f361c8b974817bb4d48ceaeff24a380646b3fe3b9c7898af` | Authorizes `bun run upgrade`. Held by deployer wallet |
+| **Package ID** (current) | `0x436cc562ca716a88afe17214065a31d48653d146217fa73a303220ae8330bd7e` | Active version — call all `flicky::duel::*` entries against this |
+| **Original Package ID** | `0x436cc562ca716a88afe17214065a31d48653d146217fa73a303220ae8330bd7e` | Type identity — stable across upgrades (currently == current) |
+| **UpgradeCap** | `0x6608ae57c758d92e7ebdbcba8ff6082a870db71c190bacb3a5947024dd61630f` | Authorizes `bun run upgrade`. Held by deployer wallet |
 | **Deployer** | `0x9826b0895f3adc08f2f4c8907640adf2f29351ec7829281050ded1020e296d5a` | The publisher account |
-| **Publish digest** | `DdML89kVkeb5acnYdcyU2BsoQ4RdZvnhWcPanKhrvY21` | First-publish tx |
+| **Publish digest** | `ALkqKfxmZvR3MuUN7GyNkSWQWkGzwx1SmZYeTagkFXX2` | First-publish tx |
 
 Source of truth: [`deployed.json`](./deployed.json).
 
@@ -136,8 +138,8 @@ cp .env.example .env.local
 
 ```bash
 bun run test
-# 28/28 PASS — covers create, join, reveal, swipe, finalize (single/multi/test),
-# refund, reveal-timeout forfeit, anti-replay, free-tier.
+# 30/30 PASS — covers create (+variable deck size), join, reveal, swipe,
+# finalize (single/test), refund, reveal-timeout forfeit, anti-replay, free-tier.
 ```
 
 ### 3. Publish to testnet
@@ -164,15 +166,14 @@ bun --filter playground dev
 ```
 
 Open `localhost:5173/duel`. Walk through:
-1. **Generate Deck Hash** — picks 5 oracles + 5 strikes, hashes the deck.
+1. **Pick deck size + oracle** (default: 5 cards, nearest-expiry BTC oracle) → **Generate Deck Hash** — builds N strikes around the oracle's spot price and hashes the deck.
 2. **Create Duel** — escrow stake, share `Duel`, status `PENDING`.
 3. Connect a second wallet → **Join Existing Duel** → status `ACTIVE`.
 4. Host (first wallet) → **Reveal Deck**.
-5. Both wallets → **Record Swipe** × 5 (atomic PTB: `predict::mint` + `duel::record_swipe`).
-6. Finalize via **one of three paths**:
-   - **🏆 Finalize (1 oracle)** — when deck shares one oracle (rare).
-   - **🎯 Finalize (multi-oracle: 5/5 settled)** — production path; waits for all 5.
-   - **⚗️ Finalize (test — single oracle)** — dev shortcut. Uses spot price if no oracle settled yet. PnL approximate; **testnet only**.
+5. Both wallets → **Record Swipe** × N (atomic PTB: `predict::mint` + `duel::record_swipe`).
+6. Finalize via **one of two paths**:
+   - **🏆 Finalize** — production. Reads the deck's oracle `settlement_price` once, scores every card, pays winner.
+   - **⚗️ Finalize (test — single oracle)** — dev shortcut. Uses spot price if oracle hasn't settled. PnL approximate; **testnet only**.
 
 ### 5. Other test paths in the UI
 
@@ -188,21 +189,20 @@ Located in `sources/duel.move`. One module, no internal sub-modules — all pric
 ### Public entries
 
 **Lifecycle**
-- `create_duel<T>(stake, deck_hash, ctx) -> ID` — Staked tier, requires `stake_amount > 0`.
-- `create_duel_free<T>(deck_hash, ctx) -> ID` — Free tier, zero stake.
+- `create_duel<T>(stake, deck_hash, deck_size, ctx) -> ID` — Staked tier. `deck_size ∈ [1, 20]`, requires `stake_amount > 0`.
+- `create_duel_free<T>(deck_hash, deck_size, ctx) -> ID` — Free tier, zero stake.
 - `join_duel<T>(duel, stake, clock, ctx)` — challenger matches stake.
 - `join_duel_free<T>(duel, clock, ctx)` — free-tier join.
-- `reveal_deck<T>(duel, cards)` — permissionless, validates `sha2_256(bcs(cards)) == deck_hash`.
+- `reveal_deck<T>(duel, cards)` — permissionless, validates `cards.length() == duel.deck_size` and `sha2_256(bcs(cards)) == deck_hash`.
 
 **Swipe** (player-signed, atomic PTB)
 - `record_swipe<T>(duel, manager, predict, oracle, card_idx, is_up, quantity, clock, ctx)` — Staked. Snapshots premium via `get_trade_amounts`; checks `manager.position(key) >= quantity`.
 - `record_swipe_free<T>(duel, predict, oracle, card_idx, is_up, clock, ctx)` — Free, normalized `quantity = 1e9`.
 
-**Finalize** (typically server-signed)
-- `finalize<T>(duel, p0_mgr, p1_mgr, oracle, clock, ctx)` — Staked, single-oracle deck.
-- `finalize_multi<T>(duel, p0_mgr, p1_mgr, oracle_0..oracle_4, clock, ctx)` — Staked, deck with 5 different oracles. All 5 must be settled.
-- `finalize_free<T>(duel, oracle, clock, ctx)` — Free tier.
-- `finalize_test_one_oracle<T>(duel, oracle, clock, ctx)` — **DEV ONLY**. Uses one oracle's settlement_price (or spot fallback) for all 5 cards. No anti-replay.
+**Finalize** (typically server-signed) — all N cards in the deck share **one** oracle, so a single `finalize` call settles the whole match.
+- `finalize<T>(duel, p0_mgr, p1_mgr, oracle, clock, ctx)` — Staked tier.
+- `finalize_free<T>(duel, oracle, clock, ctx)` — Free tier (no managers, no anti-replay).
+- `finalize_test_one_oracle<T>(duel, oracle, clock, ctx)` — **DEV ONLY**. Uses one oracle's `settlement_price` (or spot fallback) applied to every card regardless of `card.oracle_id`. No anti-replay.
 
 **Refund / Forfeit**
 - `refund_duel<T>(duel, clock, ctx)` — PENDING (creator) / ACTIVE 1h+ (either player, unless both completed).
@@ -210,7 +210,7 @@ Located in `sources/duel.move`. One module, no internal sub-modules — all pric
 
 ### Events
 
-- `DuelCreated { duel_id, creator, stake_amount, deck_hash, tier }`
+- `DuelCreated { duel_id, creator, stake_amount, deck_hash, tier, deck_size }`
 - `DuelJoined { duel_id, challenger, stake_amount, started_at_ms }`
 - `DeckRevealed { duel_id }`
 - `SwipeRecorded { duel_id, player, card_idx, is_up, quantity, premium, p_swiped }`
@@ -225,10 +225,11 @@ Located in `sources/duel.move`. One module, no internal sub-modules — all pric
 | `status: u8` | `status()` | 1=PENDING, 2=ACTIVE, 3=COMPLETE |
 | `tier: u8` | `tier()` | 1=STAKED, 2=FREE |
 | `deck_hash: vector<u8>` | `deck_hash()` | 32-byte sha2_256 commitment |
-| `cards: vector<Card>` | `deck()` | empty until reveal; each `Card { oracle_id, strike }` |
+| `deck_size: u64` | `deck_size()` | Chosen at create time, in [1, 20] |
+| `cards: vector<Card>` | `deck()` | empty until reveal; each `Card { oracle_id, strike }`; length == `deck_size` |
 | `creator`, `challenger` | `creator()`, `challenger()` | addresses |
 | `p0_stake`, `p1_stake: Balance<T>` | `p0_stake_value()`, `p1_stake_value()` | escrowed coin |
-| `p0_swipes`, `p1_swipes: vector<Option<Swipe>>` | direct | length 5; `Swipe { is_up, quantity, premium, p_swiped }` |
+| `p0_swipes`, `p1_swipes: vector<Option<Swipe>>` | direct | length == `deck_size`; `Swipe { is_up, quantity, premium, p_swiped }` |
 | `p0_payout, p0_premium, p1_*` | `p0_payout()`, etc. | zero until `finalize`; mirror of aggregated PnL |
 | `started_at_ms` | `started_at_ms()` | join timestamp |
 
@@ -251,7 +252,7 @@ Located in `sources/duel.move`. One module, no internal sub-modules — all pric
        ▼
    ACTIVE (both 5/5 swipes)
        │
-       │ oracles settle ─► server admin (or anyone): finalize / finalize_multi
+       │ oracle settles ─► server admin (or anyone): finalize
        │ OR stuck (T+1h) ─► refund_duel ─► COMPLETE (both refund)
        ▼
    COMPLETE
@@ -261,7 +262,9 @@ Located in `sources/duel.move`. One module, no internal sub-modules — all pric
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `DECK_SIZE` | 5 | Cards per duel |
+| `MIN_DECK_SIZE` | 1 | Minimum cards per duel |
+| `MAX_DECK_SIZE` | 20 | Maximum cards per duel |
+| `DEFAULT_DECK_SIZE` | 5 | Recommended default (clients can override at create) |
 | `PROB_SCALE` | 1_000_000_000 | 1e9 fixed-point scale for probabilities |
 | `SWIPE_WINDOW_MS` | 600_000 | 10 min after `join` — record_swipe deadline |
 | `REVEAL_TIMEOUT_MS` | 300_000 | 5 min — challenger can forfeit-claim if no reveal |
@@ -279,7 +282,7 @@ See [Deployed Addresses](#-deployed-addresses-testnet) for the ID values.
 
 ```
 SUI_RPC_URL=https://fullnode.testnet.sui.io:443
-SUI_KEEPER_PRIVATE_KEY=suiprivkey1q...   # signs finalize/finalize_multi
+SUI_KEEPER_PRIVATE_KEY=suiprivkey1q...   # signs finalize
 FLICKY_PACKAGE_ID=0x4ab5...              # Flicky Package ID (current)
 PREDICT_PACKAGE_ID=0xf5ea2b37...         # DeepBook Predict package
 PREDICT_OBJECT_ID=0xc8736204...          # Predict shared object
@@ -306,18 +309,17 @@ The server keeper holds a hot key + dUSDC for gas. It should:
 
 1. **Settle-redeem keeper** — on `DuelFinalized` for STAKED tier, call `predict::redeem_permissionless` for each card's mint position on behalf of both players to materialize their payout from Predict. Idempotency: track finalized duel ids persistently (SQLite). See `apps/server/src/keeper.ts`.
 
-2. **Finalize trigger** — once both players are `5/5` and all relevant oracles have `settlement_price.is_some()`, submit `finalize` (single-oracle) or `finalize_multi` (5-oracle). PTB:
+2. **Finalize trigger** — once both players are `N/N` (`N = duel.deck_size`) and the deck's oracle has `settlement_price.is_some()`, submit `finalize`. All cards in a deck share one oracle so a single call settles the match. PTB:
    ```ts
    tx.moveCall({
-     target: `${FLICKY_PACKAGE_ID}::duel::finalize_multi`,
+     target: `${FLICKY_PACKAGE_ID}::duel::finalize`,
      typeArguments: [COIN_TYPE],
      arguments: [
        tx.object(duelId),
        tx.object(p0ManagerId),
        tx.object(p1ManagerId),
-       tx.object(oracle0Id), tx.object(oracle1Id), tx.object(oracle2Id),
-       tx.object(oracle3Id), tx.object(oracle4Id),
-       tx.object('0x6'),  // Clock
+       tx.object(oracleId),     // duelDetails.cards[0].oracle_id (all share it)
+       tx.object('0x6'),        // Clock
      ],
    })
    ```
@@ -358,7 +360,7 @@ Full ID values are in [Deployed Addresses](#-deployed-addresses-testnet).
 `apps/playground/.env.local`:
 ```
 VITE_NETWORK=testnet
-VITE_FLICKY_PACKAGE_ID=0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44
+VITE_FLICKY_PACKAGE_ID=0x436cc562ca716a88afe17214065a31d48653d146217fa73a303220ae8330bd7e
 VITE_PREDICT_PACKAGE_ID=0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138
 VITE_PREDICT_OBJECT_ID=0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a
 VITE_REGISTRY_ID=0x43af14fed5480c20ff77e2263d5f794c35b9fab7e221290312706244e2a6e64
@@ -371,7 +373,7 @@ VITE_SERVER_WS_URL=ws://localhost:3001/ws
 
 `apps/web/.env.local` (web app — same IDs, different var name for Flicky):
 ```
-VITE_FLICKY_PACKAGE_ID_TESTNET=0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44
+VITE_FLICKY_PACKAGE_ID_TESTNET=0x436cc562ca716a88afe17214065a31d48653d146217fa73a303220ae8330bd7e
 # + the rest of the VITE_* vars above
 ```
 
@@ -383,15 +385,14 @@ Generated wrappers live in `apps/playground/src/lib/duel-txb.ts`:
 
 | Action | Helper |
 |---|---|
-| Create | `txCreateDuel(tx, stakeCoin, deckHashBytes, coinType)` |
-| Create (Free) | `txCreateDuelFree(tx, deckHashBytes, coinType)` |
+| Create | `txCreateDuel(tx, stakeCoin, deckHashBytes, deckSize, coinType)` |
+| Create (Free) | `txCreateDuelFree(tx, deckHashBytes, deckSize, coinType)` |
 | Join | `txJoinDuel(tx, duelId, stakeCoin, coinType)` |
 | Join (Free) | `txJoinDuelFree(tx, duelId, coinType)` |
 | Reveal | `txRevealDeck(tx, duelId, cards, coinType)` — builds `new_card × 5` then `reveal_deck` |
 | Swipe | `txRecordSwipe(tx, duelId, managerId, predictId, oracleId, cardIdx, isUp, quantity, coinType)` |
 | Swipe (Free) | `txRecordSwipeFree(tx, duelId, predictId, oracleId, cardIdx, isUp, coinType)` |
 | Finalize (1 oracle) | `txFinalizeDuel(tx, duelId, p0Mgr, p1Mgr, oracleId, coinType)` |
-| Finalize (5 oracles) | `txFinalizeDuelMulti(tx, duelId, p0Mgr, p1Mgr, [o0..o4], coinType)` |
 | Finalize (test) | `txFinalizeDuelTestOneOracle(tx, duelId, oracleId, coinType)` |
 | Refund | `txRefundDuel(tx, duelId, coinType)` |
 | Forfeit on reveal timeout | `txClaimRevealTimeout(tx, duelId, coinType)` |
@@ -404,7 +405,7 @@ const cards = [...]; // 5 { oracleId, strike } picked from registry::OracleCreat
 const deckHash = sha256(serializeDeck(cards))  // BCS-encoded
 // Persist `cards` to localStorage or send to deckmaster server
 const tx = new Transaction()
-txCreateDuel(tx, stakeCoin, Array.from(deckHash), coinType)
+txCreateDuel(tx, stakeCoin, Array.from(deckHash), cards.length, coinType)
 ```
 
 **2. Atomic swipe PTB** — must combine mint + record_swipe in ONE PTB:
@@ -474,6 +475,7 @@ Defined in `duel.move`:
 | 28 | `EInvalidProb` | p_swiped out of (0, 1e9) |
 | 29 | `ERefundDuelComplete` | Both players completed 5/5 — finalize is the only path |
 | 30 | `ERevealNotTimedOut` | Reveal-timeout claimed before 5 min |
+| 31 | `EInvalidDeckSizeBounds` | `deck_size` outside `[1, 20]` at create-time |
 
 ---
 

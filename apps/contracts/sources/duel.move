@@ -64,6 +64,7 @@ const EWrongTier: u64 = 27;
 const EInvalidProb: u64 = 28;
 const ERefundDuelComplete: u64 = 29;
 const ERevealNotTimedOut: u64 = 30;
+const EInvalidDeckSizeBounds: u64 = 31;
 
 // === Status ===
 const STATUS_PENDING: u8 = 1;
@@ -75,7 +76,11 @@ const TIER_STAKED: u8 = 1;
 const TIER_FREE: u8 = 2;
 
 // === Constants ===
-const DECK_SIZE: u64 = 5;
+const MIN_DECK_SIZE: u64 = 1;
+const MAX_DECK_SIZE: u64 = 20;
+/// Default deck size kept for back-compat clients. New clients should pass
+/// `deck_size` explicitly when creating a duel.
+const DEFAULT_DECK_SIZE: u64 = 5;
 const PROB_SCALE: u64 = 1_000_000_000;
 const SWIPE_WINDOW_MS: u64 = 600_000; // 10 minutes
 const REFUND_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
@@ -101,6 +106,9 @@ public struct Duel<phantom T> has key {
     id: UID,
     status: u8,
     tier: u8,
+    /// Number of cards in this duel. Chosen at create-time, bounded by
+    /// [`MIN_DECK_SIZE`, `MAX_DECK_SIZE`]. All cards share one oracle.
+    deck_size: u64,
     deck_hash: vector<u8>,
     cards: vector<Card>,
     creator: address,
@@ -127,6 +135,7 @@ public struct DuelCreated has copy, drop {
     stake_amount: u64,
     deck_hash: vector<u8>,
     tier: u8,
+    deck_size: u64,
 }
 
 public struct DeckRevealed has copy, drop {
@@ -199,33 +208,37 @@ public fun card_strike(card: &Card): u64 { card.strike }
 public fun create_duel<T>(
     stake: Coin<T>,
     deck_hash: vector<u8>,
+    deck_size: u64,
     ctx: &mut TxContext,
 ): ID {
     assert!(deck_hash.length() == 32, EInvalidDeckHash);
     let stake_amount = stake.value();
     assert!(stake_amount > 0, EZeroStake);
-    create_duel_internal<T>(stake.into_balance(), deck_hash, TIER_STAKED, ctx)
+    create_duel_internal<T>(stake.into_balance(), deck_hash, deck_size, TIER_STAKED, ctx)
 }
 
 /// Free / Social tier: no Predict mint, no dUSDC escrow. Same engine.
 public fun create_duel_free<T>(
     deck_hash: vector<u8>,
+    deck_size: u64,
     ctx: &mut TxContext,
 ): ID {
     assert!(deck_hash.length() == 32, EInvalidDeckHash);
-    create_duel_internal<T>(balance::zero<T>(), deck_hash, TIER_FREE, ctx)
+    create_duel_internal<T>(balance::zero<T>(), deck_hash, deck_size, TIER_FREE, ctx)
 }
 
 fun create_duel_internal<T>(
     stake: Balance<T>,
     deck_hash: vector<u8>,
+    deck_size: u64,
     tier: u8,
     ctx: &mut TxContext,
 ): ID {
+    assert!(deck_size >= MIN_DECK_SIZE && deck_size <= MAX_DECK_SIZE, EInvalidDeckSizeBounds);
     let stake_amount = stake.value();
     let mut p0_swipes = vector<Option<Swipe>>[];
     let mut p1_swipes = vector<Option<Swipe>>[];
-    DECK_SIZE.do!(|_| {
+    deck_size.do!(|_| {
         p0_swipes.push_back(option::none());
         p1_swipes.push_back(option::none());
     });
@@ -235,6 +248,7 @@ fun create_duel_internal<T>(
         id: object::new(ctx),
         status: STATUS_PENDING,
         tier,
+        deck_size,
         deck_hash,
         cards: vector<Card>[],
         creator,
@@ -260,6 +274,7 @@ fun create_duel_internal<T>(
         stake_amount,
         deck_hash: duel.deck_hash,
         tier,
+        deck_size,
     });
 
     transfer::share_object(duel);
@@ -269,7 +284,7 @@ fun create_duel_internal<T>(
 public fun reveal_deck<T>(duel: &mut Duel<T>, cards: vector<Card>) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(duel.cards.is_empty(), EDeckAlreadyRevealed);
-    assert!(cards.length() == DECK_SIZE, EInvalidDeckSize);
+    assert!(cards.length() == duel.deck_size, EInvalidDeckSize);
     let serialized = bcs::to_bytes(&cards);
     let computed = hash::sha2_256(serialized);
     assert!(computed == duel.deck_hash, EDeckHashMismatch);
@@ -404,7 +419,7 @@ fun preflight_swipe<T>(
 ): (Card, market_key::MarketKey) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(!duel.cards.is_empty(), EDeckNotRevealed);
-    assert!(card_idx < DECK_SIZE, ECardIndexOOB);
+    assert!(card_idx < duel.deck_size, ECardIndexOOB);
     assert!(clock.timestamp_ms() <= duel.started_at_ms + SWIPE_WINDOW_MS, ESwipeTimeout);
 
     let is_p0 = sender == duel.creator;
@@ -496,86 +511,6 @@ public fun finalize<T>(
     );
 }
 
-/// Production multi-oracle finalize: each card uses its own oracle.
-/// Validates `card[i].oracle_id == oracle_i.id`, reads each oracle's
-/// `settlement_price`, and computes anti-replay using each card's expiry.
-/// Use this when the deck has 5 different oracles. All 5 must be settled.
-public fun finalize_multi<T>(
-    duel: &mut Duel<T>,
-    p0_manager: &PredictManager,
-    p1_manager: &PredictManager,
-    oracle_0: &OracleSVI,
-    oracle_1: &OracleSVI,
-    oracle_2: &OracleSVI,
-    oracle_3: &OracleSVI,
-    oracle_4: &OracleSVI,
-    clock: &Clock,
-    ctx: &mut TxContext,
-) {
-    assert!(duel.tier == TIER_STAKED, EWrongTier);
-
-    let mut p0_payout = 0u64;
-    let mut p0_premium = 0u64;
-    let mut p1_payout = 0u64;
-    let mut p1_premium = 0u64;
-    score_card_multi(duel, 0, oracle_0, p0_manager, p1_manager,
-        &mut p0_payout, &mut p0_premium, &mut p1_payout, &mut p1_premium);
-    score_card_multi(duel, 1, oracle_1, p0_manager, p1_manager,
-        &mut p0_payout, &mut p0_premium, &mut p1_payout, &mut p1_premium);
-    score_card_multi(duel, 2, oracle_2, p0_manager, p1_manager,
-        &mut p0_payout, &mut p0_premium, &mut p1_payout, &mut p1_premium);
-    score_card_multi(duel, 3, oracle_3, p0_manager, p1_manager,
-        &mut p0_payout, &mut p0_premium, &mut p1_payout, &mut p1_premium);
-    score_card_multi(duel, 4, oracle_4, p0_manager, p1_manager,
-        &mut p0_payout, &mut p0_premium, &mut p1_payout, &mut p1_premium);
-
-    // Event proof uses oracle_0 as representative; the deck's per-card
-    // oracle_ids are already on-chain in `Duel.cards` for full audit.
-    let (settlement_price, oracle_id) = read_settlement(oracle_0);
-
-    finalize_with_aggregate(
-        duel, p0_payout, p0_premium, p1_payout, p1_premium,
-        oracle_id, settlement_price, clock, ctx,
-    );
-}
-
-fun score_card_multi<T>(
-    duel: &Duel<T>,
-    card_idx: u64,
-    oracle: &OracleSVI,
-    p0_manager: &PredictManager,
-    p1_manager: &PredictManager,
-    p0_payout: &mut u64,
-    p0_premium: &mut u64,
-    p1_payout: &mut u64,
-    p1_premium: &mut u64,
-) {
-    let card = &duel.cards[card_idx];
-    assert!(card.oracle_id == db_oracle::id(oracle), EOracleMismatch);
-    let settlement_opt = db_oracle::settlement_price(oracle);
-    assert!(settlement_opt.is_some(), EOracleNotLive);
-    let settlement_price = *settlement_opt.borrow();
-    let expiry = db_oracle::expiry(oracle);
-    let actual_up = settlement_price > card.strike;
-
-    if (duel.p0_swipes[card_idx].is_some()) {
-        let swipe = *duel.p0_swipes[card_idx].borrow();
-        let key = market_key::new(card.oracle_id, expiry, card.strike, swipe.is_up);
-        let has_redeemed_early = predict_manager::position(p0_manager, key) < swipe.quantity;
-        let (pay, prem) = score_swipe(&swipe, actual_up, has_redeemed_early);
-        *p0_payout = *p0_payout + pay;
-        *p0_premium = *p0_premium + prem;
-    };
-    if (duel.p1_swipes[card_idx].is_some()) {
-        let swipe = *duel.p1_swipes[card_idx].borrow();
-        let key = market_key::new(card.oracle_id, expiry, card.strike, swipe.is_up);
-        let has_redeemed_early = predict_manager::position(p1_manager, key) < swipe.quantity;
-        let (pay, prem) = score_swipe(&swipe, actual_up, has_redeemed_early);
-        *p1_payout = *p1_payout + pay;
-        *p1_premium = *p1_premium + prem;
-    };
-}
-
 /// **TEST/DEV ONLY** — finalize using a single oracle's price applied to
 /// ALL 5 cards regardless of each card's actual `oracle_id`. Uses
 /// `settlement_price` if the oracle has settled; otherwise falls back to
@@ -655,7 +590,7 @@ fun aggregate_outcomes_staked<T>(
     let mut p1_payout = 0u64;
     let mut p1_premium = 0u64;
     let mut i = 0;
-    while (i < DECK_SIZE) {
+    while (i < duel.deck_size) {
         let card = &duel.cards[i];
         assert!(card.oracle_id == oracle_id, EOracleMismatch);
         let actual_up = settlement_price > card.strike;
@@ -691,7 +626,7 @@ fun aggregate_outcomes_free<T>(
     let mut p1_payout = 0u64;
     let mut p1_premium = 0u64;
     let mut i = 0;
-    while (i < DECK_SIZE) {
+    while (i < duel.deck_size) {
         let card = &duel.cards[i];
         assert!(card.oracle_id == oracle_id, EOracleMismatch);
         let actual_up = settlement_price > card.strike;
@@ -724,7 +659,7 @@ fun aggregate_outcomes_force<T>(
     let mut p1_payout = 0u64;
     let mut p1_premium = 0u64;
     let mut i = 0;
-    while (i < DECK_SIZE) {
+    while (i < duel.deck_size) {
         let card = &duel.cards[i];
         let actual_up = settlement_price > card.strike;
         if (duel.p0_swipes[i].is_some()) {
@@ -777,7 +712,7 @@ fun finalize_with_aggregate<T>(
     let (payout_to_p0, payout_to_p1, winner) = if (p0_count != p1_count && time_expired) {
         // Forfeit: one player swiped more cards than the other after timeout.
         if (p0_count > p1_count) { (total, 0, p0) } else { (0, total, p1) }
-    } else if (p0_count == DECK_SIZE && p1_count == DECK_SIZE) {
+    } else if (p0_count == duel.deck_size && p1_count == duel.deck_size) {
         // Normal resolution. Subtraction-less PnL:
         //   payout_0 + premium_1  vs  payout_1 + premium_0
         let val0 = (p0_payout as u128) + (p1_premium as u128);
@@ -845,7 +780,7 @@ public fun refund_duel<T>(duel: &mut Duel<T>, clock: &Clock, ctx: &mut TxContext
         assert!(now > duel.started_at_ms + REFUND_TIMEOUT_MS, ESwipeTimeout);
         assert!(sender == p0 || sender == p1, ENotPlayer);
         let both_done =
-            duel.p0_next_card_idx == DECK_SIZE && duel.p1_next_card_idx == DECK_SIZE;
+            duel.p0_next_card_idx == duel.deck_size && duel.p1_next_card_idx == duel.deck_size;
         assert!(!both_done, ERefundDuelComplete);
 
         pay_player(&mut duel.p0_stake, &mut duel.p1_stake, p0, total_p0, ctx);
@@ -935,7 +870,7 @@ public fun tier_staked(): u8 { TIER_STAKED }
 
 public fun tier_free(): u8 { TIER_FREE }
 
-public fun deck_size(): u64 { DECK_SIZE }
+public fun deck_size<T>(duel: &Duel<T>): u64 { duel.deck_size }
 
 public fun prob_scale(): u64 { PROB_SCALE }
 
@@ -962,7 +897,7 @@ fun pay_player<T>(
 }
 
 #[test_only]
-public fun test_deck_size(): u64 { DECK_SIZE }
+public fun test_default_deck_size(): u64 { DEFAULT_DECK_SIZE }
 
 #[test_only]
 public fun test_prob_scale(): u64 { PROB_SCALE }
