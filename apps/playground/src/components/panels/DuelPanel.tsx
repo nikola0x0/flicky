@@ -8,7 +8,6 @@ import {
   txJoinDuel,
   txRevealDeck,
   txFinalizeDuel,
-  txFinalizeDuelMulti,
   txFinalizeDuelTestOneOracle,
   txRefundDuel,
   DuelCard
@@ -179,6 +178,15 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
   const [swipeIsUp, setSwipeIsUp] = useState<boolean>(true)
   const [swipeQty, setSwipeQty] = useState<string>('1') // e.g. 1 contract (1,000,000 micro-dUSDC)
 
+  // Deck composition: how many cards + which oracle (defaults to nearest expiry).
+  const [deckSize, setDeckSize] = useState<number>(5)
+  const [eligibleOracles, setEligibleOracles] = useState<
+    { id: string; expiry: bigint; spot: bigint; minStrike: bigint; tickSize: bigint }[]
+  >([])
+  const [selectedOracleId, setSelectedOracleId] = useState<string>('')
+  const [oraclesLoading, setOraclesLoading] = useState<boolean>(false)
+  const [oraclesError, setOraclesError] = useState<string>('')
+
   // 1-second tick for the oracle countdown + spot-based PnL projection.
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
 
@@ -207,56 +215,133 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
     return () => window.clearInterval(id)
   }, [])
 
-  // Helper to query and filter 5 nearest active BTC oracles > 10 min out
-  const findLatest5Oracles = async (): Promise<{ id: string; expiry: bigint; spot: bigint; minStrike: bigint; tickSize: bigint }[]> => {
-    const evts = await client.queryEvents({
-      query: {
-        MoveEventType: `${CONFIG.predictPackageId}::registry::OracleCreated`,
-      },
-      limit: 50,
-      order: 'descending',
-    })
+  // Load eligible oracles once on mount so the deck-builder UI can show the
+  // dropdown without a separate fetch step. Nearest-expiry sorted.
+  const loadEligibleOracles = async () => {
+    if (!CONFIG.predictPackageId) {
+      setOraclesError('VITE_PREDICT_PACKAGE_ID not set in .env.local')
+      return
+    }
+    setOraclesLoading(true)
+    setOraclesError('')
+    try {
+      const list = await findEligibleOracles(10)
+      setEligibleOracles(list)
+      if (list.length > 0) {
+        setSelectedOracleId((cur) => cur || list[0].id) // default = nearest expiry
+      }
+    } catch (err: any) {
+      setOraclesError(err?.message || String(err))
+      console.warn('findEligibleOracles failed:', err)
+    } finally {
+      setOraclesLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadEligibleOracles()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Find eligible BTC oracles for deck creation. Strategy:
+  //  1. Pull the full list from DeepBook Predict indexer (fast, complete).
+  //  2. Fall back to on-chain `OracleCreated` events if the indexer is down.
+  //  3. multiGetObjects to read live spot + verify active + filter expiry.
+  // Returns oracles sorted by nearest-expiry first.
+  const findEligibleOracles = async (limit: number = 10): Promise<{ id: string; expiry: bigint; spot: bigint; minStrike: bigint; tickSize: bigint }[]> => {
+    const nowMsBig = BigInt(Date.now())
+    // Require ≥20min headroom so the oracle stays live through the typical
+    // create→join→reveal→swipe cycle. Nearest-expiry oracles too close to
+    // expiry abort `predict::mint::assert_live_oracle` mid-game.
+    const headroomMs = 20n * 60_000n
 
     const candidates: string[] = []
     const uniqueIds = new Set<string>()
     const oracleGridMap = new Map<string, { minStrike: bigint; tickSize: bigint }>()
 
-    for (const e of evts.data) {
-      const p = e.parsedJson as {
-        oracle_id: string
-        underlying_asset: string
-        min_strike?: string
-        tick_size?: string
+    // 1. Primary source: indexer API. Returns ALL indexed oracles (active +
+    //    pending + settled) so we can pick from a much wider pool than
+    //    paginating raw events.
+    let indexerOk = false
+    if (CONFIG.predictObjectId) {
+      try {
+        const res = await fetch(
+          `https://predict-server.testnet.mystenlabs.com/predicts/${CONFIG.predictObjectId}/oracles`
+        )
+        if (res.ok) {
+          const data = await res.json()
+          if (Array.isArray(data)) {
+            indexerOk = true
+            for (const item of data) {
+              if (item.underlying_asset !== 'BTC') continue
+              const expiry = BigInt(item.expiry ?? '0')
+              if (expiry - nowMsBig < headroomMs) continue
+              const id = String(item.oracle_id || '')
+              if (!id || uniqueIds.has(id)) continue
+              uniqueIds.add(id)
+              candidates.push(id)
+              oracleGridMap.set(id, {
+                minStrike: BigInt(item.min_strike ?? '0'),
+                tickSize: BigInt(item.tick_size ?? '1000000000'),
+              })
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Indexer fetch failed, falling back to on-chain events:', err)
       }
-      if (p.underlying_asset === 'BTC') {
-        const id = p.oracle_id
-        if (!uniqueIds.has(id)) {
+    }
+
+    // 2. Fallback: page through on-chain OracleCreated events.
+    if (!indexerOk || candidates.length === 0) {
+      let cursor: any = null
+      let pages = 0
+      const MAX_PAGES = 20
+      while (pages < MAX_PAGES) {
+        const evts: any = await client.queryEvents({
+          query: { MoveEventType: `${CONFIG.predictPackageId}::registry::OracleCreated` },
+          limit: 50,
+          cursor,
+          order: 'descending',
+        })
+        for (const e of evts.data) {
+          const p = e.parsedJson as {
+            oracle_id: string
+            underlying_asset: string
+            expiry?: string
+            min_strike?: string
+            tick_size?: string
+          }
+          if (p.underlying_asset !== 'BTC') continue
+          const expiry = BigInt(p.expiry ?? '0')
+          if (expiry - nowMsBig < headroomMs) continue
+          const id = p.oracle_id
+          if (uniqueIds.has(id)) continue
           uniqueIds.add(id)
           candidates.push(id)
           oracleGridMap.set(id, {
             minStrike: BigInt(p.min_strike ?? '0'),
-            tickSize: BigInt(p.tick_size ?? '1000000000') // default 1.0 (scaled by 1e9)
+            tickSize: BigInt(p.tick_size ?? '1000000000'),
           })
         }
+        if (!evts.hasNextPage || !evts.nextCursor) break
+        cursor = evts.nextCursor
+        pages++
       }
     }
 
     if (candidates.length === 0) {
-      throw new Error('No BTC OracleCreated events found on Testnet.')
+      throw new Error('No BTC oracle with future expiry. Wait for DeepBook keeper to publish a new slot.')
     }
 
-    // Load candidate object details in batch
-    const top = candidates.slice(0, 15)
+    // 3. Verify on-chain: active + priced + not settled.
     const objs = await client.multiGetObjects({
-      ids: top,
+      ids: candidates,
       options: { showContent: true },
     })
 
-    const nowMs = BigInt(Date.now())
     const eligible: { id: string; expiry: bigint; spot: bigint; minStrike: bigint; tickSize: bigint }[] = []
-
-    for (let i = 0; i < objs.length; i++) {
-      const obj = objs[i]
+    for (const obj of objs) {
       if (obj.data?.content?.dataType !== 'moveObject') continue
       const f = obj.data.content.fields as {
         active?: boolean
@@ -264,43 +349,32 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
         prices?: { fields?: { spot?: string; forward?: string } }
         settlement_price?: any
       }
-
-      // Check if settled
       const settled =
         (typeof f.settlement_price === 'string' && f.settlement_price !== '0') ||
         (typeof f.settlement_price === 'object' &&
           f.settlement_price !== null &&
           ((f.settlement_price as { fields?: { vec?: string[] } }).fields?.vec?.length ?? 0) > 0)
-
       const spot = BigInt(f.prices?.fields?.spot ?? '0')
       const forward = BigInt(f.prices?.fields?.forward ?? '0')
       const expiry = BigInt(f.expiry ?? '0')
-
-      // Filter: active, priced, not settled, and expiry > now + 10 mins (600_000 ms)
       if (settled || !f.active || spot === 0n || forward === 0n) continue
-      if (expiry - nowMs < 600_000n) continue
-
+      if (expiry - nowMsBig < headroomMs) continue
       const objId = obj.data?.objectId
       if (!objId) continue
-      const grid = oracleGridMap.get(objId) || { minStrike: 0n, tickSize: 1000000000n }
-
-      eligible.push({
-        id: objId,
-        expiry,
-        spot,
-        minStrike: grid.minStrike,
-        tickSize: grid.tickSize
-      })
+      const grid = oracleGridMap.get(objId) || { minStrike: 0n, tickSize: 1_000_000_000n }
+      eligible.push({ id: objId, expiry, spot, minStrike: grid.minStrike, tickSize: grid.tickSize })
     }
 
-    // Sort by expiry ascending (nearest first)
     eligible.sort((a, b) => (a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0))
 
-    if (eligible.length < 5) {
-      throw new Error(`Only found ${eligible.length} eligible oracles expiring >10 minutes from now (requires 5). Try waiting for DeepBook operator to publish new slots.`)
+    if (eligible.length === 0) {
+      throw new Error(
+        `Found ${candidates.length} BTC oracle(s) with future expiry but none are active+priced+unsettled. ` +
+        `Wait for keeper to activate one.`
+      )
     }
 
-    return eligible.slice(0, 5)
+    return eligible.slice(0, limit)
   }
 
   // Helper to retrieve and split staking coins
@@ -340,15 +414,32 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
   const handleGenerateDeck = async () => {
     setLoading(true)
     try {
-      const oracles = await findLatest5Oracles()
-      const cards: DuelCard[] = oracles.map(o => {
-        const snappedStrike = snapToTick(o.spot, o.minStrike, o.tickSize)
-        return {
-          oracleId: o.id,
-          strike: snappedStrike,
-          expiry: o.expiry
-        }
-      })
+      // Build a multi-oracle deck: card[i] uses the i-th nearest-expiry oracle
+      // (wrapping around if there are fewer oracles than cards). The user's
+      // explicitly-selected oracle is moved to the front of the pool.
+      let pool = eligibleOracles
+      if (pool.length === 0) {
+        pool = await findEligibleOracles(20)
+        setEligibleOracles(pool)
+      }
+      if (pool.length === 0) throw new Error('No oracle available')
+
+      // Re-order pool so the selected oracle is first (default = nearest).
+      const selectedIdx = pool.findIndex((o) => o.id === selectedOracleId)
+      if (selectedIdx > 0) {
+        pool = [pool[selectedIdx], ...pool.slice(0, selectedIdx), ...pool.slice(selectedIdx + 1)]
+      }
+
+      const n = Math.max(1, Math.min(20, Math.floor(deckSize)))
+      if (n !== deckSize) setDeckSize(n)
+
+      // Pick one oracle per card. If N > pool.length, wrap around.
+      const cards: DuelCard[] = []
+      for (let i = 0; i < n; i++) {
+        const oracle = pool[i % pool.length]
+        const atm = snapToTick(oracle.spot, oracle.minStrike, oracle.tickSize)
+        cards.push({ oracleId: oracle.id, strike: atm, expiry: oracle.expiry })
+      }
 
       const serialized = serializeDeck(cards)
       const hash = await computeSha256(serialized)
@@ -356,25 +447,31 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
       setGeneratedCards(cards)
       setGeneratedHash(hash)
 
-      // Save generated deck in localStorage (stringified to prevent BigInt serialization issues)
-      const deckToStore = cards.map(c => ({
+      const deckToStore = cards.map((c) => ({
         oracleId: c.oracleId,
         strike: c.strike.toString(),
-        expiry: c.expiry ? c.expiry.toString() : undefined
+        expiry: c.expiry ? c.expiry.toString() : undefined,
       }))
       localStorage.setItem(`flicky_generated_deck_${hash.join(',')}`, JSON.stringify(deckToStore))
 
+      const uniqueOracles = new Set(cards.map((c) => c.oracleId)).size
       onOutput({
         type: 'success',
-        title: 'Deck Generated Successfully',
-        data: `Deck Hash: ${toHex(hash)}\n\nSerialized bytes (BCS): ${Array.from(serialized).join(', ')}\n\nCards Selected:\n` +
-          cards.map((c, i) => `Card ${i}: Oracle ${c.oracleId.slice(0, 10)}... (Strike: ${Number(c.strike) / 1e9}, Expiry: ${new Date(Number(c.expiry)).toLocaleTimeString()})`).join('\n')
+        title: `Deck Generated (${n} cards, ${uniqueOracles} oracle${uniqueOracles === 1 ? '' : 's'})`,
+        data:
+          `Hash: ${toHex(hash)}\n\nCards (oracle → strike @ expiry):\n` +
+          cards
+            .map((c, i) => {
+              const mins = c.expiry ? Math.max(0, Math.floor((Number(c.expiry) - Date.now()) / 60000)) : '?'
+              return `  Card ${i}: ${c.oracleId.slice(0, 10)}… → $${(Number(c.strike) / 1e9).toFixed(2)} (exp ${mins}m)`
+            })
+            .join('\n'),
       })
     } catch (err: any) {
       onOutput({
         type: 'error',
         title: 'Failed to Generate Deck',
-        data: err.message || String(err)
+        data: err.message || String(err),
       })
     } finally {
       setLoading(false)
@@ -382,15 +479,25 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
   }
 
   // Fetch Duel Details from on-chain
+  const [duelFetchError, setDuelFetchError] = useState<string>('')
   const fetchDuelDetails = async () => {
     if (!duelId || !duelId.startsWith('0x')) return
     setDetailsLoading(true)
+    setDuelFetchError('')
     try {
       const res = await client.getObject({
         id: duelId,
         options: { showContent: true }
       })
-      const content = res.data?.content as any
+      if (res.error) {
+        throw new Error(`getObject error: ${JSON.stringify(res.error)}`)
+      }
+      if (!res.data) {
+        setDuelDetails(null)
+        setDuelFetchError(`Object ${duelId.slice(0, 12)}… not found on chain.`)
+        return
+      }
+      const content = res.data.content as any
       if (content && content.fields) {
         setDuelDetails(content.fields)
         const objType = res.data?.type || ''
@@ -448,10 +555,12 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
         }
       } else {
         setDuelDetails(null)
+        setDuelFetchError('Object content has no fields — wrong type?')
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to fetch duel details:', err)
-      setDuelDetails(null)
+      setDuelFetchError(err?.message || String(err))
+      // Keep prior duelDetails so the user can still see stale state on a transient RPC error.
     } finally {
       setDetailsLoading(false)
     }
@@ -469,7 +578,7 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
       const tx = new Transaction()
       const stakeCoin = await getStakeCoin(tx, parsedStake, coinType)
       
-      txCreateDuel(tx, stakeCoin, generatedHash, coinType)
+      txCreateDuel(tx, stakeCoin, generatedHash, generatedCards.length, coinType)
 
       const result = await signAndExecute({
         transaction: tx,
@@ -767,7 +876,7 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
     return null
   }
 
-  // Action: Finalize Duel (one-shot — scores all 5 cards + distributes payout)
+  // Action: Finalize Duel (one-shot — scores all N cards + distributes payout)
   const handleFinalizeDuel = async () => {
     if (!account || !duelId) return
     setLoading(true)
@@ -788,7 +897,7 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
         throw new Error(`Failed to find PredictManager for creator (${duelDetails.creator.slice(0, 10)}...) or challenger (${duelDetails.challenger.slice(0, 10)}...) on-chain.`)
       }
 
-      // All 5 cards reference the same oracle (deck constraint). Pull from card 0.
+      // All cards reference the same oracle in single-oracle decks. Pull from card 0.
       let activeOracle = oracleId
       if (duelDetails?.cards?.[0]?.fields?.oracle_id) {
         activeOracle = duelDetails.cards[0].fields.oracle_id
@@ -814,79 +923,6 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
         type: 'error',
         title: 'Finalize Duel Failed',
         data: err.message || String(err)
-      })
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // Action: Finalize via multi-oracle PTB — each card uses its own oracle.
-  // Production path when the deck has 5 different oracles (the default
-  // deck generator behaviour). Requires ALL 5 oracles to be settled.
-  const handleFinalizeMulti = async () => {
-    if (!account || !duelId) return
-    setLoading(true)
-    try {
-      if (!duelDetails?.creator || !duelDetails?.challenger) {
-        throw new Error('Duel details not loaded')
-      }
-      if (!duelDetails?.cards?.length || duelDetails.cards.length < 5) {
-        throw new Error('Deck not fully revealed — expected 5 cards')
-      }
-
-      const oracleIds: string[] = (duelDetails.cards as any[]).map(
-        (c: any) => c?.fields?.oracle_id as string
-      )
-      if (oracleIds.length !== 5 || oracleIds.some((o) => !o)) {
-        throw new Error('Could not read all 5 card oracle ids')
-      }
-
-      // Pre-check: every oracle must be Settled.
-      const unsettled = oracleIds.filter((o) => oraclesInfo[o]?.status !== 'Settled')
-      if (unsettled.length > 0) {
-        throw new Error(
-          `${unsettled.length}/5 oracle(s) not yet settled. Wait or use the test PTB.`
-        )
-      }
-
-      onOutput({
-        type: 'info',
-        title: 'Resolving Managers',
-        data: 'Looking up PredictManager IDs for creator and challenger...',
-      })
-
-      const p0Manager = await findManagerOnChain(duelDetails.creator)
-      const p1Manager = await findManagerOnChain(duelDetails.challenger)
-      if (!p0Manager || !p1Manager) {
-        throw new Error('Failed to find PredictManager for both players')
-      }
-
-      const tx = new Transaction()
-      txFinalizeDuelMulti(
-        tx,
-        duelId,
-        p0Manager,
-        p1Manager,
-        oracleIds as [string, string, string, string, string],
-        duelCoinType,
-      )
-
-      const result = await signAndExecute({ transaction: tx })
-
-      onOutput({
-        type: 'success',
-        title: 'Finalized (multi-oracle)',
-        data: `Duel ${duelId} finalized using all 5 oracles:\n` +
-              oracleIds.map((o, i) => `  Card ${i}: ${o}`).join('\n'),
-        txDigest: result.digest,
-      })
-
-      setTimeout(fetchDuelDetails, 1500)
-    } catch (err: any) {
-      onOutput({
-        type: 'error',
-        title: 'Multi-oracle finalize failed',
-        data: err.message || String(err),
       })
     } finally {
       setLoading(false)
@@ -931,7 +967,7 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
         title: 'Finalized via test PTB',
         data: `Duel ${duelId} finalized using oracle ${oracleId} ` +
               `(${oraclesInfo[oracleId]?.status || 'unknown'}). ` +
-              `Score applied to all 5 cards (test mode — anti-replay skipped, ` +
+              `Score applied to all ${duelDetails?.cards?.length ?? '?'} cards (test mode — anti-replay skipped, ` +
               `falls back to spot price if not settled).`,
         txDigest: result.digest,
       })
@@ -997,7 +1033,7 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
           ⚔️ Flicky Duel Panel
         </h2>
         <p className="mt-1 text-sm text-gray-400">
-          Create, play, settle, and finalize 5-card prediction matches
+          Create, play, settle, and finalize N-card prediction matches
         </p>
       </div>
 
@@ -1093,7 +1129,7 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Swipes Progress:</span>
-                <span>P0: {duelDetails.p0_next_card_idx}/5 | P1: {duelDetails.p1_next_card_idx}/5</span>
+                <span>P0: {duelDetails.p0_next_card_idx}/{duelDetails.deck_size ?? '?'} | P1: {duelDetails.p1_next_card_idx}/{duelDetails.deck_size ?? '?'}</span>
               </div>
               {/* Per-duel PnL: derived from this Duel object only.
                   Pre-finalize: projection using current spot price (settlement_price > strike ↔ UP).
@@ -1303,8 +1339,19 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
               )}
             </div>
           ) : (
-            <div className="flex h-32 items-center justify-center text-xs text-gray-500">
-              No active duel object loaded. Put a Duel ID above to fetch.
+            <div className="flex h-32 flex-col items-center justify-center gap-2 text-xs text-gray-500">
+              {detailsLoading ? (
+                <span>⏳ Fetching duel...</span>
+              ) : duelFetchError ? (
+                <>
+                  <span className="text-red-400">❌ Failed to load duel</span>
+                  <span className="text-[10px] text-red-300 max-w-md text-center break-words">
+                    {duelFetchError}
+                  </span>
+                </>
+              ) : (
+                <span>No active duel object loaded. Put a Duel ID above to fetch.</span>
+              )}
             </div>
           )}
         </div>
@@ -1321,18 +1368,82 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-3">
-              <span className="text-xs font-medium text-gray-400 block">Staking Amount ({getCoinDetails(duelCoinType).symbol})</span>
-              <input
-                type="number"
-                step="1"
-                value={stakeAmount}
-                onChange={(e) => setStakeAmount(e.target.value)}
-                className="w-full rounded border border-gray-800 bg-gray-950 px-3 py-1.5 text-sm focus:border-blue-600 focus:outline-none"
-              />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] font-medium text-gray-400 block">Stake ({getCoinDetails(duelCoinType).symbol})</label>
+                  <input
+                    type="number"
+                    step="1"
+                    value={stakeAmount}
+                    onChange={(e) => setStakeAmount(e.target.value)}
+                    className="mt-1 w-full rounded border border-gray-800 bg-gray-950 px-2 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-medium text-gray-400 block">Cards (1–20)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    step={1}
+                    value={deckSize}
+                    onChange={(e) => setDeckSize(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+                    className="mt-1 w-full rounded border border-gray-800 bg-gray-950 px-2 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] font-medium text-gray-400 block">
+                    Oracle (sorted by nearest expiry)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={loadEligibleOracles}
+                    disabled={oraclesLoading}
+                    className="text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-50"
+                    title="Re-fetch eligible BTC oracles"
+                  >
+                    {oraclesLoading ? '⏳ loading…' : '🔄 refresh'}
+                  </button>
+                </div>
+                <select
+                  value={selectedOracleId}
+                  onChange={(e) => setSelectedOracleId(e.target.value)}
+                  className="mt-1 w-full rounded border border-gray-800 bg-gray-950 px-2 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+                  disabled={eligibleOracles.length === 0}
+                >
+                  {eligibleOracles.length === 0 && (
+                    <option value="">
+                      {oraclesLoading
+                        ? 'Loading eligible BTC oracles…'
+                        : oraclesError
+                          ? '❌ Failed to load — see message below'
+                          : 'No eligible oracle (try refresh)'}
+                    </option>
+                  )}
+                  {eligibleOracles.map((o, i) => {
+                    const mins = Math.max(0, Math.floor((Number(o.expiry) - nowMs) / 60000))
+                    return (
+                      <option key={o.id} value={o.id}>
+                        {i === 0 ? '★ ' : ''}
+                        {o.id.slice(0, 10)}… exp {mins}m · spot ${(Number(o.spot) / 1e9).toFixed(2)}
+                      </option>
+                    )
+                  })}
+                </select>
+                {oraclesError && (
+                  <p className="mt-1 text-[10px] text-red-400 leading-tight">
+                    {oraclesError}
+                  </p>
+                )}
+              </div>
+
               <div className="flex gap-2">
                 <button
                   onClick={handleGenerateDeck}
-                  disabled={loading}
+                  disabled={loading || eligibleOracles.length === 0}
                   className="flex-1 rounded bg-blue-700 px-3 py-2 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50 transition"
                 >
                   🎲 Generate Deck Hash
@@ -1348,15 +1459,23 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
             </div>
 
             <div className="flex flex-col justify-end">
-              <div className="rounded bg-gray-950 p-3 text-xs text-gray-400 border border-gray-850 h-[84px] overflow-y-auto mb-2">
+              <div className="rounded bg-gray-950 p-3 text-xs text-gray-400 border border-gray-850 h-[110px] overflow-y-auto mb-2">
                 {generatedHash.length > 0 ? (
                   <div>
-                    <span className="text-green-400 font-semibold">Deck ready!</span>
+                    <span className="text-green-400 font-semibold">Deck ready! ({generatedCards.length} cards)</span>
                     <span className="block truncate mt-1">Hash: {toHex(generatedHash)}</span>
-                    <span className="block mt-0.5 text-[10px]">Strikes: {generatedCards.map(c => (Number(c.strike) / 1e9).toFixed(2)).join(', ')}</span>
+                    <span className="block mt-0.5 text-[10px]">
+                      Strikes: {generatedCards.map((c) => (Number(c.strike) / 1e9).toFixed(2)).join(', ')}
+                    </span>
                   </div>
                 ) : (
-                  <span>Click "Generate Deck Hash" to create a fresh 5-card deck of strikes based on the selected Oracle's price.</span>
+                  <span>
+                    Pick deck size + starting oracle (defaults to nearest expiry ★), then click
+                    "Generate Deck Hash" to build N cards. Each card uses the i-th nearest oracle
+                    (wraps if N &gt; available). Strike = each oracle's ATM spot.{' '}
+                    <span className="text-yellow-500">Tip:</span> avoid picking an oracle expiring
+                    in &lt;30m — once it expires, that card can no longer be swiped.
+                  </span>
                 )}
               </div>
               <button
@@ -1399,20 +1518,34 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
           </p>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div>
-              <label className="block text-[10px] font-medium text-gray-400">Card Index (0-4)</label>
-              <select
-                value={swipeCardIdx}
-                onChange={(e) => setSwipeCardIdx(Number(e.target.value))}
-                className="mt-1 w-full rounded border border-gray-800 bg-gray-950 px-2 py-1 text-xs focus:border-blue-600 focus:outline-none"
-              >
-                <option value={0}>Card 0</option>
-                <option value={1}>Card 1</option>
-                <option value={2}>Card 2</option>
-                <option value={3}>Card 3</option>
-                <option value={4}>Card 4</option>
-              </select>
-            </div>
+            {(() => {
+              // Card count comes from the on-chain duel when loaded, falling
+              // back to the locally-generated deck (pre-create state) or the
+              // default if neither is available.
+              const cardCount = (
+                Number(duelDetails?.deck_size) ||
+                duelDetails?.cards?.length ||
+                generatedCards.length ||
+                deckSize
+              )
+              const safeCount = Math.max(1, Math.min(20, cardCount))
+              return (
+                <div>
+                  <label className="block text-[10px] font-medium text-gray-400">
+                    Card Index (0–{safeCount - 1})
+                  </label>
+                  <select
+                    value={Math.min(swipeCardIdx, safeCount - 1)}
+                    onChange={(e) => setSwipeCardIdx(Number(e.target.value))}
+                    className="mt-1 w-full rounded border border-gray-800 bg-gray-950 px-2 py-1 text-xs focus:border-blue-600 focus:outline-none"
+                  >
+                    {Array.from({ length: safeCount }, (_, i) => (
+                      <option key={i} value={i}>Card {i}</option>
+                    ))}
+                  </select>
+                </div>
+              )
+            })()}
 
             <div>
               <label className="block text-[10px] font-medium text-gray-400">Prediction</label>
@@ -1447,13 +1580,40 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
             </div>
           </div>
 
-          <button
-            onClick={handleRecordSwipe}
-            disabled={loading || !duelId || !managerId || (duelDetails && duelDetails.status !== 2)}
-            className="w-full rounded bg-cyan-700 px-3 py-2 text-xs font-medium text-white hover:bg-cyan-600 disabled:opacity-50 transition"
-          >
-            ✍️ Record Swipe
-          </button>
+          {(() => {
+            const card = duelDetails?.cards?.[swipeCardIdx]
+            const cardOracleId = card?.fields?.oracle_id as string | undefined
+            const cardOracleInfo = cardOracleId ? oraclesInfo[cardOracleId] : null
+            const cardOracleStatus = cardOracleInfo?.status as string | undefined
+            const oracleLive = cardOracleStatus === 'Active'
+            const oracleBlock = !!cardOracleId && cardOracleStatus && !oracleLive
+            return (
+              <>
+                <button
+                  onClick={handleRecordSwipe}
+                  disabled={
+                    loading ||
+                    !duelId ||
+                    !managerId ||
+                    (duelDetails && duelDetails.status !== 2) ||
+                    oracleBlock
+                  }
+                  className="w-full rounded bg-cyan-700 px-3 py-2 text-xs font-medium text-white hover:bg-cyan-600 disabled:opacity-50 transition"
+                  title={oracleBlock ? `Card ${swipeCardIdx}'s oracle is ${cardOracleStatus} — predict::mint will abort.` : ''}
+                >
+                  ✍️ Record Swipe
+                </button>
+                {oracleBlock && (
+                  <p className="mt-2 text-[10px] text-yellow-500/80 leading-tight">
+                    ⚠️ Card {swipeCardIdx}'s oracle ({cardOracleId?.slice(0, 10)}…) is{' '}
+                    <span className="font-bold">{cardOracleStatus}</span>. The mint will abort with{' '}
+                    <code>assert_live_oracle</code> (DeepBook code 4). Either pick a different card
+                    or use refund / test-finalize to unwind the duel.
+                  </p>
+                )}
+              </>
+            )
+          })()}
         </div>
 
         {/* Step 4: Finalize */}
@@ -1462,83 +1622,80 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
             <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">4</span>
             <h4 className="text-sm font-semibold text-gray-200">Finalize</h4>
           </div>
-          <p className="text-xs text-gray-400">
-            One-shot finalize: reads <code className="text-gray-300">oracle.settlement_price</code>, scores all 5 cards inline, distributes the stake based on PnL.
-            No per-card settle. The <code className="text-gray-300">DuelFinalized</code> event carries the oracle id + settlement_price as on-chain proof.
-          </p>
-
-          <div className="flex items-end gap-2 w-full pt-1">
-            <button
-              onClick={handleFinalizeDuel}
-              disabled={loading || !duelId || (duelDetails && duelDetails.status !== 2)}
-              className="flex-1 rounded bg-purple-700 px-3 py-2 text-xs font-medium text-white hover:bg-purple-600 disabled:opacity-50 transition"
-              title="finalize: requires all 5 cards to share the SAME oracle (single-oracle deck)."
-            >
-              🏆 Finalize (1 oracle)
-            </button>
-            <button
-              onClick={handleRefundDuel}
-              disabled={loading || !duelId || (duelDetails && duelDetails.status === 3)}
-              className="flex-1 rounded bg-red-850 px-3 py-2 text-xs font-medium text-white hover:bg-red-800 disabled:opacity-50 transition border border-red-700"
-            >
-              💸 Refund / Cancel Duel
-            </button>
-          </div>
-
-          {/* Multi-oracle finalize: production path when deck has 5 different oracles. */}
           {(() => {
             const oracleIds = (duelDetails?.cards as any[] | undefined)
               ?.map((c: any) => c?.fields?.oracle_id as string | undefined)
               .filter((o): o is string => !!o) ?? []
-            const settledCount = oracleIds.filter((o) => oraclesInfo[o]?.status === 'Settled').length
-            const allSettled = oracleIds.length === 5 && settledCount === 5
+            const N = oracleIds.length || Number(duelDetails?.deck_size) || generatedCards.length || deckSize
+            const uniqueOracles = new Set(oracleIds).size
+            const multiOracle = uniqueOracles > 1
+            const settled = oracleIds.filter((oid) => oraclesInfo[oid]?.status === 'Settled')
+            const withSpot = oracleIds.filter((oid) => {
+              const sp = oraclesInfo[oid]?.spotPrice
+              return sp && Number(sp) > 0
+            })
+            const has = settled.length > 0 || withSpot.length > 0
+            const mode = settled.length > 0
+              ? `${settled.length}/${N} settled`
+              : withSpot.length > 0
+                ? `spot (${withSpot.length}/${N} priced)`
+                : 'waiting'
             return (
-              <button
-                onClick={handleFinalizeMulti}
-                disabled={loading || !duelId || (duelDetails && duelDetails.status !== 2) || !allSettled}
-                className="w-full rounded bg-indigo-700 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50 transition"
-                title={allSettled
-                  ? 'Each card scored against its own oracle.'
-                  : `Waiting for oracles to settle (${settledCount}/5)`}
-              >
-                🎯 Finalize (multi-oracle: {settledCount}/5 settled)
-              </button>
+              <>
+                <p className="text-xs text-gray-400">
+                  One-shot finalize: reads <code className="text-gray-300">oracle.settlement_price</code>,
+                  scores all {N} card{N === 1 ? '' : 's'} inline, distributes the stake based on PnL.
+                  The <code className="text-gray-300">DuelFinalized</code> event carries the oracle id +
+                  settlement_price as on-chain proof.
+                </p>
+                <div className="flex items-end gap-2 w-full pt-1">
+                  <button
+                    onClick={handleFinalizeDuel}
+                    disabled={loading || !duelId || (duelDetails && duelDetails.status !== 2) || multiOracle}
+                    className="flex-1 rounded bg-purple-700 px-3 py-2 text-xs font-medium text-white hover:bg-purple-600 disabled:opacity-50 transition"
+                    title={multiOracle
+                      ? `Deck has ${uniqueOracles} different oracles. Use ⚗️ test finalize.`
+                      : `Reads the deck's single oracle settlement_price, scores all ${N} cards, pays the winner.`}
+                  >
+                    🏆 Finalize
+                  </button>
+                  <button
+                    onClick={handleRefundDuel}
+                    disabled={loading || !duelId || (duelDetails && duelDetails.status === 3)}
+                    className="flex-1 rounded bg-red-850 px-3 py-2 text-xs font-medium text-white hover:bg-red-800 disabled:opacity-50 transition border border-red-700"
+                  >
+                    💸 Refund / Cancel Duel
+                  </button>
+                </div>
+                {multiOracle && (
+                  <p className="mt-2 text-[10px] text-yellow-500/80 leading-tight">
+                    Deck has {uniqueOracles} different oracles. Production <code>finalize</code> requires
+                    all {N} cards to share one oracle; use ⚗️ test finalize below to finalize with one
+                    oracle's price applied to every card.
+                  </p>
+                )}
+
+                {/* TEST/DEV — finalize against any oracle with a usable price. */}
+                <div className="mt-3 pt-3 border-t border-dashed border-yellow-900/50 space-y-2">
+                  <p className="text-[10px] text-yellow-500/80 leading-relaxed">
+                    <span className="font-bold">⚗️ Test mode:</span>{' '}
+                    finalize using a single oracle from the deck — prefers a settled oracle but
+                    falls back to the current spot price if none has settled. Applies that price
+                    to all {N} card{N === 1 ? '' : 's'} regardless of each card's actual oracle.
+                    Skips anti-replay. <em>Use only on testnet</em>.
+                  </p>
+                  <button
+                    onClick={handleFinalizeTestOneOracle}
+                    disabled={loading || !duelId || (duelDetails && duelDetails.status !== 2) || !has}
+                    className="w-full rounded bg-yellow-900/40 px-3 py-1.5 text-xs font-medium text-yellow-200 hover:bg-yellow-900/60 disabled:opacity-40 transition border border-yellow-900/60"
+                    title={has ? `Will use ${settled[0] || withSpot[0]}` : 'No oracle with usable price yet'}
+                  >
+                    ⚗️ Finalize (test — single oracle: {mode})
+                  </button>
+                </div>
+              </>
             )
           })()}
-
-          {/* TEST/DEV — finalize against any oracle with a usable price. */}
-          <div className="mt-3 pt-3 border-t border-dashed border-yellow-900/50 space-y-2">
-            <p className="text-[10px] text-yellow-500/80 leading-relaxed">
-              <span className="font-bold">⚗️ Test mode:</span>{' '}
-              finalize using a single oracle from the deck — prefers a
-              settled oracle but falls back to the current spot price if
-              none has settled. Applies that price to all 5 cards regardless
-              of each card's actual oracle. Skips anti-replay.{' '}
-              <em>Use only on testnet</em>.
-            </p>
-            {(() => {
-              const oracleIds = (duelDetails?.cards as any[] | undefined)
-                ?.map((c: any) => c?.fields?.oracle_id as string | undefined)
-                .filter((oid): oid is string => !!oid) ?? []
-              const settled = oracleIds.filter((oid) => oraclesInfo[oid]?.status === 'Settled')
-              const withSpot = oracleIds.filter((oid) => {
-                const sp = oraclesInfo[oid]?.spotPrice
-                return sp && Number(sp) > 0
-              })
-              const has = settled.length > 0 || withSpot.length > 0
-              const mode = settled.length > 0 ? `${settled.length}/5 settled` : withSpot.length > 0 ? `spot (${withSpot.length}/5 priced)` : 'waiting'
-              return (
-                <button
-                  onClick={handleFinalizeTestOneOracle}
-                  disabled={loading || !duelId || (duelDetails && duelDetails.status !== 2) || !has}
-                  className="w-full rounded bg-yellow-900/40 px-3 py-1.5 text-xs font-medium text-yellow-200 hover:bg-yellow-900/60 disabled:opacity-40 transition border border-yellow-900/60"
-                  title={has ? `Will use ${settled[0] || withSpot[0]}` : 'No oracle with usable price yet'}
-                >
-                  ⚗️ Finalize (test — single oracle: {mode})
-                </button>
-              )
-            })()}
-          </div>
         </div>
       </div>
     </div>

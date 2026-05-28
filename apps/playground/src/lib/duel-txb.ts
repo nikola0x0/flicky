@@ -6,6 +6,7 @@ export const txCreateDuel = (
   tx: Transaction,
   stakeCoin: any,
   deckHash: number[],
+  deckSize: number,
   coinType: string
 ) => {
   if (!CONFIG.flickyPackageId) {
@@ -18,6 +19,7 @@ export const txCreateDuel = (
     arguments: [
       stakeCoin,
       tx.pure.vector('u8', deckHash),
+      tx.pure.u64(BigInt(deckSize)),
     ],
   })
 }
@@ -25,6 +27,7 @@ export const txCreateDuel = (
 export const txCreateDuelFree = (
   tx: Transaction,
   deckHash: number[],
+  deckSize: number,
   coinType: string = '0x2::sui::SUI'
 ) => {
   if (!CONFIG.flickyPackageId) {
@@ -33,7 +36,10 @@ export const txCreateDuelFree = (
   return tx.moveCall({
     target: `${CONFIG.flickyPackageId}::duel::create_duel_free`,
     typeArguments: [coinType],
-    arguments: [tx.pure.vector('u8', deckHash)],
+    arguments: [
+      tx.pure.vector('u8', deckHash),
+      tx.pure.u64(BigInt(deckSize)),
+    ],
   })
 }
 
@@ -198,38 +204,6 @@ export const txFinalizeDuel = (
       tx.object(p0Manager),
       tx.object(p1Manager),
       tx.object(oracleId),
-      tx.object(CONFIG.CLOCK_ID)
-    ]
-  })
-}
-
-// Production multi-oracle finalize: takes 5 oracle ids (one per card in
-// `Duel.cards`). All 5 must be Settled on-chain. Validates per-card
-// `card[i].oracle_id == oracle_i.id` and uses each oracle's
-// settlement_price + expiry for anti-replay.
-export const txFinalizeDuelMulti = (
-  tx: Transaction,
-  duelId: string,
-  p0Manager: string,
-  p1Manager: string,
-  oracleIds: [string, string, string, string, string],
-  coinType: string = '0x2::sui::SUI'
-) => {
-  if (!CONFIG.flickyPackageId) {
-    throw new Error('FLICKY_PACKAGE_ID not configured')
-  }
-  return tx.moveCall({
-    target: `${CONFIG.flickyPackageId}::duel::finalize_multi`,
-    typeArguments: [coinType],
-    arguments: [
-      tx.object(duelId),
-      tx.object(p0Manager),
-      tx.object(p1Manager),
-      tx.object(oracleIds[0]),
-      tx.object(oracleIds[1]),
-      tx.object(oracleIds[2]),
-      tx.object(oracleIds[3]),
-      tx.object(oracleIds[4]),
       tx.object(CONFIG.CLOCK_ID)
     ]
   })
