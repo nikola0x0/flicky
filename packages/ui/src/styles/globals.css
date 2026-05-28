@@ -331,6 +331,87 @@
 }
 
 /*
+ * CRT screen overlay — adapted from Alec Lownes' "Simulating a CRT
+ * Monitor in CSS" (https://blog.webguy.pw/blog/simulating-a-crt-monitor-in-css/).
+ *
+ * - `::before` paints a static scanline + RGB-mask layer over the content.
+ * - `::after` runs a subtle low-amplitude flicker (capped at ~12 % opacity,
+ *   not the wild 8 %-96 % of the original — that's too distracting on a
+ *   small in-game tile).
+ * - SVG strokes get a tiny phosphor glow via `drop-shadow`, so the lines
+ *   read like emitted light rather than ink.
+ *
+ * Apply with `className="crt-screen"`. The wrapper MUST have
+ * `position: relative` and `overflow: hidden` (the latter so the
+ * scanlines clip to rounded corners).
+ */
+.crt-screen {
+  position: relative;
+  overflow: hidden;
+  /* Elliptical pillow corners — the classic CRT face shape (wider
+     than tall, so the curvature reads as bowed glass, not a rounded
+     rectangle). */
+  border-radius: 22px / 14px;
+  /* Upper-left glass gleam, hinting at a light source on the face. */
+  background-image:
+    radial-gradient(ellipse 65% 45% at 28% 22%, rgba(255, 255, 255, 0.06), transparent 70%);
+  /* Edge vignette: a short-range corner shadow + a softer outer bowl —
+     together they suggest the screen surface curving away from the
+     viewer at the edges. */
+  box-shadow:
+    inset 0 0 18px rgba(0, 0, 0, 0.55),
+    inset 0 0 60px rgba(0, 0, 0, 0.35);
+}
+
+.crt-screen::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.28) 50%),
+    linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+  background-size: 100% 2px, 3px 100%;
+  z-index: 2;
+  pointer-events: none;
+  mix-blend-mode: overlay;
+}
+
+.crt-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(18, 16, 16, 0.12);
+  opacity: 0;
+  z-index: 3;
+  pointer-events: none;
+  animation: crt-flicker 0.18s infinite;
+}
+
+.crt-screen svg {
+  filter: drop-shadow(0 0 1.5px currentColor);
+}
+
+@keyframes crt-flicker {
+  0%   { opacity: 0.03; }
+  10%  { opacity: 0.08; }
+  20%  { opacity: 0.02; }
+  30%  { opacity: 0.10; }
+  40%  { opacity: 0.04; }
+  50%  { opacity: 0.07; }
+  60%  { opacity: 0.03; }
+  70%  { opacity: 0.09; }
+  80%  { opacity: 0.04; }
+  90%  { opacity: 0.06; }
+  100% { opacity: 0.03; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt-screen::after {
+    animation: none;
+  }
+}
+
+/*
  * Linear-app-derived palette.
  *
  *   canvas #010102        deepest dark

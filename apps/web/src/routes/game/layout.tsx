@@ -19,6 +19,7 @@ export interface GameOutletContext {
 const PUBLIC_ROUTES = new Set<string>(["/game/shop"])
 
 import { BalanceChip } from "@/components/balance-chip"
+import { DepositModal } from "@/components/deposit-modal"
 import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
@@ -56,6 +57,7 @@ const BEVEL_GRADIENT =
  */
 export default function GameLayout() {
   const [loginOpen, setLoginOpen] = useState(false)
+  const [depositOpen, setDepositOpen] = useState(false)
   const account = useCurrentAccount()
   const location = useLocation()
   const isPublicRoute = PUBLIC_ROUTES.has(location.pathname)
@@ -79,6 +81,7 @@ export default function GameLayout() {
         >
           <FrameHeader
             onSignInClick={() => setLoginOpen(true)}
+            onAddClick={() => setDepositOpen(true)}
             signedOut={!account && !isPublicRoute}
           />
           <main className="flex-1 overflow-hidden">
@@ -93,6 +96,13 @@ export default function GameLayout() {
       </div>
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
+      {account && (
+        <DepositModal
+          open={depositOpen}
+          address={account.address}
+          onClose={() => setDepositOpen(false)}
+        />
+      )}
     </>
   )
 }
@@ -152,9 +162,11 @@ function GameOutletTransition({ context }: { context: GameOutletContext }) {
 
 function FrameHeader({
   onSignInClick,
+  onAddClick,
   signedOut,
 }: {
   onSignInClick: () => void
+  onAddClick: () => void
   signedOut: boolean
 }) {
   const account = useCurrentAccount()
@@ -163,17 +175,20 @@ function FrameHeader({
   // so suppress the shop's tall decor header (it'd push the prompt
   // around route-to-route).
   const isShop = !signedOut && location.pathname === "/game/shop"
+  const isHome = location.pathname === "/game/home"
 
   return (
     <header
       className={`flex justify-between gap-2 px-3 py-3 ${
         isShop
           ? "min-h-[128px] items-start bg-[url('/decorations/top-decor.png')] bg-[length:auto_100%] bg-repeat-x [image-rendering:pixelated]"
-          : "items-center"
+          : isHome
+            ? "items-center bg-[#151837]"
+            : "items-center"
       } `}
     >
       {account ? (
-        <HeaderBalances address={account.address} />
+        <HeaderBalances address={account.address} onAddClick={onAddClick} />
       ) : (
         <PixelButton
           onClick={onSignInClick}
@@ -196,7 +211,13 @@ function FrameHeader({
   )
 }
 
-function HeaderBalances({ address }: { address: string }) {
+function HeaderBalances({
+  address,
+  onAddClick,
+}: {
+  address: string
+  onAddClick: () => void
+}) {
   const { data: dusdc } = useDusdcBalance()
   const { data: managerInfo } = useManagerBalance()
   const managerBalance = managerInfo?.balance ?? 0
@@ -214,13 +235,13 @@ function HeaderBalances({ address }: { address: string }) {
           icon="/tokens/usdc-icon.png"
           amount={(dusdc ?? 0).toFixed(2)}
           label="wallet"
-          to="/game/shop"
+          onClick={onAddClick}
         />
         <BalanceChip
           icon="/tokens/manager-usdc.png"
           amount={managerBalance.toFixed(2)}
           label="manager"
-          to="/game/shop"
+          onClick={onAddClick}
         />
       </div>
     </div>
