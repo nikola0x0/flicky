@@ -150,6 +150,42 @@ async function findManagerObject(
   return null
 }
 
+/**
+ * Return `owner`'s PredictManager, creating one via `predict::create_manager`
+ * if none exists. The `settle_card` no-swipe path never dereferences the
+ * manager's positions (the `Option<Swipe>` slot is `None`, so the scorer
+ * returns early), so any owned manager works as the arg — we just need a
+ * real object id to pass.
+ */
+async function ensureManagerObject(
+  client: SuiJsonRpcClient,
+  signer: Ed25519Keypair,
+): Promise<string> {
+  const owner = signer.toSuiAddress()
+  const existing = await findManagerObject(client, owner)
+  if (existing) return existing
+  const tx = new Transaction()
+  tx.moveCall({
+    target: `${DEEPBOOK_PREDICT_PACKAGE}::predict::create_manager`,
+    arguments: [],
+  })
+  const res = await client.signAndExecuteTransaction({
+    transaction: tx,
+    signer,
+    options: { showObjectChanges: true, showEffects: true },
+  })
+  if (res.effects?.status.status !== "success") {
+    throw new Error(`create_manager failed: ${res.effects?.status.error}`)
+  }
+  await client.waitForTransaction({ digest: res.digest })
+  const created = (res.objectChanges ?? []).find(
+    (c) =>
+      c.type === "created" && c.objectType.includes("::predict_manager::PredictManager"),
+  ) as { objectId: string } | undefined
+  if (!created) throw new Error("PredictManager not in objectChanges")
+  return normalizeSuiObjectId(created.objectId)
+}
+
 const describeFn = hasAdmin ? describe : describe.skip
 
 describeFn("e2e duel against testnet", () => {
@@ -334,19 +370,15 @@ describeFn("e2e duel against testnet", () => {
       // there's also no swipe in the slot, so `score_staked_card` returns
       // (0, 0) early via the `is_none()` short-circuit. Net: each call
       // ticks `cards_settled[i] = true` and emits CardSettled with zeros.
-      // Note: settle_card asserts `manager.owner() == sender` is NOT
-      // required — only `record_swipe` enforces that. settle_card just
-      // reads the manager's position. So passing dummy managers (admin's
-      // own object) works as long as those objects exist. We use admin's
-      // own PredictManager if it exists, otherwise we skip.
-      const adminManagerId = await findManagerObject(client, adminAddr)
-      const challengerManagerId = await findManagerObject(client, challengerAddr)
-      if (!adminManagerId || !challengerManagerId) {
-        console.log(
-          "no PredictManagers for admin+challenger — skipping settle_card sub-test",
-        )
-        return
-      }
+      // settle_card does NOT require `manager.owner() == sender` (only
+      // record_swipe does). With no swipes recorded, the scorer returns
+      // before reading positions, so any owned PredictManager works as
+      // both the p0 and p1 args — we just need real object ids. Create
+      // one for admin if absent (admin's address is stable across runs).
+      const adminManagerId = await ensureManagerObject(client, admin)
+      // Reuse admin's manager for both slots — no swipes ⇒ positions
+      // never read, so the p1 arg's owner is irrelevant here.
+      const challengerManagerId = adminManagerId
       const tx = new Transaction()
       for (let i = 0; i < revealCards.length; i++) {
         tx.moveCall({
