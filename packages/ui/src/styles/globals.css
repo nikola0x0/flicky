@@ -348,6 +348,19 @@
 .crt-screen {
   position: relative;
   overflow: hidden;
+  /* Elliptical pillow corners — the classic CRT face shape (wider
+     than tall, so the curvature reads as bowed glass, not a rounded
+     rectangle). */
+  border-radius: 22px / 14px;
+  /* Upper-left glass gleam, hinting at a light source on the face. */
+  background-image:
+    radial-gradient(ellipse 65% 45% at 28% 22%, rgba(255, 255, 255, 0.06), transparent 70%);
+  /* Edge vignette: a short-range corner shadow + a softer outer bowl —
+     together they suggest the screen surface curving away from the
+     viewer at the edges. */
+  box-shadow:
+    inset 0 0 18px rgba(0, 0, 0, 0.55),
+    inset 0 0 60px rgba(0, 0, 0, 0.35);
 }
 
 .crt-screen::before {

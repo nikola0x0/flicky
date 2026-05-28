@@ -163,13 +163,16 @@ function FrameHeader({
   // so suppress the shop's tall decor header (it'd push the prompt
   // around route-to-route).
   const isShop = !signedOut && location.pathname === "/game/shop"
+  const isHome = location.pathname === "/game/home"
 
   return (
     <header
       className={`flex justify-between gap-2 px-3 py-3 ${
         isShop
           ? "min-h-[128px] items-start bg-[url('/decorations/top-decor.png')] bg-[length:auto_100%] bg-repeat-x [image-rendering:pixelated]"
-          : "items-center"
+          : isHome
+            ? "items-center bg-[#151837]"
+            : "items-center"
       } `}
     >
       {account ? (
