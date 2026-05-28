@@ -5,15 +5,19 @@
 
 export const CONFIG = {
   /**
-   * Flicky package on testnet — fresh publish 2026-05-26 (fix/contract:
-   * settlement collapsed to single finalize_multi, record_swipe snapshots
-   * premium on-chain). `apps/contracts/deployed.json` is the source of
-   * truth; if it drifts from this default, update here so fresh checkouts
-   * without VITE_FLICKY_PACKAGE_ID_TESTNET in .env.local still work.
+   * Flicky package on testnet. Source of truth is
+   * `apps/contracts/deployed.json`; if that drifts from this default,
+   * update here so fresh checkouts without
+   * `VITE_FLICKY_PACKAGE_ID_TESTNET` in `.env.local` still work.
+   *
+   * Settlement: per-card `settle_card(card_idx, &oracle)` × `deck_size`
+   * accumulates payout/premium onto the Duel, then `finalize` distributes
+   * the pot. `record_swipe` snapshots premium + p_swiped on-chain via
+   * `predict::get_trade_amounts` inside the swipe PTB.
    */
   packageId:
     import.meta.env.VITE_FLICKY_PACKAGE_ID_TESTNET ??
-    "0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44",
+    "0xaed053fcc146abd1da507eae72b4f3e9c838d83c83c7b68b230a3c9a2601a522",
 
   /** DeepBook Predict package on testnet (provides `oracle::OracleSVI`). */
   deepbookPredictPackageId:

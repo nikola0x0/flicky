@@ -32,8 +32,13 @@ interface DuelCard {
 
 interface DuelSwipe {
   isUp: boolean
+  /** dUSDC micro-units the player committed (= predict::mint quantity). */
+  quantity: bigint
+  /** dUSDC micro-units the player paid as premium (snapshotted on-chain
+   *  inside the swipe PTB via `get_trade_amounts`). */
+  premium: bigint
+  /** Probability of the swiped direction at swipe time, scaled by 1e9. */
   pSwiped: bigint
-  decideTimeMs: bigint
 }
 
 export interface DuelState {
@@ -41,28 +46,39 @@ export interface DuelState {
   /** Coin type used for this duel's stake — e.g. "0x2::sui::SUI" or dUSDC. */
   stakeCoinType: string
   status: DuelStatus
+  /** 1 = STAKED, 2 = FREE. */
+  tier: number
   creator: string
   challenger: string
   /** sha2-256 commitment over the deck, "0x"-prefixed lowercase hex.
    *  Used to fetch plaintext from `/deckmaster/reveal?hash=…` for the
    *  client-side reveal fallback. */
   deckHashHex: string
+  /** Number of cards in this deck. Chosen at create-time, [1, 20]. */
+  deckSize: bigint
   cards: DuelCard[]
   p0Stake: bigint
   p1Stake: bigint
-  p0Score: bigint
-  p1Score: bigint
+  /** Aggregated PnL fields written incrementally by `settle_card`. Net
+   *  score for player N = `pNPayout - pNPremium`. Both are zero until the
+   *  first card settles. */
+  p0Payout: bigint
+  p0Premium: bigint
+  p1Payout: bigint
+  p1Premium: bigint
   p0NextCardIdx: bigint
   p1NextCardIdx: bigint
+  /** Number of cards that have been `settle_card`-ed on chain. Once it
+   *  equals `deckSize`, `finalize` can run (no oracle args). */
   settledCount: bigint
   startedAtMs: bigint
-  /** Baseline for the NEXT swipe's decide-time clock — last swipe time
-   *  for that player, or `startedAtMs` if no swipes yet. */
-  p0LastSwipeOrStartMs: bigint
-  p1LastSwipeOrStartMs: bigint
   p0Swipes: (DuelSwipe | null)[]
   p1Swipes: (DuelSwipe | null)[]
-  cardSettlements: (bigint | null)[]
+  /** Length == deckSize. `cardsSettled[i] === true` ⇔ `settle_card(i)`
+   *  has landed; `cardSettlementPrices[i]` is the oracle's price at that
+   *  settle (0 when unsettled). */
+  cardsSettled: boolean[]
+  cardSettlementPrices: bigint[]
 }
 
 const STATUS_MAP: Record<string, DuelStatus> = {
@@ -125,6 +141,7 @@ export function buildCreateDuelTx(
   deckHash: Uint8Array,
   stakeAmount: bigint,
   stakeCoinType: string = CONFIG.stakeType,
+  deckSize: number = DEFAULT_DECK_SIZE,
 ): Transaction {
   if (deckHash.length !== 32) throw new Error("deck hash must be 32 bytes (sha-256)")
 
@@ -134,12 +151,23 @@ export function buildCreateDuelTx(
   tx.add(
     duelGen.createDuel({
       package: packageId,
-      arguments: [stake, tx.pure.vector("u8", Array.from(deckHash))],
+      arguments: [
+        stake,
+        tx.pure.vector("u8", Array.from(deckHash)),
+        BigInt(deckSize),
+      ],
       typeArguments: [stakeCoinType],
     }),
   )
   return tx
 }
+
+/**
+ * Default cards per duel. Matches the contract's `DEFAULT_DECK_SIZE`
+ * constant and the playground's E2E expectations. Variable deck sizes
+ * (1–20) are supported by `create_duel(stake, deck_hash, deck_size)`.
+ */
+export const DEFAULT_DECK_SIZE = 5
 
 /**
  * Reveal the previously-committed deck. Permissionless — any address can
@@ -208,6 +236,7 @@ export async function buildCreateDuelDusdcTx(
   deckHash: Uint8Array,
   stakeAmount: bigint,
   stakeCoinType: string,
+  deckSize: number = DEFAULT_DECK_SIZE,
 ): Promise<Transaction> {
   if (deckHash.length !== 32) throw new Error("deck hash must be 32 bytes (sha-256)")
   const tx = new Transaction()
@@ -215,7 +244,11 @@ export async function buildCreateDuelDusdcTx(
   tx.add(
     duelGen.createDuel({
       package: packageId,
-      arguments: [stake, tx.pure.vector("u8", Array.from(deckHash))],
+      arguments: [
+        stake,
+        tx.pure.vector("u8", Array.from(deckHash)),
+        BigInt(deckSize),
+      ],
       typeArguments: [stakeCoinType],
     }),
   )
@@ -304,11 +337,12 @@ export function buildSwipeTx(args: {
 }
 
 /**
- * Finalize a duel in a single PTB. The contract scores all 5 cards
- * one-shot — there is no per-card settle step. `finalize_multi` validates
- * each card against its own oracle's settlement_price and reads both
- * players' PredictManagers for anti-replay, so all 5 oracles must be
- * settled and both managers resolved before calling.
+ * Finalize a duel in a single PTB. Two-phase: one `settle_card(card_idx,
+ * &oracle)` per card scores it against its OWN oracle's `settlement_price`
+ * (and reads both PredictManagers for anti-replay), then `finalize`
+ * compares the accumulated per-player PnL and pays the pot. The caller
+ * must ensure every card's oracle has published `settlement_price` —
+ * otherwise the matching `settle_card` aborts `EOracleNotLive`.
  */
 export function buildFinalizeTx(
   duelId: string,
@@ -317,21 +351,21 @@ export function buildFinalizeTx(
   p1Manager: string,
   stakeCoinType: string = CONFIG.stakeType,
 ): Transaction {
-  if (cards.length !== 5) throw new Error("expected 5 cards to finalize")
+  if (cards.length === 0) throw new Error("deck has no cards to finalize")
   const tx = new Transaction()
+  cards.forEach((card, idx) => {
+    tx.add(
+      duelGen.settleCard({
+        package: packageId,
+        arguments: [duelId, p0Manager, p1Manager, card.oracleId, BigInt(idx)],
+        typeArguments: [stakeCoinType],
+      }),
+    )
+  })
   tx.add(
-    duelGen.finalizeMulti({
+    duelGen.finalize({
       package: packageId,
-      arguments: [
-        duelId,
-        p0Manager,
-        p1Manager,
-        cards[0].oracleId,
-        cards[1].oracleId,
-        cards[2].oracleId,
-        cards[3].oracleId,
-        cards[4].oracleId,
-      ],
+      arguments: [duelId],
       typeArguments: [stakeCoinType],
     }),
   )
@@ -348,29 +382,37 @@ interface MoveFieldWrapper<T> {
 interface RawDuelFields {
   id: { id: string }
   status: string | number
+  tier: string | number
+  deck_size: string
   deck_hash: number[] | string
   cards: Array<MoveFieldWrapper<{ oracle_id: string; strike: string }>>
   creator: string
   challenger: string
   p0_stake: MoveFieldWrapper<{ value: string }> | string
   p1_stake: MoveFieldWrapper<{ value: string }> | string
-  p0_score: string
-  p1_score: string
+  cards_settled: boolean[]
+  card_settlement_prices: string[]
+  settled_count: string
+  p0_payout: string
+  p0_premium: string
+  p1_payout: string
+  p1_premium: string
   p0_next_card_idx: string
   p1_next_card_idx: string
-  p0_last_swipe_or_start_ms: string
-  p1_last_swipe_or_start_ms: string
-  settled_count: string
   started_at_ms: string
-  // Sui's JSON-RPC unwraps `Option<T>`: `Some(x)` ⇒ x, `None` ⇒ null.
-  card_settlements: Array<string | null>
+  // Sui's JSON-RPC unwraps `Option<Swipe>`: `Some(x)` ⇒ wrapper, `None` ⇒ null.
   p0_swipes: Array<RawSwipe | null>
   p1_swipes: Array<RawSwipe | null>
 }
 
 interface RawSwipe {
   type?: string
-  fields: { is_up: boolean; p_swiped: string; decide_time_ms: string }
+  fields: {
+    is_up: boolean
+    quantity: string
+    premium: string
+    p_swiped: string
+  }
 }
 
 function balanceValue(b: MoveFieldWrapper<{ value: string }> | string): bigint {
@@ -383,8 +425,9 @@ function parseSwipe(raw: RawSwipe | null): DuelSwipe | null {
   const f = raw.fields
   return {
     isUp: f.is_up,
+    quantity: BigInt(f.quantity),
+    premium: BigInt(f.premium),
     pSwiped: BigInt(f.p_swiped),
-    decideTimeMs: BigInt(f.decide_time_ms),
   }
 }
 
@@ -413,25 +456,26 @@ export function parseDuel(obj: SuiObjectResponse): DuelState {
     id: normalizeSuiObjectId(fields.id.id),
     stakeCoinType,
     status: STATUS_MAP[String(fields.status)] ?? "PENDING",
+    tier: Number(fields.tier),
     creator: fields.creator,
     challenger: fields.challenger,
     deckHashHex,
+    deckSize: BigInt(fields.deck_size),
     cards,
     p0Stake: balanceValue(fields.p0_stake),
     p1Stake: balanceValue(fields.p1_stake),
-    p0Score: BigInt(fields.p0_score),
-    p1Score: BigInt(fields.p1_score),
+    p0Payout: BigInt(fields.p0_payout),
+    p0Premium: BigInt(fields.p0_premium),
+    p1Payout: BigInt(fields.p1_payout),
+    p1Premium: BigInt(fields.p1_premium),
     p0NextCardIdx: BigInt(fields.p0_next_card_idx),
     p1NextCardIdx: BigInt(fields.p1_next_card_idx),
     settledCount: BigInt(fields.settled_count),
     startedAtMs: BigInt(fields.started_at_ms),
-    p0LastSwipeOrStartMs: BigInt(fields.p0_last_swipe_or_start_ms),
-    p1LastSwipeOrStartMs: BigInt(fields.p1_last_swipe_or_start_ms),
     p0Swipes: fields.p0_swipes.map(parseSwipe),
     p1Swipes: fields.p1_swipes.map(parseSwipe),
-    cardSettlements: fields.card_settlements.map((s) =>
-      s === null ? null : BigInt(s),
-    ),
+    cardsSettled: fields.cards_settled.map((b) => !!b),
+    cardSettlementPrices: fields.card_settlement_prices.map((s) => BigInt(s)),
   }
 }
 

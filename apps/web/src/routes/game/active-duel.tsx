@@ -523,8 +523,9 @@ function PhaseSwiping({
 
 /**
  * Per-card running ledger. Settled cards show frozen binary PnL from
- * `cardOutcomes` (independent of finalize_multi — populated as each
- * card's oracle settles). Unsettled-but-swiped show smooth mark-to-market.
+ * `cardOutcomes` (populated by the indexer the moment each card's oracle
+ * publishes `settlement_price`, independent of when `settle_card` runs on
+ * chain). Unsettled-but-swiped show smooth mark-to-market.
  */
 function CardLedger({
   roomState,

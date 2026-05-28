@@ -393,44 +393,203 @@ export async function probeCard(
 }
 
 /**
- * Generate a deck, then probe each card on chain. Cards whose
- * PRG-chosen strike fails the probe are silently swapped to ATM
- * (snapped forward). The hash is computed AFTER the fixup so
- * `reveal_deck` matches the on-chain ground truth.
+ * Candidate strike offsets from the oracle's forward price, in basis points
+ * (1/100 of a percent). Listed from MOST aggressive to LEAST, then mirrored
+ * to cover both sides of the forward; `pickMaxAmplitudeStrike` walks these
+ * in descending |bps| order and picks the first one that passes
+ * `probeCard`.
  *
- * `probeQuantity` should match what swipes actually mint (the probe
- * exercises the same pricing path); default 20_000n matches
- * E2EFlowPanel's MINT_QUANTITY.
+ * The goal is to maximise the game's score variance: a strike far from
+ * forward gives an implied probability close to 0 or 1, so a correct UP/
+ * DOWN call there pays roughly `quantity` against a tiny `premium` — the
+ * payout asymmetry that makes the game fun. ATM (offset 0) is the safe
+ * fallback that always works but pays close to 50/50, which is boring.
+ *
+ * The on-chain pricing engine
+ * (`pricing_config::quote_spread_from_fair_price` and
+ * `predict::assert_mintable_ask`) rejects strikes whose fair price rounds
+ * to 0/1 or whose ask falls outside `[min_ask, max_ask]` (1%/99%). On
+ * low-vol short-dated oracles even ±5% fails — that's why the previous
+ * fixed `STRIKE_BUCKETS = [±1%, ±2%, ±3%, ±5%, ±6%]` deck regularly fell
+ * back to ATM. Probing the whole spectrum lets each card land on the
+ * widest still-viable offset for THAT oracle.
+ */
+const OFFSET_CANDIDATES_BPS: readonly number[] = [
+  2000, 1500, 1200, 1000, 800, 600, 500, 400, 300, 200, 100, 50,
+] as const
+
+/**
+ * Probe function shape — `(oracle, strike) → viable?`. Defaults to the
+ * real `probeCard` against a `SuiClient`; tests inject a synthetic
+ * function so the algorithm can be exercised without RPC.
+ */
+export type ProbeFn = (oracle: OracleSnapshot, strike: bigint) => Promise<boolean>
+
+/**
+ * Sign bias for `pickMaxAmplitudeStrike`:
+ *   * `+1` — only probe strikes ABOVE forward (DOWN-favoring market —
+ *           settlement likely below strike, UP swipe is the risky high-
+ *           reward play, DOWN is the safe-but-expensive play).
+ *   * `-1` — only probe strikes BELOW forward (UP-favoring market —
+ *           swipe UP is the safe play, DOWN is the long-shot).
+ *   * `undefined` — probe both signs (legacy / single-card use).
+ *
+ * Used by `buildAndProbeDeck` to force a balanced sign distribution
+ * across the whole deck so a single duel never ships as all-UP-favoring
+ * (boring: same swipe pattern wins everything).
+ */
+export type SignBias = -1 | 1
+
+/**
+ * For one oracle, find the strike that maximises `|strike - forward|`
+ * while still passing `probe` (which exercises both UP and DOWN
+ * `predict::mint`-like preconditions). Probes all candidates from
+ * `OFFSET_CANDIDATES_BPS` in parallel — dev_inspect is read-only, so the
+ * fan-out is cheap and we get the answer in one round-trip's worth of
+ * latency instead of K. Returns `null` if not even ATM is viable; caller
+ * treats that as a hard oracle failure.
+ *
+ * `signBias` restricts which side of `forward` the strike lands on:
+ *   * `+1` → strike > forward; `-1` → strike < forward; `undefined` →
+ *     PRG decides at each aggressiveness level.
+ *
+ * `prgStream` is consumed only when `signBias` is undefined — to
+ * randomise UP-side vs DOWN-side at each tier. When `signBias` is fixed
+ * the algorithm is deterministic for that oracle (still descends by
+ * `|bps|` so the most aggressive viable wins).
+ */
+export async function pickMaxAmplitudeStrike(
+  oracle: OracleSnapshot,
+  prgStream: Generator<number, never>,
+  probe: ProbeFn,
+  signBias?: SignBias,
+): Promise<{ strike: bigint; bps: number } | null> {
+  // Build candidate list ordered by descending |bps|.
+  //   * `signBias` set     → only that sign, monotone descending.
+  //   * `signBias` unset   → both signs interleaved at each |bps| tier,
+  //                          PRG-shuffled (legacy behavior).
+  const ordered: number[] = []
+  if (signBias !== undefined) {
+    for (const absBps of OFFSET_CANDIDATES_BPS) {
+      ordered.push(signBias * absBps)
+    }
+  } else {
+    for (const absBps of OFFSET_CANDIDATES_BPS) {
+      const shuffled = shuffle([-absBps, +absBps], prgStream)
+      ordered.push(...shuffled)
+    }
+  }
+  ordered.push(0) // ATM as last-resort safety net.
+
+  // Probe everything in parallel. Each candidate gets its snapped strike +
+  // probe result; nulls are unsuitable. Walking the ordered list afterwards
+  // and returning the first non-null entry preserves the descending-|bps|
+  // priority while letting the network round-trips overlap.
+  const probes = await Promise.all(
+    ordered.map(async (bps) => {
+      const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
+      if (raw <= 0n) return null
+      const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
+      const ok = await probe(oracle, strike)
+      return ok ? { strike, bps } : null
+    }),
+  )
+  for (const p of probes) {
+    if (p) return p
+  }
+  return null
+}
+
+/**
+ * Allocate sign bias across `deckSize` cards so a deck is never
+ * skewed all to one side:
+ *   * Even N → exactly N/2 UP-favoring + N/2 DOWN-favoring.
+ *   * Odd  N → (N+1)/2 of one sign + (N-1)/2 of the other; PRG picks
+ *              which sign gets the extra card.
+ * Card order PRG-shuffled so the "side" sequence varies per duel.
+ *
+ * ATM (bps=0) intentionally excluded — every card is forced aggressive.
+ * Per-card amplitude still floors to ATM if `pickMaxAmplitudeStrike`'s
+ * sign-constrained probe finds nothing else viable; that's a per-oracle
+ * fallback, not a deck-level design choice.
+ */
+export function allocateSignBalance(
+  deckSize: number,
+  prgStream: Generator<number, never>,
+): SignBias[] {
+  if (deckSize <= 0) return []
+  const half = Math.floor(deckSize / 2)
+  const extra = deckSize - 2 * half // 0 (even) or 1 (odd)
+  // Coin-flip from PRG: high half of byte = +1 extra, low half = -1 extra.
+  const upCount = extra ? half + (prgStream.next().value < 128 ? 1 : 0) : half
+  const downCount = deckSize - upCount
+  const out: SignBias[] = []
+  for (let i = 0; i < upCount; i++) out.push(+1)
+  for (let i = 0; i < downCount; i++) out.push(-1)
+  return shuffle(out, prgStream)
+}
+
+/**
+ * Generate a deck of `oracles.length` cards (one card per oracle). For
+ * each card, picks the most aggressive viable strike via
+ * `pickMaxAmplitudeStrike` — no fixed difficulty buckets, no silent ATM
+ * fallback unless the oracle's SVI literally rejects every offset.
+ *
+ * Why we don't go through `buildDeckFromOracles` anymore: the old path
+ * picked from a narrow ±1%–±6% bucket which the on-chain pricing
+ * frequently rejected on short-dated low-vol oracles, then quietly
+ * collapsed to ATM. Players got a 5-card deck that was effectively all
+ * coin-flips with no payout variance. The new path probes ±0.5%–±20%
+ * and picks whichever passes, so amplitude scales with each oracle's
+ * actual liquidity.
+ *
+ * Deck-level shape: signs are pre-allocated balanced (`allocateSignBalance`)
+ * so a 5-card deck always carries a mix of UP-favoring + DOWN-favoring
+ * strikes — players have to read the market both ways, not just swipe
+ * one direction.
  */
 export async function buildAndProbeDeck(
   client: SuiClient,
   oracles: OracleSnapshot[],
   seed: Uint8Array,
+  /** Override the per-strike probe — defaults to the real `probeCard`
+   *  against the supplied `client`. Tests inject a synthetic function to
+   *  exercise the descend-by-aggressiveness algorithm without RPC. */
+  probeOverride?: ProbeFn,
 ): Promise<GeneratedDeck> {
-  const initial = buildDeckFromOracles(oracles, seed)
-  const fixedCards: DeckCard[] = []
-  for (let i = 0; i < initial.cards.length; i++) {
-    const o = oracles[i]
-    const card = initial.cards[i]
-    const ok = await probeCard(client, o, card.strike)
-    if (ok) {
-      fixedCards.push(card)
-      continue
-    }
-    // Fall back to ATM (snapped forward). If even ATM fails, surface a
-    // hard error — that means the oracle itself is unusable.
-    const atm = snapToTick(o.forward, o.minStrike, o.tickSize)
-    const atmOk = await probeCard(client, o, atm)
-    if (!atmOk) {
-      throw new Error(
-        `oracle ${o.id} pricing rejects both PRG strike (${card.strike}) and ATM (${atm}) — pricing config may be unset`,
-      )
-    }
-    log.warn(
-      `card ${i}: PRG strike ${card.strike} rejected by pricing/ask-bounds, falling back to ATM ${atm}`,
-    )
-    fixedCards.push({ oracle_id: card.oracle_id, strike: atm })
+  if (oracles.length === 0) {
+    throw new Error("buildAndProbeDeck: at least one oracle required")
   }
+  const probe: ProbeFn =
+    probeOverride ?? ((o, strike) => probeCard(client, o, strike))
+  // Burn deterministic per-card sub-seeds off the main stream first so the
+  // parallel `Promise.all` below doesn't race against a shared PRG.
+  const stream = prgStream(seed)
+  const signs = allocateSignBalance(oracles.length, stream)
+  const subSeeds: Uint8Array[] = []
+  for (let i = 0; i < oracles.length; i++) {
+    const sub = new Uint8Array(32)
+    for (let k = 0; k < 32; k++) sub[k] = stream.next().value
+    subSeeds.push(sub)
+  }
+  const fixedCards: DeckCard[] = await Promise.all(
+    oracles.map(async (o, i) => {
+      const subStream = prgStream(subSeeds[i])
+      const pick = await pickMaxAmplitudeStrike(o, subStream, probe, signs[i])
+      if (pick === null) {
+        throw new Error(
+          `oracle ${o.id} has no viable strike (pricing config may be unset)`,
+        )
+      }
+      log.info(
+        `card ${i}: ${o.id.slice(0, 12)}… forward=${o.forward} → strike=${pick.strike} (offset ${pick.bps} bps, side=${signs[i] > 0 ? "DOWN-fav" : "UP-fav"})`,
+      )
+      return {
+        oracle_id: normalizeSuiAddress(o.id),
+        strike: pick.strike,
+      }
+    }),
+  )
   const bytes = DeckBcs.serialize(
     fixedCards.map((c) => ({
       oracle_id: c.oracle_id,

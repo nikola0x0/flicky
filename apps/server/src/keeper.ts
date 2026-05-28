@@ -8,11 +8,13 @@
  *      - If ACTIVE and not revealed, reveal the deck (deckmaster has
  *        the plaintext if anyone called /deckmaster/generate before
  *        the server restart).
- *      - If both players finished 5/5 and every card's oracle has a
- *        settlement_price, build a single PTB: finalize_multi (scores all
- *        5 cards + pays the side-pot) followed by redeem_permissionless × N
- *        (materializes each player's Predict payout). finalize runs first
- *        so it reads live positions before redeem zeroes them.
+ *      - If both players finished all swipes and every card's oracle has
+ *        a `settlement_price`, build a single PTB chaining
+ *        `settle_card × deck_size` (per-card scoring with each card's
+ *        own oracle) + `finalize` (distributes the side-pot) +
+ *        `redeem_permissionless × N` (materialises each player's Predict
+ *        payout). Settles run first so they read live positions before
+ *        redeem zeroes them.
  *   3. Remember finalized duel ids so we don't re-process.
  *
  * The keeper is permissionless on chain — it just needs gas (~0.01 SUI
@@ -269,14 +271,14 @@ export class Keeper {
       await this.tryReveal(duel)
       if (duel.cards.length === 0) return
 
-      // The new contract finalizes one-shot — no per-card settle. We only
-      // act on the happy path: both players completed all 5 swipes AND
-      // every oracle in the deck has settled (required by finalize_multi
-      // and redeem_permissionless alike). Stuck / partial duels are left
-      // to the players' own `refund_duel` (the server can't sign for them).
-      const bothDone = duel.p0NextCardIdx === 5 && duel.p1NextCardIdx === 5
+      // Happy path: both players completed every swipe AND every oracle
+      // in the deck has published `settlement_price`. Partial / stuck
+      // duels are left to the players' own `refund_duel` — the server
+      // can't sign on their behalf.
+      const deckSize = duel.cards.length
+      const bothDone =
+        duel.p0NextCardIdx === deckSize && duel.p1NextCardIdx === deckSize
       if (!bothDone) return
-      if (duel.cards.length !== 5) return
 
       const uniqueOracleIds = Array.from(
         new Set(duel.cards.map((c) => c.oracleId)),
@@ -300,26 +302,33 @@ export class Keeper {
 
       const tx = new Transaction()
 
-      // 1) Finalize FIRST. `finalize_multi` scores each card against its
-      //    own oracle's settlement_price and reads each player's LIVE
-      //    PredictManager position to flag early-redeemers. It must run
-      //    before any redeem in this PTB — redeeming first would zero the
-      //    positions and make every swipe score as "redeemed early".
-      //    oracle_i = cards[i].oracle (validated on-chain card-by-card).
+      // 1) `settle_card` per card, then `finalize`. Each settle_card scores
+      //    one card against its OWN oracle's `settlement_price` and reads
+      //    each player's LIVE PredictManager position to flag
+      //    early-redeemers. All settles MUST run before any redeem in this
+      //    PTB — redeeming first would zero the positions and make every
+      //    swipe score as "redeemed early". `finalize` (no oracle arg)
+      //    distributes the pot from the accumulated per-player payout /
+      //    premium fields filled by settle_card.
+      const settledCount = duel.cards.length
+      for (let i = 0; i < settledCount; i++) {
+        const card = duel.cards[i]
+        tx.moveCall({
+          target: `${this.packageId}::duel::settle_card`,
+          typeArguments: [duel.stakeCoinType],
+          arguments: [
+            tx.object(duelId),
+            tx.object(p0Manager),
+            tx.object(p1Manager),
+            tx.object(card.oracleId),
+            tx.pure.u64(BigInt(i)),
+          ],
+        })
+      }
       tx.moveCall({
-        target: `${this.packageId}::duel::finalize_multi`,
+        target: `${this.packageId}::duel::finalize`,
         typeArguments: [duel.stakeCoinType],
-        arguments: [
-          tx.object(duelId),
-          tx.object(p0Manager),
-          tx.object(p1Manager),
-          tx.object(duel.cards[0].oracleId),
-          tx.object(duel.cards[1].oracleId),
-          tx.object(duel.cards[2].oracleId),
-          tx.object(duel.cards[3].oracleId),
-          tx.object(duel.cards[4].oracleId),
-          tx.object("0x6"),
-        ],
+        arguments: [tx.object(duelId), tx.object("0x6")],
       })
 
       // 2) Redeem every recorded position (both players) so their dUSDC
@@ -374,7 +383,7 @@ export class Keeper {
       await this.client.waitForTransaction({ digest: res.digest })
       this.finalized.add(duelId)
       log.info(
-        `finalize_multi ${shortId(duelId)}` +
+        `settle_card×${settledCount} + finalize ${shortId(duelId)}` +
         (redeemsCount ? ` + ${redeemsCount} redeem(s)` : "") +
         ` · ${shortId(res.digest)}`,
       )

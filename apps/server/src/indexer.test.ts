@@ -1,7 +1,7 @@
 /**
  * Unit tests for the indexer's pure projection helper. Network-free —
  * exercises the (cards, swipes, settlements) → cardOutcomes math the
- * duel contract's finalize_multi also uses internally.
+ * duel contract's `settle_card` uses internally per card.
  */
 import { describe, expect, test } from "bun:test"
 import { computeCardOutcomes } from "./indexer"

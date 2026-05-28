@@ -10,6 +10,7 @@ import {
   txFinalizeDuel,
   txFinalizeDuelTestOneOracle,
   txRefundDuel,
+  txSettleCard,
   DuelCard
 } from '../../lib/duel-txb'
 import { buildMarketKey, txMint, readGetTradeAmounts } from '../../lib/predict-txb'
@@ -897,14 +898,28 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
         throw new Error(`Failed to find PredictManager for creator (${duelDetails.creator.slice(0, 10)}...) or challenger (${duelDetails.challenger.slice(0, 10)}...) on-chain.`)
       }
 
-      // All cards reference the same oracle in single-oracle decks. Pull from card 0.
-      let activeOracle = oracleId
-      if (duelDetails?.cards?.[0]?.fields?.oracle_id) {
-        activeOracle = duelDetails.cards[0].fields.oracle_id
+      // Two-phase finalize: settle each card against its OWN oracle, then
+      // call `finalize` to distribute the pot. Chain everything into one
+      // PTB so the resolution is atomic.
+      const cardRefs = (duelDetails?.cards ?? []) as Array<{
+        fields: { oracle_id: string }
+      }>
+      if (cardRefs.length === 0) {
+        throw new Error('Duel has no revealed cards — reveal_deck must run first.')
       }
-
       const tx = new Transaction()
-      txFinalizeDuel(tx, duelId, p0Manager, p1Manager, activeOracle, duelCoinType)
+      cardRefs.forEach((c, idx) => {
+        txSettleCard(
+          tx,
+          duelId,
+          p0Manager,
+          p1Manager,
+          c.fields.oracle_id,
+          idx,
+          duelCoinType,
+        )
+      })
+      txFinalizeDuel(tx, duelId, duelCoinType)
 
       const result = await signAndExecute({
         transaction: tx,
@@ -913,7 +928,7 @@ export default function DuelPanel({ onOutput }: DuelPanelProps) {
       onOutput({
         type: 'success',
         title: 'Duel Finalized Successfully',
-        data: `Duel ${duelId} finalized. Oracle ${activeOracle} settlement applied, payouts distributed.`,
+        data: `Duel ${duelId} finalized. Settled ${cardRefs.length} card(s) on per-oracle settlement, payouts distributed.`,
         txDigest: result.digest
       })
 

@@ -4,18 +4,30 @@
 
 
 /**
- * Flicky duel: a two-player, five-card prediction match escrowing stakes in a
- * shared object, consuming DeepBook Predict positions for correctness and
- * computing payout.
+ * Flicky duel: a two-player, N-card prediction match escrowing stakes in a shared
+ * object, consuming DeepBook Predict positions for correctness and computing
+ * payout. Each card pins its OWN DeepBook `OracleSVI`, so a deck of 5 cards can
+ * span 5 different oracle expiries / strikes.
  * 
  * Lifecycle: `PENDING` (creator staked, waiting for challenger) → `ACTIVE` (both
- * staked, swipes in progress) → `COMPLETE` (finalized or refunded).
+ * staked, swipes in progress, then per-card settle) → `COMPLETE` (finalized or
+ * refunded).
  * 
- * Finalization is one-shot: after both players complete their swipes and the
- * oracle settles, anyone (typically the server admin) calls `finalize`, which
- * reads the supplied oracle's settlement_price, scores all 5 cards inline,
- * compares PnL, and distributes the stake. The `DuelFinalized` event carries the
- * oracle id + settlement_price as on-chain proof of the computation.
+ * Finalization is two-phase:
+ * 
+ * 1.  `settle_card(card_idx, &oracle)` × `deck_size` — once each card's oracle has
+ *     published `settlement_price`, anyone calls this to score both players'
+ *     swipes for that card and accumulate the per-card payout/premium onto the
+ *     Duel. Each call emits a `CardSettled` event with the proof (oracle_id +
+ *     settlement_price).
+ * 2.  `finalize(duel)` — verifies all cards are settled (or the forfeit/refund
+ *     branches apply), compares aggregate PnL, and pays the pot.
+ * 
+ * Why two-phase: each card may pin a different oracle that settles on its own
+ * clock — Move can't pass a `vector<&OracleSVI>` (no references inside vectors),
+ * so we settle one oracle at a time and accumulate state on the Duel itself.
+ * Bonus: a slow oracle doesn't block the others, and a failed settle for one card
+ * doesn't roll back the rest.
  * 
  * Tiers: `STAKED` — players mint Predict positions; `record_swipe` enforces
  * `manager.owner() == sender` and anti-replay vs PredictManager. `FREE` — same
@@ -46,6 +58,12 @@ export const Duel = new MoveStruct({ name: `${$moduleName}::Duel<phantom T>`, fi
         id: bcs.Address,
         status: bcs.u8(),
         tier: bcs.u8(),
+        /**
+         * Number of cards in this duel. Chosen at create-time, bounded by
+         * [`MIN_DECK_SIZE`, `MAX_DECK_SIZE`]. Each card pins its OWN oracle — see
+         * `Card.oracle_id`. A 5-card duel can span 5 different oracles.
+         */
+        deck_size: bcs.u64(),
         deck_hash: bcs.vector(bcs.u8()),
         cards: bcs.vector(Card),
         creator: bcs.Address,
@@ -54,7 +72,23 @@ export const Duel = new MoveStruct({ name: `${$moduleName}::Duel<phantom T>`, fi
         p1_stake: balance.Balance,
         p0_swipes: bcs.vector(bcs.option(Swipe)),
         p1_swipes: bcs.vector(bcs.option(Swipe)),
-        /** Aggregated PnL fields written by `finalize`. Zero until then. */
+        /**
+         * Per-card settlement state. All three vectors / counter have length `deck_size`
+         * after `create_duel_internal`. `cards_settled[i]` flips to true after
+         * `settle_card(i)` lands; once all true (or the forfeit/refund branches apply),
+         * `finalize` distributes the pot.
+         */
+        cards_settled: bcs.vector(bcs.bool()),
+        /**
+         * Per-card settlement-price snapshot — written by `settle_card` so off-chain
+         * consumers can recompute scoring without re-reading the oracle. 0 = unsettled.
+         */
+        card_settlement_prices: bcs.vector(bcs.u64()),
+        settled_count: bcs.u64(),
+        /**
+         * Aggregated PnL fields incremented per `settle_card` call. Sum across cards
+         * already settled; read by `finalize` to pick the winner.
+         */
         p0_payout: bcs.u64(),
         p0_premium: bcs.u64(),
         p1_payout: bcs.u64(),
@@ -68,7 +102,8 @@ export const DuelCreated = new MoveStruct({ name: `${$moduleName}::DuelCreated`,
         creator: bcs.Address,
         stake_amount: bcs.u64(),
         deck_hash: bcs.vector(bcs.u8()),
-        tier: bcs.u8()
+        tier: bcs.u8(),
+        deck_size: bcs.u64()
     } });
 export const DeckRevealed = new MoveStruct({ name: `${$moduleName}::DeckRevealed`, fields: {
         duel_id: bcs.Address
@@ -88,6 +123,17 @@ export const SwipeRecorded = new MoveStruct({ name: `${$moduleName}::SwipeRecord
         premium: bcs.u64(),
         p_swiped: bcs.u64()
     } });
+export const CardSettled = new MoveStruct({ name: `${$moduleName}::CardSettled`, fields: {
+        duel_id: bcs.Address,
+        card_idx: bcs.u64(),
+        oracle_id: bcs.Address,
+        settlement_price: bcs.u64(),
+        actual_up: bcs.bool(),
+        p0_payout: bcs.u64(),
+        p0_premium: bcs.u64(),
+        p1_payout: bcs.u64(),
+        p1_premium: bcs.u64()
+    } });
 export const DuelFinalized = new MoveStruct({ name: `${$moduleName}::DuelFinalized`, fields: {
         duel_id: bcs.Address,
         winner: bcs.Address,
@@ -97,8 +143,8 @@ export const DuelFinalized = new MoveStruct({ name: `${$moduleName}::DuelFinaliz
         p0_premium_total: bcs.u64(),
         p1_payout_total: bcs.u64(),
         p1_premium_total: bcs.u64(),
-        oracle_id: bcs.Address,
-        settlement_price: bcs.u64()
+        primary_oracle_id: bcs.Address,
+        primary_settlement_price: bcs.u64()
     } });
 export const DuelRefunded = new MoveStruct({ name: `${$moduleName}::DuelRefunded`, fields: {
         duel_id: bcs.Address,
@@ -184,12 +230,14 @@ export function cardStrike(options: CardStrikeOptions) {
 export interface CreateDuelArguments {
     stake: RawTransactionArgument<string>;
     deckHash: RawTransactionArgument<Array<number>>;
+    deckSize: RawTransactionArgument<number | bigint>;
 }
 export interface CreateDuelOptions {
     package?: string;
     arguments: CreateDuelArguments | [
         stake: RawTransactionArgument<string>,
-        deckHash: RawTransactionArgument<Array<number>>
+        deckHash: RawTransactionArgument<Array<number>>,
+        deckSize: RawTransactionArgument<number | bigint>
     ];
     typeArguments: [
         string
@@ -199,9 +247,10 @@ export function createDuel(options: CreateDuelOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null,
-        'vector<u8>'
+        'vector<u8>',
+        'u64'
     ] satisfies (string | null)[];
-    const parameterNames = ["stake", "deckHash"];
+    const parameterNames = ["stake", "deckHash", "deckSize"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -212,11 +261,13 @@ export function createDuel(options: CreateDuelOptions) {
 }
 export interface CreateDuelFreeArguments {
     deckHash: RawTransactionArgument<Array<number>>;
+    deckSize: RawTransactionArgument<number | bigint>;
 }
 export interface CreateDuelFreeOptions {
     package?: string;
     arguments: CreateDuelFreeArguments | [
-        deckHash: RawTransactionArgument<Array<number>>
+        deckHash: RawTransactionArgument<Array<number>>,
+        deckSize: RawTransactionArgument<number | bigint>
     ];
     typeArguments: [
         string
@@ -226,9 +277,10 @@ export interface CreateDuelFreeOptions {
 export function createDuelFree(options: CreateDuelFreeOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
-        'vector<u8>'
+        'vector<u8>',
+        'u64'
     ] satisfies (string | null)[];
-    const parameterNames = ["deckHash"];
+    const parameterNames = ["deckHash", "deckSize"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -418,41 +470,117 @@ export function recordSwipeFree(options: RecordSwipeFreeOptions) {
         typeArguments: options.typeArguments
     });
 }
-export interface FinalizeArguments {
+export interface SettleCardArguments {
     duel: RawTransactionArgument<string>;
     p0Manager: RawTransactionArgument<string>;
     p1Manager: RawTransactionArgument<string>;
     oracle: RawTransactionArgument<string>;
+    cardIdx: RawTransactionArgument<number | bigint>;
 }
-export interface FinalizeOptions {
+export interface SettleCardOptions {
     package?: string;
-    arguments: FinalizeArguments | [
+    arguments: SettleCardArguments | [
         duel: RawTransactionArgument<string>,
         p0Manager: RawTransactionArgument<string>,
         p1Manager: RawTransactionArgument<string>,
-        oracle: RawTransactionArgument<string>
+        oracle: RawTransactionArgument<string>,
+        cardIdx: RawTransactionArgument<number | bigint>
     ];
     typeArguments: [
         string
     ];
 }
 /**
- * One-shot finalize for Staked tier. Reads the supplied oracle's settlement_price,
- * scores all 5 cards inline, compares PnL, and distributes the stake. All 5 cards
- * in the deck must reference `oracle.id`. Permissionless — the oracle read makes
- * the result deterministic, so the caller (typically the server admin) cannot
- * influence the outcome.
+ * Settle one card. Reads the supplied oracle's `settlement_price`, scores both
+ * players' swipes on `card_idx` (UP wins if `price > strike`), and accumulates
+ * payout/premium onto the duel. Permissionless — the oracle read makes the math
+ * deterministic so the caller can't influence the outcome. Idempotent per card via
+ * `cards_settled[card_idx]`.
+ *
+ * `p0_manager` and `p1_manager` are read for the anti-replay check
+ * (`manager.position(key) >= swipe.quantity`): if a player redeemed their Predict
+ * position before settle, their payout is zeroed (they already took the value
+ * off-chain) but their premium still counts against them.
  */
-export function finalize(options: FinalizeOptions) {
+export function settleCard(options: SettleCardOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null,
         null,
         null,
         null,
+        'u64'
+    ] satisfies (string | null)[];
+    const parameterNames = ["duel", "p0Manager", "p1Manager", "oracle", "cardIdx"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'duel',
+        function: 'settle_card',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+        typeArguments: options.typeArguments
+    });
+}
+export interface SettleCardFreeArguments {
+    duel: RawTransactionArgument<string>;
+    oracle: RawTransactionArgument<string>;
+    cardIdx: RawTransactionArgument<number | bigint>;
+}
+export interface SettleCardFreeOptions {
+    package?: string;
+    arguments: SettleCardFreeArguments | [
+        duel: RawTransactionArgument<string>,
+        oracle: RawTransactionArgument<string>,
+        cardIdx: RawTransactionArgument<number | bigint>
+    ];
+    typeArguments: [
+        string
+    ];
+}
+/**
+ * Per-card settle for Free tier. Same flow as `settle_card`, just without the
+ * PredictManager anti-replay (free swipes never minted positions).
+ */
+export function settleCardFree(options: SettleCardFreeOptions) {
+    const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null,
+        null,
+        'u64'
+    ] satisfies (string | null)[];
+    const parameterNames = ["duel", "oracle", "cardIdx"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'duel',
+        function: 'settle_card_free',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+        typeArguments: options.typeArguments
+    });
+}
+export interface FinalizeArguments {
+    duel: RawTransactionArgument<string>;
+}
+export interface FinalizeOptions {
+    package?: string;
+    arguments: FinalizeArguments | [
+        duel: RawTransactionArgument<string>
+    ];
+    typeArguments: [
+        string
+    ];
+}
+/**
+ * Finalize the duel. Verifies every card has been settled (or that the
+ * forfeit/refund branches apply via the swipe timeout), then distributes the pot
+ * based on `duel.p0_payout` / `duel.p1_payout` etc. (filled incrementally by
+ * `settle_card`). Permissionless.
+ */
+export function finalize(options: FinalizeOptions) {
+    const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null,
         '0x2::clock::Clock'
     ] satisfies (string | null)[];
-    const parameterNames = ["duel", "p0Manager", "p1Manager", "oracle"];
+    const parameterNames = ["duel"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -461,56 +589,30 @@ export function finalize(options: FinalizeOptions) {
         typeArguments: options.typeArguments
     });
 }
-export interface FinalizeMultiArguments {
+export interface FinalizeFreeArguments {
     duel: RawTransactionArgument<string>;
-    p0Manager: RawTransactionArgument<string>;
-    p1Manager: RawTransactionArgument<string>;
-    oracle_0: RawTransactionArgument<string>;
-    oracle_1: RawTransactionArgument<string>;
-    oracle_2: RawTransactionArgument<string>;
-    oracle_3: RawTransactionArgument<string>;
-    oracle_4: RawTransactionArgument<string>;
 }
-export interface FinalizeMultiOptions {
+export interface FinalizeFreeOptions {
     package?: string;
-    arguments: FinalizeMultiArguments | [
-        duel: RawTransactionArgument<string>,
-        p0Manager: RawTransactionArgument<string>,
-        p1Manager: RawTransactionArgument<string>,
-        oracle_0: RawTransactionArgument<string>,
-        oracle_1: RawTransactionArgument<string>,
-        oracle_2: RawTransactionArgument<string>,
-        oracle_3: RawTransactionArgument<string>,
-        oracle_4: RawTransactionArgument<string>
+    arguments: FinalizeFreeArguments | [
+        duel: RawTransactionArgument<string>
     ];
     typeArguments: [
         string
     ];
 }
-/**
- * Production multi-oracle finalize: each card uses its own oracle. Validates
- * `card[i].oracle_id == oracle_i.id`, reads each oracle's `settlement_price`, and
- * computes anti-replay using each card's expiry. Use this when the deck has 5
- * different oracles. All 5 must be settled.
- */
-export function finalizeMulti(options: FinalizeMultiOptions) {
+/** Free-tier counterpart to `finalize`. */
+export function finalizeFree(options: FinalizeFreeOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
         '0x2::clock::Clock'
     ] satisfies (string | null)[];
-    const parameterNames = ["duel", "p0Manager", "p1Manager", "oracle_0", "oracle_1", "oracle_2", "oracle_3", "oracle_4"];
+    const parameterNames = ["duel"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
-        function: 'finalize_multi',
+        function: 'finalize_free',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
         typeArguments: options.typeArguments
     });
@@ -530,12 +632,10 @@ export interface FinalizeTestOneOracleOptions {
     ];
 }
 /**
- * **TEST/DEV ONLY** — finalize using a single oracle's price applied to ALL 5
- * cards regardless of each card's actual `oracle_id`. Uses `settlement_price` if
- * the oracle has settled; otherwise falls back to `spot_price` (current SVI
- * underlying) so devs can finalize without waiting for any oracle to settle. Skips
- * anti-replay (no `PredictManager` check). PnL is approximate — never use this on
- * mainnet.
+ * **TEST/DEV ONLY** — settle every still-unsettled card against ONE oracle's price
+ * (settlement_price if settled, else spot fallback) ignoring per-card `oracle_id`,
+ * then finalize. Skips anti-replay (no `PredictManager`). PnL is approximate —
+ * never use on mainnet.
  */
 export function finalizeTestOneOracle(options: FinalizeTestOneOracleOptions) {
     const packageAddress = options.package ?? 'flicky';
@@ -549,37 +649,6 @@ export function finalizeTestOneOracle(options: FinalizeTestOneOracleOptions) {
         package: packageAddress,
         module: 'duel',
         function: 'finalize_test_one_oracle',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
-        typeArguments: options.typeArguments
-    });
-}
-export interface FinalizeFreeArguments {
-    duel: RawTransactionArgument<string>;
-    oracle: RawTransactionArgument<string>;
-}
-export interface FinalizeFreeOptions {
-    package?: string;
-    arguments: FinalizeFreeArguments | [
-        duel: RawTransactionArgument<string>,
-        oracle: RawTransactionArgument<string>
-    ];
-    typeArguments: [
-        string
-    ];
-}
-/** Free-tier counterpart to `finalize`. No managers, no anti-replay. */
-export function finalizeFree(options: FinalizeFreeOptions) {
-    const packageAddress = options.package ?? 'flicky';
-    const argumentsTypes = [
-        null,
-        null,
-        '0x2::clock::Clock'
-    ] satisfies (string | null)[];
-    const parameterNames = ["duel", "oracle"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'duel',
-        function: 'finalize_free',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
         typeArguments: options.typeArguments
     });
@@ -1134,17 +1203,114 @@ export function tierFree(options: TierFreeOptions = {}) {
         function: 'tier_free',
     });
 }
+export interface DeckSizeArguments {
+    duel: RawTransactionArgument<string>;
+}
 export interface DeckSizeOptions {
     package?: string;
-    arguments?: [
+    arguments: DeckSizeArguments | [
+        duel: RawTransactionArgument<string>
+    ];
+    typeArguments: [
+        string
     ];
 }
-export function deckSize(options: DeckSizeOptions = {}) {
+export function deckSize(options: DeckSizeOptions) {
     const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null
+    ] satisfies (string | null)[];
+    const parameterNames = ["duel"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
         function: 'deck_size',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+        typeArguments: options.typeArguments
+    });
+}
+export interface SettledCountArguments {
+    duel: RawTransactionArgument<string>;
+}
+export interface SettledCountOptions {
+    package?: string;
+    arguments: SettledCountArguments | [
+        duel: RawTransactionArgument<string>
+    ];
+    typeArguments: [
+        string
+    ];
+}
+export function settledCount(options: SettledCountOptions) {
+    const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null
+    ] satisfies (string | null)[];
+    const parameterNames = ["duel"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'duel',
+        function: 'settled_count',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+        typeArguments: options.typeArguments
+    });
+}
+export interface IsCardSettledArguments {
+    duel: RawTransactionArgument<string>;
+    cardIdx: RawTransactionArgument<number | bigint>;
+}
+export interface IsCardSettledOptions {
+    package?: string;
+    arguments: IsCardSettledArguments | [
+        duel: RawTransactionArgument<string>,
+        cardIdx: RawTransactionArgument<number | bigint>
+    ];
+    typeArguments: [
+        string
+    ];
+}
+export function isCardSettled(options: IsCardSettledOptions) {
+    const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null,
+        'u64'
+    ] satisfies (string | null)[];
+    const parameterNames = ["duel", "cardIdx"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'duel',
+        function: 'is_card_settled',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+        typeArguments: options.typeArguments
+    });
+}
+export interface CardSettlementPriceArguments {
+    duel: RawTransactionArgument<string>;
+    cardIdx: RawTransactionArgument<number | bigint>;
+}
+export interface CardSettlementPriceOptions {
+    package?: string;
+    arguments: CardSettlementPriceArguments | [
+        duel: RawTransactionArgument<string>,
+        cardIdx: RawTransactionArgument<number | bigint>
+    ];
+    typeArguments: [
+        string
+    ];
+}
+export function cardSettlementPrice(options: CardSettlementPriceOptions) {
+    const packageAddress = options.package ?? 'flicky';
+    const argumentsTypes = [
+        null,
+        'u64'
+    ] satisfies (string | null)[];
+    const parameterNames = ["duel", "cardIdx"];
+    return (tx: Transaction) => tx.moveCall({
+        package: packageAddress,
+        module: 'duel',
+        function: 'card_settlement_price',
+        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+        typeArguments: options.typeArguments
     });
 }
 export interface ProbScaleOptions {

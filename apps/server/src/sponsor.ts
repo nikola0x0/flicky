@@ -46,11 +46,15 @@ const FLICKY_FNS = [
   "duel::record_swipe_free",
   "duel::claim_reveal_timeout",
   "duel::refund_duel",
-  // One-shot finalize family (no per-card settle in the current contract).
+  // Two-phase settle/finalize: `settle_card × deck_size` scores each
+  // card against its own oracle and accumulates per-player payout/premium
+  // onto the Duel, then `finalize` distributes the pot. `finalize_test_*`
+  // is the dev shortcut that internally settles+finalizes in one call.
+  "duel::settle_card",
+  "duel::settle_card_free",
   "duel::finalize",
-  "duel::finalize_multi",
-  "duel::finalize_test_one_oracle",
   "duel::finalize_free",
+  "duel::finalize_test_one_oracle",
 ]
 
 /**

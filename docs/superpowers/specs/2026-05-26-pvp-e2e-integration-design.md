@@ -261,11 +261,11 @@ The new contract has three timing constants the UI should reflect — but the ch
 
 ### 5. `lib/config.ts` — bump the deployed package id
 
-Following the 2026-05-27 contract redeploy:
+Following the 2026-05-29 fresh publish (per-card settle + finalize, max-amplitude + sign-balanced deckmaster):
 
-- Current: `packageId` defaults to `0x505cdc...` (stale, pre-fix/contract).
-- Update to: `0x4ab595f3b0276c50eeff2181905cabc1d94ca3fd6b7aafe1a01d12869f258c44` (current, per `apps/contracts/deployed.json`).
-- `VITE_FLICKY_PACKAGE_ID_TESTNET` in `apps/web/.env.local` should already be auto-written by `publish.ts`, but the in-code default needs to match for fresh checkouts.
+- Current: `packageId` defaults to `0xaed053fcc146abd1da507eae72b4f3e9c838d83c83c7b68b230a3c9a2601a522` (per `apps/contracts/deployed.json`).
+- `VITE_FLICKY_PACKAGE_ID_TESTNET` in `apps/web/.env.local` is auto-written by `publish.ts`.
+- Previous publish at `0x4ab595f3...` (and earlier `0x436cc562...`, `0x505cdc...`) is orphaned — duels there can no longer be finalized.
 
 ### 6. Files explicitly NOT created
 

@@ -2,16 +2,37 @@ import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { bcs } from "@mysten/sui/bcs"
 import {
+  allocateSignBalance,
+  buildAndProbeDeck,
   buildDeckFromOracles,
   difficultyOfPct,
   fetchDeck,
   hashToHex,
   knownHashCount,
+  pickMaxAmplitudeStrike,
   rememberDeck,
   snapToTick,
   strikePctOf,
   type OracleSnapshot,
+  type ProbeFn,
 } from "./deckmaster"
+
+/** Tiny PRG mirroring the one in deckmaster.ts so tests don't depend on
+ *  the un-exported internal. SHA-256 in counter mode over a 32-byte seed. */
+function* testPrgStream(seed: Uint8Array): Generator<number, never> {
+  let counter = 0
+  while (true) {
+    const h = createHash("sha256")
+    h.update(seed)
+    h.update(Buffer.from(String(counter)))
+    const out = h.digest()
+    for (let i = 0; i < out.length; i++) yield out[i]
+    counter++
+  }
+}
+
+/** SuiClient stand-in — never invoked because we always pass a probe override. */
+const NULL_CLIENT = null as unknown as Parameters<typeof buildAndProbeDeck>[0]
 
 const ZERO = "0x0000000000000000000000000000000000000000000000000000000000000000"
 function addr(suffix: string): string {
@@ -185,6 +206,264 @@ describe("hashToHex", () => {
   test("zero-pads single nibbles", () => {
     const h = new Uint8Array([0x01, 0x0a, 0xff])
     expect(hashToHex(h)).toBe("0x010aff")
+  })
+})
+
+// === pickMaxAmplitudeStrike — the max-amplitude search ===
+
+const ONE_ORACLE: OracleSnapshot = {
+  id: addr("01"),
+  expiry: 1_000_000n,
+  spot: 100_000_000_000n,
+  forward: 100_000_000_000n,
+  minStrike: 0n,
+  tickSize: 1n,
+}
+
+/** Build a probe that accepts strikes within `±maxAbsBps` of forward. */
+function probeWithCeiling(maxAbsBps: number): ProbeFn {
+  return async (o, strike) => {
+    const fwd = o.forward
+    const diff = strike > fwd ? strike - fwd : fwd - strike
+    const absBps = Number((diff * 10_000n) / fwd)
+    return absBps <= maxAbsBps
+  }
+}
+
+describe("pickMaxAmplitudeStrike", () => {
+  test("when the SVI accepts everything, picks the MOST aggressive (2000 bps)", async () => {
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      async () => true,
+    )
+    expect(pick).not.toBeNull()
+    expect(Math.abs(pick!.bps)).toBe(2000)
+  })
+
+  test("when SVI caps at ±500 bps, picks exactly ±500 (not lower, not 0)", async () => {
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      probeWithCeiling(500),
+    )
+    expect(pick).not.toBeNull()
+    expect(Math.abs(pick!.bps)).toBe(500)
+  })
+
+  test("when SVI caps at ±150 bps, picks ±100 (next viable down from 150)", async () => {
+    // OFFSET_CANDIDATES_BPS has 200, 100 — 150 is between them, so the
+    // search finds 100 (the most aggressive viable candidate ≤ ceiling).
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      probeWithCeiling(150),
+    )
+    expect(pick).not.toBeNull()
+    expect(Math.abs(pick!.bps)).toBe(100)
+  })
+
+  test("when SVI rejects everything except ATM, returns 0 (fallback)", async () => {
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      probeWithCeiling(0),
+    )
+    expect(pick).not.toBeNull()
+    expect(pick!.bps).toBe(0)
+  })
+
+  test("when SVI rejects EVERYTHING (probe always false), returns null", async () => {
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      async () => false,
+    )
+    expect(pick).toBeNull()
+  })
+
+  test("PRG flip alternates UP-side vs DOWN-side at each |bps| level", async () => {
+    // With a permissive probe, both ±2000 work. The PRG decides which sign
+    // ends up first in `ordered` (and therefore which sign Promise.all
+    // returns first). Two different seeds should yield different signs.
+    const seedsTried = new Set<number>()
+    for (let s = 0; s < 16 && seedsTried.size < 2; s++) {
+      const seed = new Uint8Array(32).fill(s)
+      const pick = await pickMaxAmplitudeStrike(
+        ONE_ORACLE,
+        testPrgStream(seed),
+        async () => true,
+      )
+      seedsTried.add(Math.sign(pick!.bps))
+    }
+    expect(seedsTried.size).toBe(2) // saw both +sign and −sign
+  })
+})
+
+describe("allocateSignBalance", () => {
+  test("even N → exactly N/2 of each sign", () => {
+    for (const n of [2, 4, 6, 10]) {
+      const signs = allocateSignBalance(n, testPrgStream(SEED_A))
+      expect(signs).toHaveLength(n)
+      const ups = signs.filter((s) => s === 1).length
+      const downs = signs.filter((s) => s === -1).length
+      expect(ups).toBe(n / 2)
+      expect(downs).toBe(n / 2)
+    }
+  })
+
+  test("odd N → split (N+1)/2 + (N-1)/2 (PRG picks which sign gets extra)", () => {
+    for (const n of [3, 5, 7]) {
+      const signs = allocateSignBalance(n, testPrgStream(SEED_A))
+      expect(signs).toHaveLength(n)
+      const ups = signs.filter((s) => s === 1).length
+      const downs = signs.filter((s) => s === -1).length
+      // One side has the extra, the other has half (rounded down).
+      expect(Math.max(ups, downs)).toBe(Math.ceil(n / 2))
+      expect(Math.min(ups, downs)).toBe(Math.floor(n / 2))
+    }
+  })
+
+  test("never returns ATM (0) — every card is forced aggressive", () => {
+    for (let s = 0; s < 16; s++) {
+      const seed = new Uint8Array(32).fill(s)
+      const signs = allocateSignBalance(5, testPrgStream(seed))
+      expect(signs.every((x) => x === 1 || x === -1)).toBe(true)
+    }
+  })
+
+  test("order varies per seed (PRG-shuffled)", () => {
+    const seen = new Set<string>()
+    for (let s = 0; s < 20; s++) {
+      const seed = new Uint8Array(32).fill(s)
+      const signs = allocateSignBalance(5, testPrgStream(seed))
+      seen.add(signs.join(","))
+    }
+    expect(seen.size).toBeGreaterThan(2) // at least a few different orderings
+  })
+
+  test("N=1 → single sign (PRG picks)", () => {
+    const signs = allocateSignBalance(1, testPrgStream(SEED_A))
+    expect(signs).toHaveLength(1)
+    expect(signs[0] === 1 || signs[0] === -1).toBe(true)
+  })
+
+  test("N=0 → empty array", () => {
+    expect(allocateSignBalance(0, testPrgStream(SEED_A))).toEqual([])
+  })
+})
+
+describe("pickMaxAmplitudeStrike with signBias", () => {
+  test("signBias=+1 only returns strike > forward", async () => {
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      async () => true,
+      +1,
+    )
+    expect(pick).not.toBeNull()
+    expect(pick!.bps).toBeGreaterThan(0)
+    expect(pick!.strike > ONE_ORACLE.forward).toBe(true)
+  })
+
+  test("signBias=-1 only returns strike < forward", async () => {
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      async () => true,
+      -1,
+    )
+    expect(pick).not.toBeNull()
+    expect(pick!.bps).toBeLessThan(0)
+    expect(pick!.strike < ONE_ORACLE.forward).toBe(true)
+  })
+
+  test("signBias=+1 with capped probe → max |bps| on that side", async () => {
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      probeWithCeiling(500),
+      +1,
+    )
+    expect(pick!.bps).toBe(500)
+  })
+})
+
+describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
+  test("picks ±500 bps on every card when the SVI ceiling is 500", async () => {
+    const deck = await buildAndProbeDeck(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      SEED_A,
+      probeWithCeiling(500),
+    )
+    expect(deck.cards).toHaveLength(5)
+    for (let i = 0; i < 5; i++) {
+      const fwd = FIVE_ORACLES[i].forward
+      const strike = deck.cards[i].strike
+      const diff = strike > fwd ? strike - fwd : fwd - strike
+      const absBps = Number((diff * 10_000n) / fwd)
+      expect(absBps).toBe(500)
+    }
+  })
+
+  test("doesn't collapse to ATM when ANY aggressive offset works (this was the bug)", async () => {
+    // Regression guard: with the old code, ANY probe failure on the
+    // single-bucket PRG pick would collapse to ATM. With the new code,
+    // a probe that allows ±300 bps should land EVERY card at ≥300 bps.
+    const deck = await buildAndProbeDeck(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      SEED_A,
+      probeWithCeiling(300),
+    )
+    for (let i = 0; i < 5; i++) {
+      const fwd = FIVE_ORACLES[i].forward
+      const strike = deck.cards[i].strike
+      const diff = strike > fwd ? strike - fwd : fwd - strike
+      const absBps = Number((diff * 10_000n) / fwd)
+      expect(absBps).toBe(300)
+    }
+  })
+
+  test("deck has balanced sign distribution (never all-UP or all-DOWN)", async () => {
+    // 5-card deck → 3+2 of one sign vs other, PRG-picked. Across many
+    // seeds we should see both 3-up-2-down and 3-down-2-up but never 5/0.
+    const distributions = new Set<string>()
+    for (let s = 0; s < 16; s++) {
+      const seed = new Uint8Array(32).fill(s)
+      const deck = await buildAndProbeDeck(
+        NULL_CLIENT,
+        FIVE_ORACLES,
+        seed,
+        async () => true, // accept everything → max amplitude land
+      )
+      let ups = 0
+      let downs = 0
+      for (let i = 0; i < 5; i++) {
+        const fwd = FIVE_ORACLES[i].forward
+        const strike = deck.cards[i].strike
+        if (strike > fwd) ups++
+        else if (strike < fwd) downs++
+      }
+      expect(Math.max(ups, downs)).toBe(3)
+      expect(Math.min(ups, downs)).toBe(2)
+      distributions.add(`${ups}-${downs}`)
+    }
+    // Both 3-2 and 2-3 should appear across 16 seeds.
+    expect(distributions.has("3-2")).toBe(true)
+    expect(distributions.has("2-3")).toBe(true)
+  })
+
+  test("throws when even ATM is rejected (oracle pricing config unset)", async () => {
+    await expect(
+      buildAndProbeDeck(
+        NULL_CLIENT,
+        FIVE_ORACLES,
+        SEED_A,
+        async () => false,
+      ),
+    ).rejects.toThrow(/no viable strike/)
   })
 })
 

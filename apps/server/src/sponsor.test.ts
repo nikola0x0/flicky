@@ -45,10 +45,11 @@ describe("buildAllowedTargets", () => {
       "duel::record_swipe_free",
       "duel::claim_reveal_timeout",
       "duel::refund_duel",
+      "duel::settle_card",
+      "duel::settle_card_free",
       "duel::finalize",
-      "duel::finalize_multi",
-      "duel::finalize_test_one_oracle",
       "duel::finalize_free",
+      "duel::finalize_test_one_oracle",
     ]
     for (const fn of expectedFlickyFns) {
       const matching = targets.filter((t) => t.endsWith(`::${fn}`))
