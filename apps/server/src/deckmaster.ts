@@ -884,19 +884,23 @@ export async function handleDeckmasterRequest(
       )
     }
     const body = (await req.json().catch(() => null)) as
-      | { asset?: string; sender?: string; tier?: string }
+      | { asset?: string; sender?: string; tier?: string; deckSize?: number }
       | null
     const asset = body?.asset ?? "BTC"
     const sender = body?.sender
     const tier = body?.tier
+    // Deck size is caller-chosen, [1, 20] (matches the contract's
+    // MIN/MAX_DECK_SIZE). Each card pins a distinct live oracle, so we need
+    // at least `deckSize` eligible oracles. Default 5 for back-compat.
+    const deckSize = Math.max(1, Math.min(20, Math.floor(body?.deckSize ?? 5)))
     const client = getSuiClient()
     try {
-      const oracles = await findDeckOracles(client, asset, 5)
-      if (oracles.length < 5) {
+      const oracles = await findDeckOracles(client, asset, deckSize)
+      if (oracles.length < deckSize) {
         return json(
           {
             error: "not enough live oracles",
-            detail: `found ${oracles.length} eligible ${asset} oracles >${env.deckCardMinHeadroomMs / 60_000} min out; retry in a few minutes`,
+            detail: `found ${oracles.length} eligible ${asset} oracles >${env.deckCardMinHeadroomMs / 60_000} min out, need ${deckSize}; retry shortly or request a smaller deckSize`,
           },
           503,
         )

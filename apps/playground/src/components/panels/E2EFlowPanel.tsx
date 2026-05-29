@@ -165,6 +165,15 @@ const STAKE_BY_TIER = {
 const MINT_QUANTITY = 20_000n
 /** Required PredictManager balance to enter the staked queue (PRD). */
 const MIN_BALANCE = 5_000_000n
+/**
+ * Cards per duel this demo generates. The contract supports [1, 20]; we
+ * use 3 here so a match needs only 3 distinct live oracles (more robust
+ * on testnet, where the live-oracle count fluctuates) and the swipe phase
+ * is quicker to walk through. `deck.cards.length` / `roomState.cardCount`
+ * are the runtime source of truth once a deck exists — this constant only
+ * seeds the generate request + drives UI before the deck loads.
+ */
+const DECK_SIZE = 3
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
@@ -301,7 +310,7 @@ function parseMoveAbort(msg: string): {
     3: { label: 'EAlreadyJoined', hint: 'A challenger already joined this duel.' },
     4: { label: 'ECreatorCannotJoin', hint: 'You created this duel — you can\'t also join it. Use a second wallet.' },
     5: { label: 'EStakeMismatch', hint: 'Your stake amount doesn\'t match the creator\'s. Reset session and re-match with the same tier.' },
-    6: { label: 'EInvalidDeckSize', hint: 'Deck must have exactly 5 cards.' },
+    6: { label: 'EInvalidDeckSize', hint: 'Revealed card count must equal the duel\'s deck_size.' },
     7: { label: 'ECardIndexOOB', hint: 'Card index out of range (must be 0-4).' },
     8: { label: 'EOracleMismatch', hint: 'Oracle id doesn\'t match the card\'s recorded oracle.' },
     9: { label: 'EOutOfTurn', hint: 'You\'re swiping the wrong card next — chain enforces order 0→4.' },
@@ -646,9 +655,12 @@ export default function E2EFlowPanel({ onOutput }: Props) {
   }, [matchedRole, roomState?.status, setStatus])
 
   useEffect(() => {
-    if (swipeResults.length === 5) setStatus('swipe', 'done')
+    // Effective deck size: prefer chain truth (cardCount once revealed,
+    // else the generated deck length), fall back to the demo default.
+    const size = roomState?.cardCount || deck?.cards.length || DECK_SIZE
+    if (swipeResults.length >= size) setStatus('swipe', 'done')
     else if (swipeResults.length > 0) setStatus('swipe', 'running')
-  }, [swipeResults, setStatus])
+  }, [swipeResults, deck, roomState?.cardCount, setStatus])
 
   // After hydration, if managerId came from cache, re-read its
   // balance from chain so the gate check is accurate.
@@ -1095,6 +1107,7 @@ export default function E2EFlowPanel({ onOutput }: Props) {
             asset: 'BTC',
             tier: 'starter',
             sender: account.address,
+            deckSize: DECK_SIZE,
           }),
         })
         if (!res.ok) {
@@ -1406,6 +1419,9 @@ export default function E2EFlowPanel({ onOutput }: Props) {
   }, [roomState, account, myRole])
 
   const nextSwipeIdx = swipeResults.length
+  /** Effective deck size — chain truth once known, else the demo default. */
+  const effectiveDeckSize =
+    roomState?.cardCount || deck?.cards.length || DECK_SIZE
 
   const shareUrl = useMemo(() => {
     if (!duelId) return ''
@@ -1752,7 +1768,7 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                 ? '✓ duel detected'
                 : 'polling…'
             : deck
-              ? `5 cards · hash ${short(deck.hash, 6)}`
+              ? `${deck.cards.length} cards · hash ${short(deck.hash, 6)}`
               : 'pending'
         }
         desc={
@@ -2031,15 +2047,15 @@ export default function E2EFlowPanel({ onOutput }: Props) {
         n={9}
         title="Swipe cards"
         status={stepStatuses.swipe}
-        summary={`${swipeResults.length} / 5 swiped`}
-        desc={`Each swipe = predict::mint(${fmtDusdc(MINT_QUANTITY)}) + duel::record_swipe atomic. Order enforced 0→4.`}
+        summary={`${swipeResults.length} / ${effectiveDeckSize} swiped`}
+        desc={`Each swipe = predict::mint(${fmtDusdc(MINT_QUANTITY)}) + duel::record_swipe atomic. Order enforced 0→${effectiveDeckSize - 1}.`}
       >
         {deck && roomState?.cardsRevealed && myRole ? (
           <div className="space-y-2 text-xs">
             <div className="text-gray-400">
               You are <span className="text-gray-200">{myRole}</span> · next card{' '}
               <span className="text-gray-200">
-                {nextSwipeIdx < 5 ? `#${nextSwipeIdx}` : '— done'}
+                {nextSwipeIdx < effectiveDeckSize ? `#${nextSwipeIdx}` : '— done'}
               </span>
             </div>
             <div className="space-y-2">
@@ -2084,7 +2100,7 @@ export default function E2EFlowPanel({ onOutput }: Props) {
               : 'live — not finalized'
             : 'pending'
         }
-        desc="One-shot finalize: the contract reads the oracle(s), scores all 5 cards, compares aggregate PnL, and pays the winner — in a single tx. Live PnL below is mark-to-market until then."
+        desc="Two-phase: settle_card per card (each against its own oracle) accumulates PnL, then finalize compares aggregate PnL and pays the winner. Live PnL below is mark-to-market until then."
       >
         {roomState ? (
           <div className="space-y-2 text-xs">
@@ -2299,9 +2315,10 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                 <div className="space-y-2 rounded border border-gray-800 bg-gray-950 p-2 text-[10px] text-gray-400">
                   <div>
                     <strong className="text-gray-300">Keeper not running?</strong>{' '}
-                    The new contract finalizes in one shot — it reads the
-                    oracle(s), scores all 5 cards, and pays the winner. No
-                    per-card settle.
+                    Finalize is two-phase: one settle_card per card (each
+                    against its own oracle) accumulates PnL, then finalize
+                    pays the winner. The button below bundles both into one
+                    PTB.
                   </div>
                   {!bothDone && (
                     <div className="text-yellow-400/80">
@@ -2319,7 +2336,7 @@ export default function E2EFlowPanel({ onOutput }: Props) {
                       onClick={stepFinalizeTest}
                       disabled={busyStep === 'result' || !deck}
                       className="rounded bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-600 disabled:opacity-40"
-                      title="finalize_test_one_oracle — uses one oracle's settlement_price, or its live spot_price as fallback, applied to all 5 cards. Testnet shortcut: no need to wait for oracles to expire."
+                      title="finalize_test_one_oracle — settles every card with one oracle's settlement_price (or live spot_price fallback) then finalizes. Testnet shortcut: no need to wait for each oracle to settle."
                     >
                       {busyStep === 'result'
                         ? 'Finalizing…'
