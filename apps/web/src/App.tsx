@@ -415,20 +415,29 @@ function MenuItem({
 async function requestDeck(
   oracleId: string,
   reference: bigint,
+  sender?: string,
 ): Promise<{ cards: DeckCard[]; hash: Uint8Array }> {
   try {
+    // The server discovers live oracles itself and auto-sizes the deck to
+    // supply (3–5). We send a size band; `cards.length` is the authoritative
+    // deck size and must be passed to `create_duel`. `oracleId`/`reference`
+    // are only used by the client-side fallback below.
     const res = await fetch(`${DECKMASTER_BASE_URL}/deckmaster/generate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        oracle_id: oracleId,
-        reference: reference.toString(),
+        asset: "BTC",
+        sender,
+        minDeckSize: 3,
+        maxDeckSize: 5,
       }),
     })
     if (!res.ok) throw new Error(`deckmaster ${res.status}`)
     const body = (await res.json()) as {
       cards: Array<{ oracle_id: string; strike: string }>
       hash: string
+      deckSize?: number
+      liveOracleCount?: number
     }
     const cards: DeckCard[] = body.cards.map((c) => ({
       oracleId: c.oracle_id,
@@ -654,8 +663,12 @@ function Lobby({
     setErr(null)
     try {
       const ref = oracle.settlementPrice ?? oracle.forward
-      const deck = await requestDeck(oracleId, ref)
+      const deck = await requestDeck(oracleId, ref, address)
 
+      // The server auto-sizes the deck to live oracle supply, so the
+      // on-chain `deck_size` must be the actual card count — not a fixed 5,
+      // or reveal will mismatch the hash when fewer oracles are live.
+      const deckSize = deck.cards.length
       const tx =
         stake.coinType === DEEPBOOK.dusdcType
           ? await buildCreateDuelDusdcTx(
@@ -664,8 +677,9 @@ function Lobby({
             deck.hash,
             stake.amount,
             stake.coinType,
+            deckSize,
           )
-          : buildCreateDuelTx(deck.hash, stake.amount, stake.coinType)
+          : buildCreateDuelTx(deck.hash, stake.amount, stake.coinType, deckSize)
 
       const res = await signAndExec({ transaction: tx })
       const full = await client.waitForTransaction({
