@@ -587,6 +587,11 @@ function createLimiter(max: number): <T>(thunk: () => Promise<T>) => Promise<T> 
  *  (each pick early-exits on its first viable, most-aggressive candidate). */
 const PROBE_CONCURRENCY = 4
 
+/** Extra oracles to fetch beyond the requested `max` deck size, so deck
+ *  generation can skip a few duds (oracles with unset pricing config / no
+ *  viable strike) and still fill the deck from live supply. */
+const DECK_CANDIDATE_BUFFER = 7
+
 /**
  * Sign bias for `pickMaxAmplitudeStrike`:
  *   * `+1` — only probe strikes ABOVE forward (DOWN-favoring market —
@@ -710,6 +715,44 @@ export function allocateSignBalance(
  * strikes — players have to read the market both ways, not just swipe
  * one direction.
  */
+/** ATM strike for an oracle: its forward snapped to the tick grid. The
+ *  least-aggressive, most-likely-to-price strike — `pickMaxAmplitudeStrike`
+ *  always falls back to it, so if even this fails the probe the oracle has
+ *  no viable strike at all (e.g. pricing config unset). */
+export function atmStrike(o: OracleSnapshot): bigint {
+  return snapToTick(o.forward, o.minStrike, o.tickSize)
+}
+
+/**
+ * From `candidates` (soonest-first), return the first up-to-`max` oracles
+ * whose ATM strike passes `probe`. Oracles with unset pricing config fail
+ * every probe — including ATM — so this drops them, letting deck generation
+ * survive a few duds as long as enough live oracles remain. Because ATM is
+ * `pickMaxAmplitudeStrike`'s last-resort candidate for any sign, an
+ * ATM-viable oracle is guaranteed to yield a strike in `buildAndProbeDeck`,
+ * so the filtered set never triggers its "no viable strike" throw.
+ *
+ * Probes fan out concurrently, bounded by the shared `PROBE_CONCURRENCY`
+ * limiter (a no-op for synthetic test probes).
+ */
+export async function selectViableOracles(
+  client: SuiClient,
+  candidates: OracleSnapshot[],
+  max: number,
+  /** Override the probe — defaults to the real `probeCard`. Tests inject a
+   *  synthetic function to mark specific oracles non-viable. */
+  probeOverride?: ProbeFn,
+): Promise<OracleSnapshot[]> {
+  const limit = createLimiter(PROBE_CONCURRENCY)
+  const rawProbe: ProbeFn =
+    probeOverride ?? ((o, strike) => probeCard(client, o, strike))
+  const probe: ProbeFn = (o, strike) => limit(() => rawProbe(o, strike))
+  const checks = await Promise.all(
+    candidates.map((o) => probe(o, atmStrike(o))),
+  )
+  return candidates.filter((_, i) => checks[i]).slice(0, max)
+}
+
 export async function buildAndProbeDeck(
   client: SuiClient,
   oracles: OracleSnapshot[],
@@ -994,18 +1037,25 @@ export async function handleDeckmasterRequest(
     const bounds = resolveDeckBounds(body ?? {})
     const client = getSuiClient()
     try {
-      const oracles = await findDeckOracles(client, asset, bounds.max)
-      const decision = decideDeckSize(oracles.length, bounds)
+      // Over-fetch candidates, then drop oracles with no viable strike
+      // (unset pricing config) so a few duds don't sink the whole deck.
+      const candidates = await findDeckOracles(
+        client,
+        asset,
+        bounds.max + DECK_CANDIDATE_BUFFER,
+      )
+      const viable = await selectViableOracles(client, candidates, bounds.max)
+      const decision = decideDeckSize(viable.length, bounds)
       if (!decision.ok) {
         return json(
           {
             error: "not enough live oracles",
-            detail: `found ${oracles.length} eligible ${asset} oracles settling within ${env.deckCardMaxHorizonMs / 60_000}min, need ≥${bounds.min}; retry shortly`,
+            detail: `found ${candidates.length} live ${asset} oracles settling within ${env.deckCardMaxHorizonMs / 60_000}min, ${viable.length} with a viable strike, need ≥${bounds.min}; retry shortly`,
           },
           503,
         )
       }
-      const chosen = oracles.slice(0, decision.deckSize)
+      const chosen = viable.slice(0, decision.deckSize)
       // Derive a deterministic seed for this generation. The seed is
       // saved alongside the plaintext so anyone with (seed, oracle list)
       // can recompute the exact strike sequence and verify the deck
@@ -1029,7 +1079,8 @@ export async function handleDeckmasterRequest(
         hash: deck.hashHex,
         seed: hashToHex(seed),
         deckSize: decision.deckSize,
-        liveOracleCount: oracles.length,
+        liveOracleCount: candidates.length,
+        viableOracleCount: viable.length,
       })
     } catch (e) {
       log.error(`generate failed: ${e instanceof Error ? e.message : String(e)}`)

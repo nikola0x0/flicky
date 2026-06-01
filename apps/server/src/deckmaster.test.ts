@@ -14,6 +14,7 @@ import {
   rememberDeck,
   resolveDeckBounds,
   selectDeckOracleRows,
+  selectViableOracles,
   snapToTick,
   strikePctOf,
   type OracleRow,
@@ -622,5 +623,54 @@ describe("selectDeckOracleRows", () => {
       { ...row("0x5", 50), forward: 0n },
     ]
     expect(selectDeckOracleRows(rows, opts).map((r) => r.id)).toEqual(["0x1"])
+  })
+})
+
+describe("selectViableOracles", () => {
+  // probe override that rejects every strike for the given oracle ids
+  // (mimics an oracle whose pricing config is unset → no viable strike).
+  const failing = (...ids: string[]): ProbeFn => {
+    const bad = new Set(ids)
+    return async (o) => !bad.has(o.id)
+  }
+
+  test("all viable → returns the first `max`, soonest-first", async () => {
+    const out = await selectViableOracles(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      3,
+      async () => true,
+    )
+    expect(out.map((o) => o.id)).toEqual([addr("01"), addr("02"), addr("03")])
+  })
+
+  test("drops oracles whose ATM probe fails, preserving order", async () => {
+    const out = await selectViableOracles(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      5,
+      failing(addr("02"), addr("04")),
+    )
+    expect(out.map((o) => o.id)).toEqual([addr("01"), addr("03"), addr("05")])
+  })
+
+  test("caps the viable set at `max`", async () => {
+    const out = await selectViableOracles(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      2,
+      failing(addr("02")),
+    )
+    expect(out.map((o) => o.id)).toEqual([addr("01"), addr("03")])
+  })
+
+  test("returns all viable when fewer than `max` survive", async () => {
+    const out = await selectViableOracles(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      5,
+      failing(addr("02"), addr("03"), addr("04"), addr("05")),
+    )
+    expect(out.map((o) => o.id)).toEqual([addr("01")])
   })
 })
