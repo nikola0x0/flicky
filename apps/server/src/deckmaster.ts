@@ -976,27 +976,36 @@ export async function handleDeckmasterRequest(
       )
     }
     const body = (await req.json().catch(() => null)) as
-      | { asset?: string; sender?: string; tier?: string; deckSize?: number }
+      | {
+          asset?: string
+          sender?: string
+          tier?: string
+          deckSize?: number
+          minDeckSize?: number
+          maxDeckSize?: number
+        }
       | null
     const asset = body?.asset ?? "BTC"
     const sender = body?.sender
     const tier = body?.tier
-    // Deck size is caller-chosen, [1, 20] (matches the contract's
-    // MIN/MAX_DECK_SIZE). Each card pins a distinct live oracle, so we need
-    // at least `deckSize` eligible oracles. Default 5 for back-compat.
-    const deckSize = Math.max(1, Math.min(20, Math.floor(body?.deckSize ?? 5)))
+    // Deck size adapts to live oracle supply within a band (default [3, 5],
+    // clamped to the contract's [1, 20]). An explicit `deckSize` collapses
+    // the band for back-compat. We fetch up to `max`, then size greedily.
+    const bounds = resolveDeckBounds(body ?? {})
     const client = getSuiClient()
     try {
-      const oracles = await findDeckOracles(client, asset, deckSize)
-      if (oracles.length < deckSize) {
+      const oracles = await findDeckOracles(client, asset, bounds.max)
+      const decision = decideDeckSize(oracles.length, bounds)
+      if (!decision.ok) {
         return json(
           {
             error: "not enough live oracles",
-            detail: `found ${oracles.length} eligible ${asset} oracles >${env.deckCardMinHeadroomMs / 60_000} min out, need ${deckSize}; retry shortly or request a smaller deckSize`,
+            detail: `found ${oracles.length} eligible ${asset} oracles settling within ${env.deckCardMaxHorizonMs / 60_000}min, need ≥${bounds.min}; retry shortly`,
           },
           503,
         )
       }
+      const chosen = oracles.slice(0, decision.deckSize)
       // Derive a deterministic seed for this generation. The seed is
       // saved alongside the plaintext so anyone with (seed, oracle list)
       // can recompute the exact strike sequence and verify the deck
@@ -1009,16 +1018,18 @@ export async function handleDeckmasterRequest(
         timestampMs: Date.now(),
         nonceHex,
       })
-      const deck = await buildAndProbeDeck(client, oracles, seed)
+      const deck = await buildAndProbeDeck(client, chosen, seed)
       rememberDeck(deck.hash, deck.cards, seed)
       return json({
         cards: deck.cards.map((c, i) => ({
           oracle_id: c.oracle_id,
           strike: c.strike.toString(),
-          expiry: oracles[i].expiry.toString(),
+          expiry: chosen[i].expiry.toString(),
         })),
         hash: deck.hashHex,
         seed: hashToHex(seed),
+        deckSize: decision.deckSize,
+        liveOracleCount: oracles.length,
       })
     } catch (e) {
       log.error(`generate failed: ${e instanceof Error ? e.message : String(e)}`)
