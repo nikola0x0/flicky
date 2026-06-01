@@ -79,6 +79,8 @@ interface DeckResponse {
   cards: DeckCard[]
   hash: string
   seed: string
+  deckSize?: number
+  liveOracleCount?: number
 }
 
 interface RoomState {
@@ -1107,7 +1109,8 @@ export default function E2EFlowPanel({ onOutput }: Props) {
             asset: 'BTC',
             tier: 'starter',
             sender: account.address,
-            deckSize: DECK_SIZE,
+            minDeckSize: 3,
+            maxDeckSize: 5,
           }),
         })
         if (!res.ok) {
