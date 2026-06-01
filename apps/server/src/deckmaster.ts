@@ -218,10 +218,10 @@ export async function findDeckOracles(
   client: SuiClient,
   asset = "BTC",
   count = 5,
+  maxHorizonMs = env.deckCardMaxHorizonMs,
 ): Promise<OracleSnapshot[]> {
   const pkg = env.deepbookPredictPackageId
   const now = Date.now()
-  const minExpiry = BigInt(now) + BigInt(env.deckCardMinHeadroomMs)
 
   // 1. Recent price-tick events → live oracle id set. One tick tx updates
   //    the whole live set, so ~100 events covers many ticks' worth of ids.
@@ -237,12 +237,12 @@ export async function findDeckOracles(
   }
   if (candidateIds.size === 0) return []
 
-  // 2. Resolve each candidate object + filter.
+  // 2. Resolve each candidate object into a normalized row.
   const objs = await client.multiGetObjects({
     ids: [...candidateIds],
     options: { showContent: true },
   })
-  const live: Array<{ id: string; expiry: bigint; spot: bigint; forward: bigint }> = []
+  const rows: OracleRow[] = []
   for (const obj of objs) {
     if (obj.data?.content?.dataType !== "moveObject") continue
     const f = obj.data.content.fields as {
@@ -252,22 +252,27 @@ export async function findDeckOracles(
       underlying_asset?: string
       prices: { fields: { spot: string; forward: string } }
     }
-    if (f.underlying_asset !== undefined && f.underlying_asset !== asset) continue
-    if (!f.active) continue
-    if (isSettlementSet(f.settlement_price)) continue
-    const expiry = BigInt(f.expiry)
-    if (expiry <= minExpiry) continue
-    const spot = BigInt(f.prices.fields.spot)
-    const forward = BigInt(f.prices.fields.forward)
-    if (spot === 0n || forward === 0n) continue
-    live.push({ id: normalizeSuiObjectId(obj.data.objectId), expiry, spot, forward })
+    rows.push({
+      id: normalizeSuiObjectId(obj.data.objectId),
+      expiry: BigInt(f.expiry),
+      spot: BigInt(f.prices.fields.spot),
+      forward: BigInt(f.prices.fields.forward),
+      active: f.active,
+      settled: isSettlementSet(f.settlement_price),
+      asset: f.underlying_asset,
+    })
   }
-  if (live.length === 0) return []
 
-  // 3. Sort by expiry ascending, take the nearest `count`, then resolve
-  //    grids only for those (avoids scanning for oracles we won't use).
-  live.sort((a, b) => (a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0))
-  const chosen = live.slice(0, count)
+  // 3. Filter (asset, live, headroom < expiry ≤ horizon), sort soonest-first,
+  //    take the nearest `count`, then resolve grids only for those.
+  const chosen = selectDeckOracleRows(rows, {
+    nowMs: now,
+    headroomMs: env.deckCardMinHeadroomMs,
+    maxHorizonMs,
+    asset,
+    cap: count,
+  })
+  if (chosen.length === 0) return []
   await resolveGrids(client, pkg, new Set(chosen.map((o) => o.id)))
 
   return chosen.map((o) => {
