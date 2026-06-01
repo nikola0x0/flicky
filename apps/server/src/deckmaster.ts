@@ -164,6 +164,56 @@ async function resolveGrids(
  * Returns fewer than `count` (possibly empty) if not enough live oracles
  * exist; callers decide whether to retry or surface a 503.
  */
+/** Normalized, chain-agnostic view of a candidate oracle — the input to
+ *  `selectDeckOracleRows`. Decoupling selection from RPC shapes keeps the
+ *  filter/sort logic pure and unit-testable. */
+export interface OracleRow {
+  id: string
+  expiry: bigint
+  spot: bigint
+  forward: bigint
+  active: boolean
+  settled: boolean
+  /** `undefined` when the object didn't expose `underlying_asset`. */
+  asset?: string
+}
+
+/**
+ * Filter candidate oracles to those eligible for a deck, ordered
+ * soonest-settling first, capped at `cap`.
+ *
+ * Eligible = active && !settled && matching asset && non-zero spot/forward
+ * && `now + headroom < expiry ≤ now + maxHorizon`. The upper bound keeps
+ * the game settling fast (a duel finalizes only once its latest card's
+ * oracle settles); soonest-first ordering means a smaller deck always uses
+ * the fastest oracles.
+ */
+export function selectDeckOracleRows(
+  rows: OracleRow[],
+  opts: {
+    nowMs: number
+    headroomMs: number
+    maxHorizonMs: number
+    asset: string
+    cap: number
+  },
+): OracleRow[] {
+  const minExpiry = BigInt(opts.nowMs) + BigInt(opts.headroomMs)
+  const maxExpiry = BigInt(opts.nowMs) + BigInt(opts.maxHorizonMs)
+  const live = rows.filter(
+    (r) =>
+      r.active &&
+      !r.settled &&
+      (r.asset === undefined || r.asset === opts.asset) &&
+      r.spot !== 0n &&
+      r.forward !== 0n &&
+      r.expiry > minExpiry &&
+      r.expiry <= maxExpiry,
+  )
+  live.sort((a, b) => (a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0))
+  return live.slice(0, opts.cap)
+}
+
 export async function findDeckOracles(
   client: SuiClient,
   asset = "BTC",
@@ -870,6 +920,43 @@ export function knownHashCount(): number {
 import { json } from "./lib/http"
 import { getSuiClient } from "./lib/sui"
 import { clientIp, consume } from "./ratelimit"
+
+/**
+ * Resolve a deck-size band from the request body.
+ * - Explicit `deckSize` collapses the band to [n, n] — preserves the old
+ *   strict behavior (503 unless exactly n oracles are live).
+ * - Otherwise default to [3, 5]. Both bounds are clamped to the contract's
+ *   [MIN_DECK_SIZE, MAX_DECK_SIZE] = [1, 20], and `min` is capped at `max`.
+ */
+export function resolveDeckBounds(body: {
+  deckSize?: number
+  minDeckSize?: number
+  maxDeckSize?: number
+}): { min: number; max: number } {
+  const clamp = (n: number) => Math.max(1, Math.min(20, Math.floor(n)))
+  if (body.deckSize != null) {
+    const n = clamp(body.deckSize)
+    return { min: n, max: n }
+  }
+  const max = clamp(body.maxDeckSize ?? 5)
+  const min = Math.min(clamp(body.minDeckSize ?? 3), max)
+  return { min, max }
+}
+
+/**
+ * Greedy sizing: build the largest deck supply allows, capped at `max`.
+ * `ok` is false when fewer than `min` oracles are live — the only failure
+ * case (surfaces as a 503). `deckSize` is meaningful only when `ok`.
+ */
+export function decideDeckSize(
+  liveCount: number,
+  bounds: { min: number; max: number },
+): { ok: boolean; deckSize: number } {
+  return {
+    ok: liveCount >= bounds.min,
+    deckSize: Math.min(liveCount, bounds.max),
+  }
+}
 
 export async function handleDeckmasterRequest(
   req: Request,

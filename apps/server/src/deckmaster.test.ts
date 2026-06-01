@@ -5,14 +5,18 @@ import {
   allocateSignBalance,
   buildAndProbeDeck,
   buildDeckFromOracles,
+  decideDeckSize,
   difficultyOfPct,
   fetchDeck,
   hashToHex,
   knownHashCount,
   pickMaxAmplitudeStrike,
   rememberDeck,
+  resolveDeckBounds,
+  selectDeckOracleRows,
   snapToTick,
   strikePctOf,
+  type OracleRow,
   type OracleSnapshot,
   type ProbeFn,
 } from "./deckmaster"
@@ -502,5 +506,121 @@ describe("rememberDeck + fetchDeck", () => {
     rememberDeck(deck.hash, deck.cards)
     expect(knownHashCount()).toBeGreaterThanOrEqual(before)
     expect(knownHashCount()).toBeLessThanOrEqual(before + 1)
+  })
+})
+
+describe("resolveDeckBounds", () => {
+  test("defaults to the 3–5 band when nothing is passed", () => {
+    expect(resolveDeckBounds({})).toEqual({ min: 3, max: 5 })
+  })
+
+  test("honors caller min/max", () => {
+    expect(resolveDeckBounds({ minDeckSize: 2, maxDeckSize: 4 })).toEqual({
+      min: 2,
+      max: 4,
+    })
+  })
+
+  test("clamps to the contract's [1, 20] range", () => {
+    expect(resolveDeckBounds({ minDeckSize: 0, maxDeckSize: 99 })).toEqual({
+      min: 1,
+      max: 20,
+    })
+  })
+
+  test("forces min ≤ max when min exceeds max", () => {
+    expect(resolveDeckBounds({ minDeckSize: 9, maxDeckSize: 4 })).toEqual({
+      min: 4,
+      max: 4,
+    })
+  })
+
+  test("explicit deckSize collapses the band (back-compat strict path)", () => {
+    expect(resolveDeckBounds({ deckSize: 5 })).toEqual({ min: 5, max: 5 })
+  })
+})
+
+describe("decideDeckSize (greedy 3–5)", () => {
+  const band = { min: 3, max: 5 }
+
+  test("5 live → deck of 5", () => {
+    expect(decideDeckSize(5, band)).toEqual({ ok: true, deckSize: 5 })
+  })
+
+  test("4 live → deck of 4", () => {
+    expect(decideDeckSize(4, band)).toEqual({ ok: true, deckSize: 4 })
+  })
+
+  test("3 live → deck of 3", () => {
+    expect(decideDeckSize(3, band)).toEqual({ ok: true, deckSize: 3 })
+  })
+
+  test("2 live → not ok (below min)", () => {
+    expect(decideDeckSize(2, band).ok).toBe(false)
+  })
+
+  test("more live than max → capped at max", () => {
+    expect(decideDeckSize(9, band)).toEqual({ ok: true, deckSize: 5 })
+  })
+})
+
+describe("selectDeckOracleRows", () => {
+  const NOW = 1_000_000_000_000 // fixed epoch-ms for determinism
+  const MIN = 10 * 60 * 1000 // 10 min headroom
+  const MAX = 3 * 60 * 60 * 1000 // 3h horizon
+  const base = {
+    spot: 100n,
+    forward: 100n,
+    active: true,
+    settled: false,
+    asset: "BTC",
+  }
+  const row = (id: string, minsOut: number): OracleRow => ({
+    ...base,
+    id,
+    expiry: BigInt(NOW + minsOut * 60 * 1000),
+  })
+  const opts = {
+    nowMs: NOW,
+    headroomMs: MIN,
+    maxHorizonMs: MAX,
+    asset: "BTC",
+    cap: 5,
+  }
+
+  test("excludes oracles expiring beyond the horizon (long-dated)", () => {
+    const rows = [row("0x1", 30), row("0x2", 60), row("0x3", 7 * 24 * 60)]
+    const out = selectDeckOracleRows(rows, opts)
+    expect(out.map((r) => r.id)).toEqual(["0x1", "0x2"])
+  })
+
+  test("excludes oracles inside the headroom floor", () => {
+    const rows = [row("0x1", 5), row("0x2", 30)]
+    expect(selectDeckOracleRows(rows, opts).map((r) => r.id)).toEqual(["0x2"])
+  })
+
+  test("sorts soonest-expiry first", () => {
+    const rows = [row("0x3", 90), row("0x1", 20), row("0x2", 45)]
+    expect(selectDeckOracleRows(rows, opts).map((r) => r.id)).toEqual([
+      "0x1",
+      "0x2",
+      "0x3",
+    ])
+  })
+
+  test("caps at the requested count", () => {
+    const rows = [20, 30, 40, 50, 60, 70].map((m, i) => row(`0x${i}`, m))
+    expect(selectDeckOracleRows(rows, { ...opts, cap: 3 })).toHaveLength(3)
+  })
+
+  test("drops inactive, settled, asset-mismatch, and zero-price rows", () => {
+    const rows = [
+      row("0x1", 30),
+      { ...row("0x2", 35), active: false },
+      { ...row("0x3", 40), settled: true },
+      { ...row("0x4", 45), asset: "ETH" },
+      { ...row("0x5", 50), forward: 0n },
+    ]
+    expect(selectDeckOracleRows(rows, opts).map((r) => r.id)).toEqual(["0x1"])
   })
 })
