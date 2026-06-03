@@ -3,9 +3,10 @@ import { Link, useParams } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 import { CONFIG } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
-import { liveCardPnl } from "@/lib/pnl"
+import { markCardPnl } from "@/lib/pnl"
 import { PixelButton } from "@/components/pixel-button"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
+import { BtcSpotChart } from "@/components/btc-spot-chart"
 import type { CSSProperties } from "react"
 import {
   DEMO_DUEL_ID,
@@ -56,6 +57,10 @@ interface DuelLite {
 interface Tick {
   spot: string
   forward: string
+  expiryMs?: number
+  /** Oracle has settled on-chain — final outcome is known even before
+   *  the indexer records it into the duel's `cardOutcomes`. */
+  settled?: boolean
 }
 
 const POLL_INTERVAL_MS = 5_000
@@ -133,10 +138,14 @@ export default function DuelView() {
   const account = useCurrentAccount()
   const address = account?.address
   const demo = useDemoChart()
-  const { send, onMessage } = useFlickySocket(demo ? undefined : address)
+  const { wsOpen, send, onMessage } = useFlickySocket(address, {
+    enabled: !demo,
+  })
   const [fetchedDuel, setFetchedDuel] = useState<DuelLite | null>(null)
   const [ticks, setTicks] = useState<Record<string, Tick>>({})
   const [err, setErr] = useState<string | null>(null)
+  // Which chart occupies the chart slot — live PnL or the BTC spot price.
+  const [chartView, setChartView] = useState<"pnl" | "btc">("pnl")
   // Stable startedAtMs across re-renders so the demo duel object is
   // referentially stable from useMemo's perspective.
   const [demoStartedAtMs] = useState(() => Date.now() - 60_000)
@@ -191,14 +200,16 @@ export default function DuelView() {
   }, [duelId, demo])
 
   // Subscribe to the WS room so deltas (room_state) land here too.
-  // Skipped in demo mode.
+  // Skipped in demo mode. Keyed on `wsOpen` so a (re)connect — initial
+  // open or a server-restart reconnect — re-sends the subscription
+  // instead of silently dropping it on a not-yet-open socket.
   useEffect(() => {
-    if (!duelId || demo) return
+    if (!duelId || demo || !wsOpen) return
     send({ type: "room_subscribe", duelId })
     return () => {
       send({ type: "room_unsubscribe", duelId })
     }
-  }, [duelId, send, demo])
+  }, [duelId, send, demo, wsOpen])
 
   // Demo synthetic oracle-tick stream.
   useDemoOracleTicks(demo, setTicks)
@@ -213,14 +224,19 @@ export default function DuelView() {
   )
   const oracleKey = oracleIds.join(",")
   useEffect(() => {
-    if (oracleIds.length === 0 || demo) return
+    if (oracleIds.length === 0 || demo || !wsOpen) return
     send({ type: "oracle_subscribe", oracleIds })
     const off = onMessage((msg) => {
       if (msg.type !== "oracle_tick") return
       if (!oracleIds.includes(msg.oracleId)) return
       setTicks((prev) => ({
         ...prev,
-        [msg.oracleId]: { spot: msg.spot, forward: msg.forward },
+        [msg.oracleId]: {
+          spot: msg.spot,
+          forward: msg.forward,
+          expiryMs: Number(msg.expiry),
+          settled: msg.settled,
+        },
       }))
     })
     return () => {
@@ -228,7 +244,7 @@ export default function DuelView() {
       send({ type: "oracle_unsubscribe", oracleIds })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [oracleKey, onMessage, send, demo])
+  }, [oracleKey, onMessage, send, demo, wsOpen])
 
   if (!duelId) {
     return <Notice title="missing duel id" body="this url has no duel id." />
@@ -250,6 +266,14 @@ export default function DuelView() {
   const isParticipant = myIsP0 || myIsP1
   const opponent = myIsP0 ? duel.challenger : duel.creator
   const isLive = duel.status === "ACTIVE"
+  // On-chain settlement lands before the indexer mirrors it, so the duel's
+  // `settledCount` lags. Count oracles the tick stream reports as settled
+  // and show whichever is further along — keeps "N/5 settled" honest.
+  const onChainSettled = duel.cards.reduce(
+    (n, c) => n + (ticks[c.oracle_id]?.settled ? 1 : 0),
+    0
+  )
+  const settledCount = Math.max(duel.settledCount, onChainSettled)
 
   return (
     <div className="relative isolate flex h-full flex-col gap-3 overflow-y-auto px-4 py-4 font-pixel text-white">
@@ -284,18 +308,42 @@ export default function DuelView() {
         <div className="flex flex-col gap-1 rounded bg-black/30 px-3 py-2 backdrop-blur-sm">
           <span className="text-xs text-white/55">cards</span>
           <span className="text-base text-white tabular-nums">
-            {duel.settledCount} / {duel.cardCount || 5} settled
+            {settledCount} / {duel.cardCount || 5} settled
           </span>
         </div>
       </div>
 
-      <StreamingPnlChart
-        duel={duel}
-        ticks={ticks}
-        myIsP0={Boolean(myIsP0)}
-        youAddress={address ?? ""}
-        oppAddress={opponent}
-      />
+      <div className="flex flex-col gap-1.5">
+        <div className="flex justify-end">
+          <div className="inline-flex overflow-hidden rounded bg-black/35 p-0.5 text-[10px] tracking-[0.18em] uppercase backdrop-blur-sm">
+            <ChartToggleButton
+              label="pnl"
+              active={chartView === "pnl"}
+              onClick={() => setChartView("pnl")}
+            />
+            <ChartToggleButton
+              label="btc"
+              active={chartView === "btc"}
+              onClick={() => setChartView("btc")}
+            />
+          </div>
+        </div>
+
+        {/* Both charts stay mounted (visibility toggled) so each keeps
+            accumulating oracle-tick history while the other is shown. */}
+        <div className={chartView === "pnl" ? "" : "hidden"}>
+          <StreamingPnlChart
+            duel={duel}
+            ticks={ticks}
+            myIsP0={Boolean(myIsP0)}
+            youAddress={address ?? ""}
+            oppAddress={opponent}
+          />
+        </div>
+        <div className={chartView === "btc" ? "" : "hidden"}>
+          <BtcSpotChart ticks={ticks} cards={duel.cards} />
+        </div>
+      </div>
 
       <CardList duel={duel} myIsP0={Boolean(myIsP0)} ticks={ticks} nowMs={nowMs} />
 
@@ -346,6 +394,31 @@ function StatusBadge({ status }: { status: DuelLite["status"] }) {
   )
 }
 
+function ChartToggleButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`cursor-pointer rounded px-2.5 py-1 transition-colors ${
+        active
+          ? "bg-[#4094fb] text-white"
+          : "text-white/55 hover:text-white/85"
+      }`}
+    >
+      {label}
+    </button>
+  )
+}
+
 function Notice({ title, body }: { title: string; body: string }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center font-pixel text-white">
@@ -369,10 +442,14 @@ function shortAddr(a: string): string {
 
 type CardState = "live" | "win" | "loss"
 
+// Chunky pixel-art border per state: a 2px state-tinted inner ring plus a
+// beveled inset shadow — a soft color highlight along the top and a black
+// shadow along the bottom — so the card reads like a raised game tile. The
+// black outer outline comes from `.pixel-tile`; this colors the inside.
 const CARD_STATE_STYLES: Record<CardState, string> = {
-  live: "bg-cyan-950/40 text-cyan-100 ring-cyan-400/60",
-  win: "bg-emerald-950/40 text-emerald-100 ring-emerald-500/55",
-  loss: "bg-rose-950/40 text-rose-200 ring-rose-500/50",
+  live: "bg-cyan-950/40 text-cyan-100 ring-2 ring-cyan-400/70 shadow-[inset_0_3px_0_rgba(125,230,255,0.25),inset_0_-3px_0_rgba(0,0,0,0.5)]",
+  win: "bg-emerald-950/40 text-emerald-100 ring-2 ring-emerald-400/70 shadow-[inset_0_3px_0_rgba(110,231,183,0.25),inset_0_-3px_0_rgba(0,0,0,0.5)]",
+  loss: "bg-rose-950/40 text-rose-200 ring-2 ring-rose-400/70 shadow-[inset_0_3px_0_rgba(253,164,175,0.25),inset_0_-3px_0_rgba(0,0,0,0.5)]",
 }
 
 const CARD_BADGE_SRC: Record<CardState, string> = {
@@ -433,6 +510,7 @@ function CardList({
                   duel={duel}
                   myIsP0={myIsP0}
                   ticks={ticks}
+                  nowMs={nowMs}
                 />
                 <div className="text-center font-pixel">
                   <div className="text-xs tracking-[0.15em] text-white/55 uppercase tabular-nums">
@@ -501,11 +579,13 @@ function CardTile({
   duel,
   myIsP0,
   ticks,
+  nowMs,
 }: {
   index: number
   duel: DuelLite
   myIsP0: boolean
   ticks: Record<string, Tick>
+  nowMs: number
 }) {
   const card = duel.cards[index]
   const outcome = duel.cardOutcomes.find((o) => o.cardIdx === index)
@@ -515,25 +595,34 @@ function CardTile({
       ? swipeRow.p0Swipe
       : swipeRow.p1Swipe
     : null
+  const tick = card ? ticks[card.oracle_id] : undefined
   const myPnl: bigint | null =
     outcome && (myIsP0 ? outcome.p0Pnl : outcome.p1Pnl) !== null
       ? BigInt(myIsP0 ? outcome.p0Pnl! : outcome.p1Pnl!)
       : card && mySwipe
-        ? liveCardPnl(mySwipe, card.strike, ticks[card.oracle_id]?.forward)
+        ? markCardPnl(
+            mySwipe,
+            card.strike,
+            tick?.forward,
+            tick?.expiryMs,
+            nowMs,
+          )
         : null
 
-  const state: CardState = outcome
-    ? myPnl !== null && myPnl < 0n
-      ? "loss"
-      : "win"
-    : "live"
+  // A card is final once the indexer records its outcome OR the oracle
+  // tick reports `settled` (which lands first — the on-chain settlement
+  // precedes the indexer mirror). In the settled case `markCardPnl`
+  // already returns the binary outcome (expiry has passed), so the
+  // win/loss split below is the real result, not a live mark.
+  const settledNow = Boolean(outcome) || tick?.settled === true
+  const state: CardState =
+    settledNow && myPnl !== null ? (myPnl < 0n ? "loss" : "win") : "live"
 
-  const isLive = state === "live"
   const badgeSrc = CARD_BADGE_SRC[state]
 
   return (
     <div
-      className={`pixel-tile relative flex aspect-[3/4] flex-col items-center justify-between p-1.5 text-center font-pixel ring-1 ring-inset ${CARD_STATE_STYLES[state]} ${isLive ? "animate-pulse" : ""}`}
+      className={`pixel-tile relative flex aspect-[3/4] flex-col items-center justify-between p-1.5 text-center font-pixel ring-inset ${CARD_STATE_STYLES[state]}`}
     >
       <div className="flex w-full items-center justify-between tracking-[0.15em] uppercase opacity-90">
         <img
@@ -542,7 +631,13 @@ function CardTile({
           className="block h-7 w-7 [image-rendering:pixelated]"
         />
         {card && (
-          <span className="text-xs leading-none tabular-nums">
+          <span className="flex items-center gap-1 text-xs leading-none tabular-nums">
+            {state === "live" && (
+              <span
+                aria-label="live"
+                className="inline-block size-1.5 animate-pulse bg-cyan-300 shadow-[0_0_5px_rgba(125,230,255,0.9)]"
+              />
+            )}
             ${fmtStrike(card.strike)}
           </span>
         )}
@@ -565,10 +660,14 @@ function CardTile({
           <img
             src={badgeSrc}
             alt={state}
-            className="block h-10 w-auto [image-rendering:pixelated]"
+            className={`block h-10 w-auto [image-rendering:pixelated] ${
+              state === "live" ? "animate-pulse" : ""
+            }`}
           />
         )}
-        <span className="text-base leading-none tabular-nums">
+        <span
+          className={`text-base leading-none tabular-nums ${pnlTextColor(myPnl)}`}
+        >
           {myPnl === null ? "—" : signedPercent(myPnl, mySwipe)}
         </span>
       </div>
@@ -590,6 +689,16 @@ function signedPercent(
   const pct = Math.round((Number(micro) / Number(premium)) * 100)
   const sign = pct < 0 ? "-" : pct > 0 ? "+" : ""
   return `${sign}${Math.abs(pct)}%`
+}
+
+/**
+ * Tailwind text color for a per-card PnL: green when up, red when down,
+ * muted when flat/unknown. Reflects the PnL sign, not the swipe
+ * direction — a correct "down" call is still green.
+ */
+function pnlTextColor(micro: bigint | null): string {
+  if (micro === null || micro === 0n) return "text-white/70"
+  return micro > 0n ? "text-emerald-300" : "text-rose-300"
 }
 
 /**

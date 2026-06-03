@@ -26,6 +26,7 @@ interface DuelLite {
   cardCount: number
   settledCount: number
   startedAtMs: number
+  lastUpdatedMs: number
   cardOutcomes: Array<{
     cardIdx: number
     p0Pnl: string | null
@@ -42,6 +43,9 @@ interface DuelLite {
 interface Tick {
   spot: string
   forward: string
+  expiryMs?: number
+  /** Oracle settled on-chain — lands before the indexer mirrors it. */
+  settled?: boolean
 }
 
 const POLL_INTERVAL_MS = 5_000
@@ -56,6 +60,7 @@ function buildDemoDuel(address: string): DuelLite {
     cardCount: CARD_SLOTS,
     settledCount: 2,
     startedAtMs: Date.now() - 60_000,
+    lastUpdatedMs: Date.now(),
     cardOutcomes: [
       { cardIdx: 0, p0Pnl: "50000000", p1Pnl: "-50000000" },
       { cardIdx: 1, p0Pnl: "-30000000", p1Pnl: "30000000" },
@@ -95,7 +100,9 @@ export function MyMatchTile() {
   const account = useCurrentAccount()
   const address = account?.address
   const demo = useDemoChart()
-  const { send, onMessage } = useFlickySocket(demo ? undefined : address)
+  const { wsOpen, send, onMessage } = useFlickySocket(address, {
+    enabled: !demo,
+  })
   const [duels, setDuels] = useState<DuelLite[] | null>(null)
   const [ticks, setTicks] = useState<Record<string, Tick>>({})
 
@@ -135,7 +142,10 @@ export function MyMatchTile() {
     [demo, address, duels],
   )
   const pick = useMemo(() => pickMatch(effectiveDuels), [effectiveDuels])
-  const isLive = pick?.status === "ACTIVE"
+  // "Live" means actively being played — not a duel that's fully settled but
+  // still ACTIVE because the keeper hasn't finalized it yet. Those are done
+  // in every way that matters to the player, so they shouldn't pulse "live".
+  const isLive = pick != null && isLiveDuel(pick)
 
   // Subscribe to oracle ticks for the duel's cards while LIVE. The
   // `unsubscribe` cleanup keeps the keeper's broadcast traffic tight
@@ -146,14 +156,24 @@ export function MyMatchTile() {
   )
   const oracleKey = oracleIds.join(",")
   useEffect(() => {
-    if (oracleIds.length === 0 || demo) return
+    // Gate on `wsOpen` so the subscribe runs once the socket is actually
+    // open — otherwise a subscribe sent before the WS handshake (it can
+    // lose the race against the duel poll resolving) is a silent no-op
+    // and never retried, leaving the chart tick-less. Also re-fires on a
+    // server-restart reconnect.
+    if (oracleIds.length === 0 || demo || !wsOpen) return
     send({ type: "oracle_subscribe", oracleIds })
     const off = onMessage((msg) => {
       if (msg.type !== "oracle_tick") return
       if (!oracleIds.includes(msg.oracleId)) return
       setTicks((prev) => ({
         ...prev,
-        [msg.oracleId]: { spot: msg.spot, forward: msg.forward },
+        [msg.oracleId]: {
+          spot: msg.spot,
+          forward: msg.forward,
+          expiryMs: Number(msg.expiry),
+          settled: msg.settled,
+        },
       }))
     })
     return () => {
@@ -163,7 +183,7 @@ export function MyMatchTile() {
     // oracleKey condenses the array dependency so we don't re-subscribe
     // on every parent render that returns a fresh `oracleIds`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [oracleKey, onMessage, send, demo])
+  }, [oracleKey, onMessage, send, demo, wsOpen])
 
   if (!address) return null
 
@@ -172,9 +192,17 @@ export function MyMatchTile() {
       <section className="w-full rounded-xl border-2 border-black/55 bg-black/35 p-4 font-pixel text-white shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md">
         <header className="mb-3 flex items-center justify-between">
           <h3 className="text-sm tracking-[0.2em] uppercase">your match</h3>
-          <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] tracking-[0.18em] text-white/55 uppercase">
-            idle
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] tracking-[0.18em] text-white/55 uppercase">
+              idle
+            </span>
+            <Link
+              to="/game/history"
+              className="rounded border border-white/25 bg-white/5 px-2 py-1 text-[10px] tracking-[0.18em] text-white/70 uppercase hover:bg-white/10"
+            >
+              see all →
+            </Link>
+          </div>
         </header>
         <div className="flex flex-col items-center gap-2 py-4 text-center">
           <img
@@ -202,12 +230,27 @@ export function MyMatchTile() {
 
   const myIsP0 = pick.creator === address
   const opponentAddr = myIsP0 ? pick.challenger : pick.creator
+  // On-chain settlement precedes the indexer's `settledCount`, so count
+  // oracles the tick stream reports settled and show whichever is ahead.
+  const onChainSettled = pick.cards.reduce(
+    (n, c) => n + (ticks[c.oracle_id]?.settled ? 1 : 0),
+    0,
+  )
+  const settledCount = Math.max(pick.settledCount, onChainSettled)
 
   return (
     <section className="w-full rounded-xl border-2 border-black/55 bg-black/35 p-3 font-pixel text-white shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md">
       <header className="mb-2 flex items-center justify-between">
         <h3 className="text-sm tracking-[0.2em] uppercase">your match</h3>
-        <StatusBadge live={isLive} />
+        <div className="flex items-center gap-2">
+          <StatusBadge live={isLive} />
+          <Link
+            to="/game/history"
+            className="rounded border border-white/25 bg-white/5 px-2 py-1 text-[10px] tracking-[0.18em] text-white/70 uppercase hover:bg-white/10"
+          >
+            see all →
+          </Link>
+        </div>
       </header>
 
       <StreamingPnlChart
@@ -226,7 +269,7 @@ export function MyMatchTile() {
         <div className="flex flex-col text-right">
           <span className="text-white/55">cards settled</span>
           <span className="text-white tabular-nums">
-            {pick.settledCount} / {pick.cardCount || CARD_SLOTS}
+            {settledCount} / {pick.cardCount || CARD_SLOTS}
           </span>
         </div>
         <Link
@@ -256,16 +299,33 @@ function StatusBadge({ live }: { live: boolean }) {
   )
 }
 
+/** Genuinely in-play: ACTIVE and not every card settled yet. */
+function isLiveDuel(d: DuelLite): boolean {
+  return (
+    d.status === "ACTIVE" && (d.cardCount === 0 || d.settledCount < d.cardCount)
+  )
+}
+
+/** Recency key — `lastUpdatedMs` is the reliable one; fall back to start. */
+function recencyOf(d: DuelLite): number {
+  return d.lastUpdatedMs || d.startedAtMs || 0
+}
+
 function pickMatch(duels: DuelLite[] | null): DuelLite | null {
   if (!duels || duels.length === 0) return null
-  const active = duels
-    .filter((d) => d.status === "ACTIVE")
-    .sort((a, b) => b.startedAtMs - a.startedAtMs)[0]
-  if (active) return active
-  const complete = duels
-    .filter((d) => d.status === "COMPLETE")
-    .sort((a, b) => b.startedAtMs - a.startedAtMs)[0]
-  return complete ?? null
+  // A genuinely-live duel always takes the slot (newest first). A duel that's
+  // fully settled but still ACTIVE — keeper hasn't finalized — is treated as
+  // done, so it can't outrank a more-recent finished match.
+  const live = duels
+    .filter(isLiveDuel)
+    .sort((a, b) => recencyOf(b) - recencyOf(a))
+  if (live[0]) return live[0]
+  // Otherwise show the most-recently-touched finished duel (COMPLETE or a
+  // fully-settled-but-unfinalized ACTIVE one). PENDING rows have no result yet.
+  const done = duels
+    .filter((d) => d.status !== "PENDING")
+    .sort((a, b) => recencyOf(b) - recencyOf(a))
+  return done[0] ?? null
 }
 
 function shortAddr(a: string): string {

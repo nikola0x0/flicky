@@ -39,6 +39,18 @@ function fmtUsd(v: string | bigint): string {
 const DRAG_COMMIT_FRACTION = 0.3
 const DRAG_MAX_ROTATE_DEG = 18
 
+// Card mascot art (generated PNGs in `public/cards/`). Each card slot draws
+// its own idle character so the deck feels varied; swiping resolves to the
+// bull (YES / up) or the bear (NO / down) for the up/down story.
+const IDLE_ART = [
+  "/assets/cards/coin.png",
+  "/assets/cards/gremlin.png",
+  "/assets/cards/wizard.png",
+  "/assets/cards/chad.png",
+]
+const ART_YES = "/assets/cards/bull.png"
+const ART_NO = "/assets/cards/bear.png"
+
 interface Props {
   /**
    * Matchmaking entry: the player's role drives the create/join PTB.
@@ -333,16 +345,16 @@ export function ActiveDuel({
     <div className="flex h-full flex-col gap-4 px-4 py-4 text-white">
       <WsErrorBanner onMessage={onMessage} />
       <div className="flex items-center justify-between">
-        <h2 className="text-xl tracking-[0.2em] uppercase">Active Match</h2>
+        <h2 className="text-3xl tracking-[0.2em] uppercase">Active Match</h2>
         <button
           type="button"
           onClick={onExit}
-          className="rounded border border-white/30 bg-white/5 px-3 py-1 text-base hover:bg-white/10"
+          className="rounded border border-white/25 bg-black/40 px-3 py-1 text-lg backdrop-blur-md hover:bg-black/55"
         >
           Exit
         </button>
       </div>
-      <div className="text-sm tracking-wider text-white/55 uppercase">
+      <div className="text-base tracking-wider text-white/55 uppercase">
         {tier ? `stake ${Number(STAKE_TIERS[tier]) / 1e6} dUSDC` : "staked duel"}
       </div>
 
@@ -384,8 +396,8 @@ export function ActiveDuel({
 
 function PhaseEntry({ reason }: { reason: string }) {
   return (
-    <div className="rounded border border-white/10 bg-white/5 p-4">
-      <p className="text-base text-white/70">{reason}</p>
+    <div className="rounded-lg border-2 border-black/45 bg-black/45 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.35)] backdrop-blur-md">
+      <p className="text-base text-white/80">{reason}</p>
     </div>
   )
 }
@@ -398,9 +410,9 @@ function PhaseAwaitReveal({
 }) {
   const ready = roomState?.cards.length ?? 0
   return (
-    <div className="rounded border border-white/10 bg-white/5 p-4 text-center">
-      <p className="text-base text-white/70">Shuffling the deck&hellip;</p>
-      <p className="mt-2 text-sm text-white/40">{ready} / 5 cards ready</p>
+    <div className="rounded-lg border-2 border-black/45 bg-black/45 p-4 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.35)] backdrop-blur-md">
+      <p className="text-base text-white/80">Shuffling the deck&hellip;</p>
+      <p className="mt-2 text-sm text-white/55">{ready} / 5 cards ready</p>
     </div>
   )
 }
@@ -590,17 +602,35 @@ function PhaseSwiping({
   const yesOdds = quoteUp ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(0)}%` : "…"
   const hasNext = cardIdx + 1 < roomState.cards.length
 
+  // Mascot art reacts to the swipe direction. These are placeholder pixel
+  // icons — drop your generated mascot PNGs in `public/cards/` and point
+  // CARD_ART at them (e.g. idle: "/cards/coin.png", yes: "/cards/bull.png").
+  const swipeDir = drag.x > 24 ? "yes" : drag.x < -24 ? "no" : "idle"
+  const idleArt = IDLE_ART[cardIdx % IDLE_ART.length]
+  const artSrc =
+    swipeDir === "yes" ? ART_YES : swipeDir === "no" ? ART_NO : idleArt
+  const artGlow =
+    swipeDir === "yes" ? "#4aff9a" : swipeDir === "no" ? "#ff5d6c" : "#ffd24a"
+
   return (
     <div className="flex flex-1 flex-col">
       {/* top bar — card count + chart toggles (charts live in modals so the
           card owns the screen) */}
       <div className="flex items-center justify-between pb-2">
-        <span className="font-pixel text-[11px] tracking-[0.2em] text-white/55 uppercase">
+        <span className="font-pixel text-base tracking-[0.2em] text-white/55 uppercase">
           card {cardIdx + 1} / {roomState.cards.length}
         </span>
         <div className="flex gap-2">
-          <ChartChip label="btc" onClick={() => setChartModal("btc")} />
-          <ChartChip label="pnl" onClick={() => setChartModal("pnl")} />
+          <ChartChip
+            label="btc"
+            icon="/icons/coins.png"
+            onClick={() => setChartModal("btc")}
+          />
+          <ChartChip
+            label="pnl"
+            icon="/icons/arrow_up_down.png"
+            onClick={() => setChartModal("pnl")}
+          />
         </div>
       </div>
 
@@ -609,7 +639,8 @@ function PhaseSwiping({
         {hasNext && (
           <div
             aria-hidden
-            className="pixel-tile absolute inset-x-4 bottom-3 top-6 bg-[#141d3a]"
+            className="pixel-tile no-hover absolute inset-x-4 bottom-3 top-6 bg-[#141d3a] bg-cover bg-center [image-rendering:pixelated]"
+            style={{ backgroundImage: "url(/assets/cards/card-back.png)" }}
           />
         )}
         <div
@@ -618,56 +649,141 @@ function PhaseSwiping({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
-          className={`pixel-tile absolute inset-x-1 bottom-4 top-2 flex cursor-grab flex-col justify-between bg-[#1b2548] p-6 ${
+          className={`pixel-tile absolute inset-x-1 bottom-4 top-2 flex cursor-grab flex-col gap-2.5 bg-[#2c3c74] p-3 shadow-[inset_0_3px_0_rgba(255,255,255,0.1),inset_0_-4px_0_rgba(0,0,0,0.4)] ${
             drag.active ? "" : "transition-transform duration-300 ease-out"
           } ${drag.flying ? "pointer-events-none" : "active:cursor-grabbing"}`}
           style={{ transform, willChange: "transform" }}
         >
-          {/* YES / NO tint + stamps */}
+          {/* YES / NO swipe tint + stamps (above the card content) */}
           <div
-            className="pointer-events-none absolute inset-0 bg-emerald-500/25"
+            className="pointer-events-none absolute inset-0 z-20 bg-emerald-500/25"
             style={{ opacity: yesGlow }}
           />
           <div
-            className="pointer-events-none absolute inset-0 bg-rose-500/25"
+            className="pointer-events-none absolute inset-0 z-20 bg-rose-500/25"
             style={{ opacity: noGlow }}
           />
           {drag.x > 24 && (
-            <div className="font-pixel absolute right-4 top-4 rotate-6 border-2 border-emerald-400 px-3 py-1 text-xl font-black text-emerald-400 uppercase">
+            <div className="font-pixel absolute bottom-56 left-4 z-30 -rotate-6 border-2 border-emerald-400 bg-[#0e1530]/80 px-3 py-1 text-2xl font-black text-emerald-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
               yes
             </div>
           )}
           {drag.x < -24 && (
-            <div className="font-pixel absolute left-4 top-4 -rotate-6 border-2 border-rose-400 px-3 py-1 text-xl font-black text-rose-400 uppercase">
+            <div className="font-pixel absolute right-4 bottom-56 z-30 rotate-6 border-2 border-rose-400 bg-[#0e1530]/80 px-3 py-1 text-2xl font-black text-rose-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
               no
             </div>
           )}
 
-          {/* the claim — the focal point */}
-          <div className="mt-2">
-            <p className="font-pixel text-[11px] tracking-[0.2em] text-white/45 uppercase">
+          {/* title banner */}
+          <div className="flex items-center justify-between border-2 border-black/55 bg-[#0e1530] px-2.5 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.45)]">
+            <span className="font-pixel flex items-center gap-1.5 text-base tracking-[0.18em] text-amber-300 uppercase">
+              <img
+                src="/assets/cards/asset-btc-16.png"
+                alt=""
+                aria-hidden
+                className="size-5 [image-rendering:pixelated]"
+              />
+              btc / usd
+            </span>
+            <span className="font-pixel text-base tracking-[0.18em] text-white/45 uppercase tabular-nums">
+              {cardIdx + 1}/{roomState.cards.length}
+            </span>
+          </div>
+
+          {/* art window — pixel mascot reacts to the swipe direction */}
+          <div className="crt-screen relative flex flex-1 items-center justify-center overflow-hidden border-2 border-black/55 bg-gradient-to-b from-[#243169] to-[#10183a] shadow-[inset_0_3px_0_rgba(255,255,255,0.05),inset_0_-3px_0_rgba(0,0,0,0.5)]">
+            <span className="absolute left-1 top-1 size-1.5 bg-black/50" />
+            <span className="absolute right-1 top-1 size-1.5 bg-black/50" />
+            <span className="absolute bottom-1 left-1 size-1.5 bg-black/50" />
+            <span className="absolute bottom-1 right-1 size-1.5 bg-black/50" />
+            <img
+              src={artSrc}
+              alt=""
+              aria-hidden
+              draggable={false}
+              className="pointer-events-none h-[88%] w-[88%] object-contain select-none [image-rendering:pixelated] [-webkit-user-drag:none]"
+              style={{
+                transform: `scale(${1 + progress * 0.18}) rotate(${rotate * 0.4}deg)`,
+                filter: `drop-shadow(0 0 12px ${artGlow})`,
+              }}
+            />
+          </div>
+
+          {/* TCG quote box */}
+          <div className="relative border-2 border-black/55 bg-[#11183a] px-3 py-2.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.5)]">
+            <div className="pointer-events-none absolute inset-1 border border-white/10" />
+            <p className="font-pixel text-sm tracking-[0.22em] text-amber-300/80 uppercase">
               will btc settle
             </p>
-            <p className="mt-3 text-4xl leading-[1.05] font-black">
+            <p className="mt-1 text-3xl leading-none font-black text-white">
               above {fmtUsd(card.strike)}?
-            </p>
-            <p className="mt-4 text-sm text-white/55">
-              now {tick ? fmtUsd(tick.spot) : "—"} · market {yesOdds}
             </p>
           </div>
 
-          {/* yes / no footer hints */}
-          <div className="flex items-end justify-between text-sm">
-            <span className="text-rose-300">
-              <span className="font-pixel">← no</span>
-              <br />
-              {noCost}
-            </span>
-            <span className="text-right text-emerald-300">
-              <span className="font-pixel">yes →</span>
-              <br />
-              {yesCost}
-            </span>
+          {/* live stat pills */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="flex items-center gap-2 border-2 border-black/55 bg-[#0e1530] px-2 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.05),inset_0_-2px_0_rgba(0,0,0,0.45)]">
+              <img
+                src="/icons/clock.png"
+                alt=""
+                aria-hidden
+                className="size-4 shrink-0 [image-rendering:pixelated]"
+              />
+              <div className="min-w-0">
+                <p className="font-pixel text-xs tracking-[0.2em] text-white/40 uppercase">
+                  now
+                </p>
+                <p className="font-pixel text-lg text-white tabular-nums">
+                  {tick ? fmtUsd(tick.spot) : "—"}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 border-2 border-black/55 bg-[#0e1530] px-2 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.05),inset_0_-2px_0_rgba(0,0,0,0.45)]">
+              <img
+                src="/icons/dice.png"
+                alt=""
+                aria-hidden
+                className="size-4 shrink-0 [image-rendering:pixelated]"
+              />
+              <div className="min-w-0">
+                <p className="font-pixel text-xs tracking-[0.2em] text-white/40 uppercase">
+                  yes odds
+                </p>
+                <p className="font-pixel text-lg text-emerald-300 tabular-nums">
+                  {yesOdds}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* yes / no action chips */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#3a1620] px-2 py-2">
+              <img
+                src="/icons/arrow_left.png"
+                alt=""
+                aria-hidden
+                className="size-4 [image-rendering:pixelated]"
+              />
+              <span className="font-pixel text-lg text-rose-300 uppercase">no</span>
+              <span className="font-pixel text-sm text-rose-200/70 tabular-nums">
+                {noCost}
+              </span>
+            </div>
+            <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#163a26] px-2 py-2">
+              <span className="font-pixel text-sm text-emerald-200/70 tabular-nums">
+                {yesCost}
+              </span>
+              <span className="font-pixel text-lg text-emerald-300 uppercase">
+                yes
+              </span>
+              <img
+                src="/icons/arrow_right.png"
+                alt=""
+                aria-hidden
+                className="size-4 [image-rendering:pixelated]"
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -708,16 +824,27 @@ function PhaseSwiping({
 
 /** Pixel chip that opens a chart modal. Brightened + bordered so it reads as
  *  a tappable control against the dark gameplay background. */
-function ChartChip({ label, onClick }: { label: string; onClick: () => void }) {
+function ChartChip({
+  label,
+  icon,
+  onClick,
+}: {
+  label: string
+  icon: string
+  onClick: () => void
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="pixel-tile flex items-center gap-1.5 bg-[#3a4d8a] px-3 py-2 font-pixel text-[11px] tracking-[0.15em] text-white uppercase hover:bg-[#46599e]"
+      className="pixel-tile flex items-center gap-1.5 bg-[#3a4d8a] px-3 py-2 font-pixel text-base tracking-[0.15em] text-white uppercase hover:bg-[#46599e]"
     >
-      <span aria-hidden className="text-emerald-300">
-        ◳
-      </span>
+      <img
+        src={icon}
+        alt=""
+        aria-hidden
+        className="size-5 [image-rendering:pixelated]"
+      />
       {label}
     </button>
   )
@@ -815,24 +942,40 @@ function CardLedger({
             ? swipeSlot.p0Swipe
             : swipeSlot.p1Swipe
           : null
-        // % return on the premium paid for this card.
+        // % return on the premium paid for this card. `net` is the signed
+        // PnL (null when there's nothing to show) — drives the value color.
         const premium = mySwipe ? BigInt(mySwipe.premium) : 0n
+        let net: bigint | null = null
         let pnlLabel = "—"
         if (settled) {
           const pnl = myIsP0 ? settled.p0Pnl : settled.p1Pnl
-          pnlLabel =
-            pnl !== null
-              ? `${fmtPnlPct(BigInt(pnl), premium)} (settled)`
-              : "skipped"
+          if (pnl !== null) {
+            net = BigInt(pnl)
+            pnlLabel = `${fmtPnlPct(net, premium)} (settled)`
+          } else {
+            pnlLabel = "skipped"
+          }
         } else if (mySwipe) {
           const live = liveCardPnl(
             mySwipe,
             card.strike,
             ticks[card.oracle_id]?.forward,
           )
-          pnlLabel =
-            live !== null ? `${fmtPnlPct(live, premium)} (live)` : "ticking…"
+          if (live !== null) {
+            net = live
+            pnlLabel = `${fmtPnlPct(live, premium)} (live)`
+          } else {
+            pnlLabel = "ticking…"
+          }
         }
+        const valueColor =
+          net === null
+            ? "text-white/45"
+            : net > 0n
+              ? "text-emerald-300"
+              : net < 0n
+                ? "text-rose-300"
+                : "text-white/70"
         return (
           <div
             key={i}
@@ -842,7 +985,7 @@ function CardLedger({
               card {i + 1}
               {mySwipe ? (mySwipe.isUp ? " ↑" : " ↓") : ""}
             </span>
-            <span>{pnlLabel}</span>
+            <span className={`tabular-nums ${valueColor}`}>{pnlLabel}</span>
           </div>
         )
       })}
@@ -863,6 +1006,13 @@ function PhaseAwaitSettlement({ roomState }: { roomState: RoomState }) {
 function SettlingHandoff({ duelId }: { duelId: string }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-5 px-6 py-10 text-center">
+      <img
+        src="/assets/duel/locked-in.png"
+        alt=""
+        aria-hidden
+        draggable={false}
+        className="size-36 select-none [image-rendering:pixelated] [-webkit-user-drag:none] drop-shadow-[0_0_16px_rgba(74,255,154,0.35)]"
+      />
       <p className="font-pixel text-base tracking-[0.2em] text-emerald-300 uppercase">
         picks locked in
       </p>
@@ -873,13 +1023,13 @@ function SettlingHandoff({ duelId }: { duelId: string }) {
       <div className="flex w-full max-w-xs flex-col gap-2">
         <Link
           to={`/game/duel/${duelId}`}
-          className="pixel-tile bg-emerald-600 px-4 py-3 font-pixel text-sm uppercase"
+          className="pixel-tile no-hover bg-emerald-600 px-4 py-3 font-pixel text-sm uppercase"
         >
           watch result
         </Link>
         <Link
           to="/game/home"
-          className="pixel-tile bg-[#1b2548] px-4 py-3 font-pixel text-sm uppercase"
+          className="pixel-tile no-hover bg-[#1b2548] px-4 py-3 font-pixel text-sm uppercase"
         >
           back to home
         </Link>

@@ -46,6 +46,72 @@ export function liveCardPnl(
 }
 
 /**
+ * Annualized vol assumption for the live mark-to-market below. Short-dated
+ * BTC binaries are very sensitive to moneyness near expiry; this constant
+ * just sets how reactive the mark is to forward moves. Tunable — it doesn't
+ * affect settled PnL, only the smooth pre-settlement projection.
+ */
+const ASSUMED_VOL = 0.6
+const MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000
+
+/** Standard normal CDF via Abramowitz & Stegun 7.1.26 erf approximation. */
+function normCdf(x: number): number {
+  const sign = x < 0 ? -1 : 1
+  const z = Math.abs(x) / Math.SQRT2
+  const t = 1 / (1 + 0.3275911 * z)
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) *
+      t +
+      0.254829592) *
+      t *
+      Math.exp(-z * z)
+  return 0.5 * (1 + sign * y)
+}
+
+/**
+ * Continuous mark-to-market for one swipe, in dUSDC micro-units (1e6).
+ *
+ * Unlike {@link liveCardPnl} (a binary step that only flips when the forward
+ * crosses the strike), this prices the card as the *fair value* of a binary
+ * option: `quantity × P(in-the-money) − premium`. The probability is a
+ * digital Black-Scholes estimate from the live forward, strike, and
+ * remaining time, so the mark slides smoothly between `−premium` (p→0) and
+ * `quantity − premium` (p→1) as the forward and clock move — and converges
+ * to the exact binary outcome at expiry. This is what makes the live chart
+ * move continuously instead of sitting flat between strike crossings.
+ *
+ * Falls back to the binary outcome when `expiryMs` is unknown or already
+ * reached. Returns null when core inputs are missing.
+ */
+export function markCardPnl(
+  swipe: SwipeLite | null,
+  strike: string | undefined,
+  forward: string | undefined,
+  expiryMs: number | undefined,
+  nowMs: number,
+): bigint | null {
+  if (!swipe || strike === undefined || forward === undefined) return null
+  const f = Number(BigInt(forward))
+  const k = Number(BigInt(strike))
+  if (!(f > 0) || !(k > 0)) return null
+  const q = Number(BigInt(swipe.quantity))
+  const premium = Number(BigInt(swipe.premium))
+  const tYears = expiryMs !== undefined ? (expiryMs - nowMs) / MS_PER_YEAR : 0
+  let pUp: number
+  if (!(tYears > 0)) {
+    // Expired or unknown expiry — collapse to the binary outcome.
+    pUp = f >= k ? 1 : 0
+  } else {
+    const v = ASSUMED_VOL * Math.sqrt(tYears)
+    const d2 = (Math.log(f / k) - 0.5 * v * v) / v
+    pUp = normCdf(d2)
+  }
+  const pIn = swipe.isUp ? pUp : 1 - pUp
+  return BigInt(Math.round(q * pIn - premium))
+}
+
+/**
  * Combined running PnL for `side` = settled real PnL + live mark-to-market.
  *
  * Settled portion: `payout - premium` from the contract's aggregate

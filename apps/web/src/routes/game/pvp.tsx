@@ -118,12 +118,7 @@ export default function GamePvp() {
     )
   } else if (queueSize !== null) {
     content = (
-      <QueueScreen
-        tier={tier}
-        stake={stake}
-        queueSize={queueSize}
-        onCancel={onQueueMatch}
-      />
+      <QueueScreen tier={tier} stake={stake} onCancel={onQueueMatch} />
     )
   } else {
     content = (
@@ -315,12 +310,10 @@ function StakeSelector({
 function QueueScreen({
   tier,
   stake,
-  queueSize,
   onCancel,
 }: {
   tier: Tier
   stake: Stake
-  queueSize: number
   onCancel: () => void
 }) {
   return (
@@ -373,11 +366,6 @@ function QueueScreen({
               {stake}
             </span>
           </div>
-        </div>
-
-        <div className="flex items-center justify-between rounded-md bg-white/5 px-4 py-2 text-sm tracking-[0.18em] text-white/55 uppercase">
-          <span>in queue</span>
-          <span className="text-base tabular-nums text-white">{queueSize}</span>
         </div>
       </div>
 

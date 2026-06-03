@@ -116,7 +116,7 @@ export function BtcSpotChart({
   const W = 340
   const H = 168
   const ml = 6
-  const mr = 54 // right price axis + last-price tag
+  const mr = 62 // right price axis + last-price tag
   const mt = 8
   const mb = 18
   const iw = W - ml - mr
@@ -212,7 +212,7 @@ export function BtcSpotChart({
           btc / usd
         </span>
         <span
-          className="font-mono text-[11px] tabular-nums"
+          className="text-[11px] tabular-nums"
           style={{ color: lineColor, textShadow: `0 0 8px ${lineColor}99` }}
         >
           {last ? fmtPrice(last.price, 2) : "—"}
@@ -230,7 +230,7 @@ export function BtcSpotChart({
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
-        className="block h-auto w-full touch-none"
+        className="font-pixel block h-auto w-full touch-none"
         role="img"
         aria-label="BTC spot price"
         onPointerMove={onMove}
@@ -269,8 +269,7 @@ export function BtcSpotChart({
                   x={iw + 6}
                   y={y}
                   fill="#ffffff66"
-                  fontSize="9"
-                  fontFamily="ui-monospace, monospace"
+                  fontSize="11"
                   textAnchor="start"
                   dominantBaseline="middle"
                 >
@@ -362,8 +361,7 @@ export function BtcSpotChart({
               x={2 + (mr - 4) / 2}
               y={0}
               fill="#0a0f1f"
-              fontSize="9"
-              fontFamily="ui-monospace, monospace"
+              fontSize="11"
               fontWeight="700"
               textAnchor="middle"
               dominantBaseline="central"
@@ -391,8 +389,7 @@ export function BtcSpotChart({
                 x={x}
                 y={H - 5}
                 fill="#ffffff66"
-                fontSize="9"
-                fontFamily="ui-monospace, monospace"
+                fontSize="11"
                 textAnchor={anchor}
               >
                 {ago === 0 ? "now" : `-${ago / 1000}s`}

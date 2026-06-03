@@ -322,6 +322,18 @@
     brightness(0.95);
 }
 
+/* Opt out of the hover/active white-border highlight — for decorative,
+ * non-interactive tiles (e.g. the peeking next-card backdrop). Higher
+ * specificity than `.pixel-tile:hover`, so it wins regardless of order. */
+.pixel-tile.no-hover:hover,
+.pixel-tile.no-hover:active {
+  filter:
+    drop-shadow(-2px 0 0 #000)
+    drop-shadow(2px 0 0 #000)
+    drop-shadow(0 -2px 0 #000)
+    drop-shadow(0 2px 0 #000);
+}
+
 .pixel-avatar {
   filter:
     drop-shadow(-2px 0 0 #000)

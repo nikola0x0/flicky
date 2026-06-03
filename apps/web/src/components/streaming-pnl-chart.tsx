@@ -16,7 +16,7 @@ import { Group } from "@visx/group"
 import { scaleLinear } from "@visx/scale"
 import { LinePath } from "@visx/shape"
 import { curveMonotoneX } from "@visx/curve"
-import { liveCardPnl } from "@/lib/pnl"
+import { markCardPnl } from "@/lib/pnl"
 import { PlayerAvatar } from "@/components/player-avatar"
 
 export interface ChartDuel {
@@ -38,6 +38,8 @@ export interface ChartDuel {
 export interface ChartTick {
   spot: string
   forward: string
+  /** Oracle expiry (ms). Drives time-decay in the continuous mark. */
+  expiryMs?: number
 }
 
 interface Sample {
@@ -51,8 +53,11 @@ interface Boundary {
   idx: number
 }
 
-const SAMPLE_INTERVAL_MS = 100
-const MAX_SAMPLES = 600 // ~60 s rolling window at 10 Hz
+const SAMPLE_INTERVAL_MS = 60 // ~16 Hz — smoother head than 10 Hz
+const MAX_SAMPLES = 1000 // ~60 s rolling window at ~16 Hz
+// Bounds for the adaptive ease duration (matched to observed tick cadence).
+const EASE_MIN_MS = 500
+const EASE_MAX_MS = 3000
 const WINDOW_MS = 60_000 // x-axis visible window
 const MIN_AMP_MICRO = 500_000n // 0.5 dUSDC y-axis floor
 
@@ -109,6 +114,7 @@ function currentRunningPnl(
   duel: ChartDuel,
   side: "p0" | "p1",
   ticks: Record<string, ChartTick>,
+  nowMs: number,
 ): bigint {
   let running = 0n
   for (const o of duel.cardOutcomes) {
@@ -124,7 +130,13 @@ function currentRunningPnl(
     if (!card) continue
     const tick = ticks[card.oracle_id]
     if (!tick) continue
-    const pnl = liveCardPnl(swipe, card.strike, tick.forward)
+    const pnl = markCardPnl(
+      swipe,
+      card.strike,
+      tick.forward,
+      tick.expiryMs,
+      nowMs,
+    )
     if (pnl !== null) running += pnl
   }
   return running
@@ -145,6 +157,14 @@ function useChartHistory(
   const targetTicksRef = useRef(ticks)
   // Eased copy updated each animation frame — what the sampler reads.
   const smoothedTicksRef = useRef<Record<string, ChartTick>>({})
+  // Per-oracle interpolation anchor: linearly ease `from`→`to` across
+  // `durMs` starting at `startMs`. `durMs` is set to the *observed* gap
+  // between target updates, so motion spans the full inter-tick interval
+  // at constant velocity instead of bursting early (the cause of the
+  // choppy feel under exponential easing).
+  const easeRef = useRef<
+    Record<string, { from: number; to: number; startMs: number; durMs: number }>
+  >({})
   useEffect(() => {
     duelRef.current = duel
   }, [duel])
@@ -152,36 +172,41 @@ function useChartHistory(
     targetTicksRef.current = ticks
   }, [ticks])
 
-  // RAF loop: ease smoothed forward toward target each frame. ~600 ms
-  // time-constant — reaches ~96 % of target in 2 s, matching the
-  // server's `ORACLE_TICK_INTERVAL_MS`.
+  // RAF loop: linearly interpolate each oracle's forward from its last
+  // value to the latest target across the observed tick cadence. When a
+  // new target arrives, re-anchor from the *current* eased value (no
+  // jump) and stretch the new ease over however long the previous gap
+  // was — so 2 s ticks ease over 2 s, 500 ms ticks over 500 ms.
   useEffect(() => {
     let raf = 0
-    let last = performance.now()
     const step = (now: number) => {
-      const dt = Math.min(now - last, 100)
-      last = now
-      const alpha = 1 - Math.exp(-dt / 600)
       const target = targetTicksRef.current
       const smoothed = smoothedTicksRef.current
+      const ease = easeRef.current
       for (const id in target) {
         const t = target[id]
-        const cur = smoothed[id]
-        if (!cur) {
-          smoothed[id] = t
-          continue
-        }
         const targetF = Number(t.forward)
-        const curF = Number(cur.forward)
-        const diff = targetF - curF
-        if (Math.abs(diff) < 1) {
+        const e = ease[id]
+        if (!e) {
+          // First sight of this oracle — snap, seed the anchor.
+          ease[id] = { from: targetF, to: targetF, startMs: now, durMs: 1 }
           smoothed[id] = t
           continue
         }
-        const newF = curF + diff * alpha
+        if (targetF !== e.to) {
+          // New target — re-anchor from the current eased value and ease
+          // over the just-observed inter-tick gap.
+          const curF = smoothed[id] ? Number(smoothed[id].forward) : e.to
+          const gap = Math.min(EASE_MAX_MS, Math.max(EASE_MIN_MS, now - e.startMs))
+          ease[id] = { from: curF, to: targetF, startMs: now, durMs: gap }
+        }
+        const a = ease[id]
+        const p = a.durMs <= 0 ? 1 : Math.min(1, (now - a.startMs) / a.durMs)
+        const f = a.from + (a.to - a.from) * p
         smoothed[id] = {
           spot: t.spot,
-          forward: BigInt(Math.round(newF)).toString(),
+          forward: BigInt(Math.round(f)).toString(),
+          expiryMs: t.expiryMs,
         }
       }
       raf = requestAnimationFrame(step)
@@ -219,9 +244,10 @@ function useChartHistory(
     const interval = setInterval(() => {
       const cur = duelRef.current
       const ts = smoothedTicksRef.current
-      const p0 = currentRunningPnl(cur, "p0", ts)
-      const p1 = currentRunningPnl(cur, "p1", ts)
-      const sample: Sample = { t: Date.now(), p0, p1 }
+      const now = Date.now()
+      const p0 = currentRunningPnl(cur, "p0", ts, now)
+      const p1 = currentRunningPnl(cur, "p1", ts, now)
+      const sample: Sample = { t: now, p0, p1 }
       setHistory((prev) => {
         if (prev.duelId !== cur.id) {
           return { duelId: cur.id, samples: [sample], boundaries: [] }
@@ -311,6 +337,8 @@ function ChartCanvas({
     youPremium > 0n ? Math.round((ampNum / Number(youPremium)) * 100) : 0
   const yTopLabel = ampPercent > 0 ? `+${ampPercent}%` : `+${fmtUsd(BigInt(Math.round(ampNum)))}`
   const yBotLabel = ampPercent > 0 ? `-${ampPercent}%` : `-${fmtUsd(BigInt(Math.round(ampNum)))}`
+  // Break-even midline — read in the same unit as the top/bottom labels.
+  const yZeroLabel = ampPercent > 0 ? "0%" : "$0"
 
   const last = samples[samples.length - 1]
   const xHead = last ? xScale(last.t) : 0
@@ -336,7 +364,7 @@ function ChartCanvas({
         aria-label="match PnL over time"
       >
         <text x={ml - 6} y={mt} fill="#ffffffaa" fontSize="11" textAnchor="end" dominantBaseline="hanging">{yTopLabel}</text>
-        <text x={ml - 6} y={mt + yZero} fill="#ffffffcc" fontSize="11" textAnchor="end" dominantBaseline="middle">$0</text>
+        <text x={ml - 6} y={mt + yZero} fill="#ffffffcc" fontSize="11" textAnchor="end" dominantBaseline="middle">{yZeroLabel}</text>
         <text x={ml - 6} y={H - mb} fill="#ffffffaa" fontSize="11" textAnchor="end" dominantBaseline="auto">{yBotLabel}</text>
 
         <Group left={ml} top={mt}>
