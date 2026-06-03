@@ -59,6 +59,12 @@ interface Props {
    * `room_state` drive the phase. Mutually exclusive with `role`/`deckHash`.
    */
   resumeDuelId?: string
+  /**
+   * Matchmaking handoff: fired with the duel id the moment create/join
+   * lands. The matchmaking screen uses it to hand off to the deep-linkable
+   * `/game/play/:duelId` route, so the live session lives at a real URL.
+   */
+  onDuelReady?: (duelId: string) => void
   wsOpen: boolean
   send: (msg: ClientMsg) => void
   onMessage: (handler: (msg: ServerMsg) => void) => Unsubscribe
@@ -120,6 +126,7 @@ export function ActiveDuel({
   managerId,
   deckHash,
   resumeDuelId,
+  onDuelReady,
   // wsOpen is in the Props for future status indicators but the player
   // doesn't need to see the connection state during a match.
   wsOpen: _wsOpen,
@@ -267,6 +274,12 @@ export function ActiveDuel({
             "create_duel landed but Duel id not yet indexed — try again",
           )
         }
+        // Hand off to the deep-linkable play route if the matchmaking
+        // screen wants it; otherwise subscribe + advance in place.
+        if (onDuelReady) {
+          onDuelReady(duelId)
+          return
+        }
         send({ type: "room_subscribe", duelId })
         setPhase({ kind: "AWAIT_REVEAL", duelId })
       } catch (e) {
@@ -277,7 +290,7 @@ export function ActiveDuel({
         })
       }
     })()
-  }, [role, deckHash, account, client, sign, tier, send])
+  }, [role, deckHash, account, client, sign, tier, send, onDuelReady])
 
   // Challenger: wait for duel_assigned, then sign join_duel.
   useEffect(() => {
@@ -297,6 +310,10 @@ export function ActiveDuel({
           DEEPBOOK.dusdcType,
         )
         await sign.mutateAsync({ transaction: tx })
+        if (onDuelReady) {
+          onDuelReady(msg.duelId)
+          return
+        }
         send({ type: "room_subscribe", duelId: msg.duelId })
         setPhase({ kind: "AWAIT_REVEAL", duelId: msg.duelId })
       } catch (e) {
@@ -307,7 +324,7 @@ export function ActiveDuel({
         })
       }
     })
-  }, [role, onMessage, account, client, sign, tier, send])
+  }, [role, onMessage, account, client, sign, tier, send, onDuelReady])
 
   return (
     <div className="flex h-full flex-col gap-4 px-4 py-4 text-white">
