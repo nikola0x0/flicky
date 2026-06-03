@@ -37,16 +37,28 @@ const DRAG_COMMIT_FRACTION = 0.3
 const DRAG_MAX_ROTATE_DEG = 18
 
 interface Props {
-  role: "creator" | "challenger"
-  tier: Tier
+  /**
+   * Matchmaking entry: the player's role drives the create/join PTB.
+   * Omitted in resume mode (`resumeDuelId` set) — the duel already exists,
+   * so there's nothing to create/join.
+   */
+  role?: "creator" | "challenger"
+  /** Cosmetic stake-amount tier (matchmaking). Absent on resume. */
+  tier?: Tier
   managerId: string
   /**
    * Deck hash from `match_found`. Required for the creator's
    * `create_duel` PTB. Passed as a prop (not subscribed to inside this
    * component) because the message has already fired by the time
-   * ActiveDuel mounts — pvp.tsx captures it on receipt.
+   * ActiveDuel mounts — pvp.tsx captures it on receipt. Absent on resume.
    */
-  deckHash: string
+  deckHash?: string
+  /**
+   * Resume mode: mount straight onto an existing duel by id (deep-link /
+   * reload-safe). Skips create/join, subscribes to the room, and lets
+   * `room_state` drive the phase. Mutually exclusive with `role`/`deckHash`.
+   */
+  resumeDuelId?: string
   wsOpen: boolean
   send: (msg: ClientMsg) => void
   onMessage: (handler: (msg: ServerMsg) => void) => Unsubscribe
@@ -107,6 +119,7 @@ export function ActiveDuel({
   tier,
   managerId,
   deckHash,
+  resumeDuelId,
   // wsOpen is in the Props for future status indicators but the player
   // doesn't need to see the connection state during a match.
   wsOpen: _wsOpen,
@@ -117,10 +130,11 @@ export function ActiveDuel({
   const account = useCurrentAccount()
   const client = useSuiClient()
   const sign = useFlickySign()
-  const [phase, setPhase] = useState<Phase>({
-    kind: "ENTRY",
-    reason: "Setting up the match…",
-  })
+  const [phase, setPhase] = useState<Phase>(
+    resumeDuelId
+      ? { kind: "AWAIT_REVEAL", duelId: resumeDuelId }
+      : { kind: "ENTRY", reason: "Setting up the match…" },
+  )
   const [roomState, setRoomState] = useState<RoomState | null>(null)
   // Live oracle prices, keyed by oracle id. Powers mark-to-market PnL.
   const [ticks, setTicks] = useState<
@@ -168,6 +182,15 @@ export function ActiveDuel({
       }
     })
   }, [onMessage, account])
+
+  // Resume mode: the duel already exists, so just subscribe to its room and
+  // let `room_state` drive the phase (AWAIT_REVEAL → SWIPING → …). No
+  // create/join PTB. Reload- and deep-link-safe.
+  useEffect(() => {
+    if (!resumeDuelId) return
+    send({ type: "room_subscribe", duelId: resumeDuelId })
+    return () => send({ type: "room_unsubscribe", duelId: resumeDuelId })
+  }, [resumeDuelId, send])
 
   // Stream oracle ticks into local state. Used by mark-to-market PnL.
   useEffect(() => {
@@ -220,6 +243,7 @@ export function ActiveDuel({
     ;(async () => {
       try {
         if (!account) throw new Error("wallet not connected")
+        if (!deckHash || !tier) throw new Error("missing deck hash or tier")
         const deckHashBytes = hexToBytes(deckHash)
         if (deckHashBytes.length !== 32) {
           throw new Error(
@@ -264,6 +288,7 @@ export function ActiveDuel({
       sentJoinRef.current = true
       try {
         if (!account) throw new Error("wallet not connected")
+        if (!tier) throw new Error("missing tier")
         const tx = await buildJoinDuelDusdcTx(
           client,
           account.address,
@@ -298,7 +323,7 @@ export function ActiveDuel({
         </button>
       </div>
       <div className="text-sm tracking-wider text-white/55 uppercase">
-        stake {Number(STAKE_TIERS[tier]) / 1e6} dUSDC
+        {tier ? `stake ${Number(STAKE_TIERS[tier]) / 1e6} dUSDC` : "staked duel"}
       </div>
 
       {phase.kind === "ENTRY" && <PhaseEntry reason={phase.reason} />}

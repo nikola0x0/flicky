@@ -15,6 +15,7 @@ import Profile from "@/routes/profile.tsx"
 import GameLayout from "@/routes/game/layout.tsx"
 import GameHome from "@/routes/game/home.tsx"
 import GamePvp from "@/routes/game/pvp.tsx"
+import PlayDuel from "@/routes/game/play.tsx"
 import DuelView from "@/routes/game/duel-view.tsx"
 import GameShop from "@/routes/game/shop.tsx"
 import GameComingSoon from "@/routes/game/coming-soon.tsx"
@@ -30,6 +31,7 @@ const router = createBrowserRouter([
       { index: true, element: <Navigate to="/game/home" replace /> },
       { path: "home", element: <GameHome /> },
       { path: "pvp", element: <GamePvp /> },
+      { path: "play/:duelId", element: <PlayDuel /> },
       { path: "duel/:duelId", element: <DuelView /> },
       { path: "practice", element: <GameComingSoon /> },
       { path: "shop", element: <GameShop /> },
