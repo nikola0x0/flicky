@@ -4,6 +4,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react"
+import { Link } from "react-router"
 import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
 import type { ClientMsg, ServerMsg } from "@/lib/protocol"
 import { STAKE_TIERS, type Tier } from "@/lib/protocol"
@@ -20,7 +21,7 @@ import {
   quoteSwipePremium,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
-import { liveCardPnl, runningPnl, fmtDusdcSigned } from "@/lib/pnl"
+import { liveCardPnl, fmtDusdcSigned } from "@/lib/pnl"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
 import { WsErrorBanner } from "@/components/ws-error-banner"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
@@ -367,11 +368,7 @@ export function ActiveDuel({
         />
       )}
       {phase.kind === "AWAIT_SETTLEMENT" && roomState && account && (
-        <PhaseAwaitSettlement
-          roomState={roomState}
-          myAddress={account.address}
-          ticks={ticks}
-        />
+        <PhaseAwaitSettlement roomState={roomState} />
       )}
       {phase.kind === "COMPLETE" && roomState && account && (
         <PhaseComplete roomState={roomState} myAddress={account.address} />
@@ -505,28 +502,10 @@ function PhaseSwiping({
     cardOutcomes: roomState.cardOutcomes,
   }
 
-  // All of my cards are swiped — cardIdx has advanced past the deck. Show a
-  // done / awaiting-settlement panel (live PnL chart + per-card ledger)
-  // instead of a phantom "Loading card N+1…".
+  // All of my cards are swiped (cardIdx past the deck) — hand off to the
+  // result/home rather than showing a dead-end settlement screen.
   if (cardIdx >= roomState.cards.length) {
-    return (
-      <div className="flex flex-col gap-4">
-        <div className="rounded border-2 border-black/55 bg-[#1b2548] p-4 text-center">
-          <p className="text-sm tracking-[0.2em] text-white/55 uppercase">
-            all {roomState.cards.length} cards swiped
-          </p>
-          <p className="mt-1 text-base text-white/70">awaiting settlement…</p>
-        </div>
-        <StreamingPnlChart
-          duel={chartDuel}
-          ticks={ticks}
-          myIsP0={myIsP0}
-          youAddress={myAddress}
-          oppAddress={opponent}
-        />
-        <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
-      </div>
-    )
+    return <SettlingHandoff duelId={duelId} />
   }
 
   if (!card || !expiry) {
@@ -767,33 +746,39 @@ function CardLedger({
   )
 }
 
-function PhaseAwaitSettlement({
-  roomState,
-  myAddress,
-  ticks,
-}: {
-  roomState: RoomState
-  myAddress: string
-  ticks: Record<string, { spot: string; forward: string }>
-}) {
-  const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
-  const deck = { cards: roomState.cards }
-  const myRunning = runningPnl(roomState, myIsP0 ? "p0" : "p1", deck, ticks)
-  const oppRunning = runningPnl(roomState, myIsP0 ? "p1" : "p0", deck, ticks)
+function PhaseAwaitSettlement({ roomState }: { roomState: RoomState }) {
+  return <SettlingHandoff duelId={roomState.duelId} />
+}
+
+/**
+ * Both players have locked their swipes — there's nothing more to do in the
+ * live screen. The duel settles asynchronously as each card's oracle
+ * resolves, so hand off to the result screen (which streams settlement) or
+ * back home rather than parking on a static "awaiting settlement" panel.
+ */
+function SettlingHandoff({ duelId }: { duelId: string }) {
   return (
-    <div className="flex flex-col gap-3">
-      <div className="rounded border border-white/10 bg-white/5 p-3 text-base">
-        <p className="text-white/70">
-          all swipes locked &middot; {roomState.settledCount} / 5 cards settled
-        </p>
-        {roomState.settledCount === 5 && (
-          <p className="mt-1 text-white/50">awaiting finalize tx…</p>
-        )}
-      </div>
-      <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
-      <div className="rounded border border-white/10 bg-white/5 p-3 text-base">
-        <div>you: {fmtDusdcSigned(myRunning)}</div>
-        <div>opponent: {fmtDusdcSigned(oppRunning)}</div>
+    <div className="flex flex-1 flex-col items-center justify-center gap-5 px-6 py-10 text-center">
+      <p className="font-pixel text-base tracking-[0.2em] text-emerald-300 uppercase">
+        picks locked in
+      </p>
+      <p className="max-w-xs text-sm leading-relaxed text-white/65">
+        The duel settles as each card&rsquo;s oracle resolves. Watch it play out
+        on the result screen — it&rsquo;ll also be waiting on your home screen.
+      </p>
+      <div className="flex w-full max-w-xs flex-col gap-2">
+        <Link
+          to={`/game/duel/${duelId}`}
+          className="pixel-tile bg-emerald-600 px-4 py-3 font-pixel text-sm uppercase"
+        >
+          watch result
+        </Link>
+        <Link
+          to="/game/home"
+          className="pixel-tile bg-[#1b2548] px-4 py-3 font-pixel text-sm uppercase"
+        >
+          back to home
+        </Link>
       </div>
     </div>
   )

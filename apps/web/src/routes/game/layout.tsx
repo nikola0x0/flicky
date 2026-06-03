@@ -153,7 +153,9 @@ function GameOutletTransition({ context }: { context: GameOutletContext }) {
   return (
     <div
       key={location.pathname}
-      className={`h-full overflow-y-auto ${animClass}`}
+      // overflow-x-hidden: a swiped card flies off at translateX(160%); without
+      // this the page becomes horizontally scrollable (and shows a scrollbar).
+      className={`h-full overflow-x-hidden overflow-y-auto ${animClass}`}
     >
       <Outlet context={context} />
     </div>
