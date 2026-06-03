@@ -3,7 +3,9 @@ import {
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react"
+import { createPortal } from "react-dom"
 import { Link } from "react-router"
 import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
 import type { ClientMsg, ServerMsg } from "@/lib/protocol"
@@ -436,6 +438,7 @@ function PhaseSwiping({
   } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [chartModal, setChartModal] = useState<null | "btc" | "pnl">(null)
   const client = useSuiClient()
 
   // ── drag-to-swipe state ──────────────────────────────────────────
@@ -588,22 +591,25 @@ function PhaseSwiping({
   const hasNext = cardIdx + 1 < roomState.cards.length
 
   return (
-    <div className="flex flex-col gap-3">
-      <BtcSpotChart ticks={ticks} cards={roomState.cards} />
+    <div className="flex flex-1 flex-col">
+      {/* top bar — card count + chart toggles (charts live in modals so the
+          card owns the screen) */}
+      <div className="flex items-center justify-between pb-2">
+        <span className="font-pixel text-[11px] tracking-[0.2em] text-white/55 uppercase">
+          card {cardIdx + 1} / {roomState.cards.length}
+        </span>
+        <div className="flex gap-2">
+          <ChartChip label="btc" onClick={() => setChartModal("btc")} />
+          <ChartChip label="pnl" onClick={() => setChartModal("pnl")} />
+        </div>
+      </div>
 
-      <p className="font-pixel text-center text-[10px] tracking-[0.25em] text-white/45 uppercase">
-        card {cardIdx + 1} / {roomState.cards.length}
-      </p>
-
-      {/* swipe arena — top card draggable, next card peeking from the deck */}
-      <div
-        className="relative select-none"
-        style={{ touchAction: "none", height: 244 }}
-      >
+      {/* big, centered swipe card — fills the screen; next card peeks behind */}
+      <div className="relative flex-1 select-none" style={{ touchAction: "none" }}>
         {hasNext && (
           <div
             aria-hidden
-            className="pixel-tile absolute inset-x-3 bottom-0 top-3 bg-[#141d3a]"
+            className="pixel-tile absolute inset-x-4 bottom-3 top-6 bg-[#141d3a]"
           />
         )}
         <div
@@ -612,7 +618,7 @@ function PhaseSwiping({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
-          className={`pixel-tile absolute inset-0 flex cursor-grab flex-col justify-between bg-[#1b2548] p-5 ${
+          className={`pixel-tile absolute inset-x-1 bottom-4 top-2 flex cursor-grab flex-col justify-between bg-[#1b2548] p-6 ${
             drag.active ? "" : "transition-transform duration-300 ease-out"
           } ${drag.flying ? "pointer-events-none" : "active:cursor-grabbing"}`}
           style={{ transform, willChange: "transform" }}
@@ -627,31 +633,31 @@ function PhaseSwiping({
             style={{ opacity: noGlow }}
           />
           {drag.x > 24 && (
-            <div className="font-pixel absolute right-3 top-3 rotate-6 border-2 border-emerald-400 px-2 py-0.5 text-base font-black text-emerald-400 uppercase">
+            <div className="font-pixel absolute right-4 top-4 rotate-6 border-2 border-emerald-400 px-3 py-1 text-xl font-black text-emerald-400 uppercase">
               yes
             </div>
           )}
           {drag.x < -24 && (
-            <div className="font-pixel absolute left-3 top-3 -rotate-6 border-2 border-rose-400 px-2 py-0.5 text-base font-black text-rose-400 uppercase">
+            <div className="font-pixel absolute left-4 top-4 -rotate-6 border-2 border-rose-400 px-3 py-1 text-xl font-black text-rose-400 uppercase">
               no
             </div>
           )}
 
-          {/* the claim */}
-          <div>
-            <p className="font-pixel text-[10px] tracking-[0.2em] text-white/45 uppercase">
+          {/* the claim — the focal point */}
+          <div className="mt-2">
+            <p className="font-pixel text-[11px] tracking-[0.2em] text-white/45 uppercase">
               will btc settle
             </p>
-            <p className="mt-1 text-2xl leading-tight font-black">
+            <p className="mt-3 text-4xl leading-[1.05] font-black">
               above {fmtUsd(card.strike)}?
             </p>
-            <p className="mt-2 text-sm text-white/55">
+            <p className="mt-4 text-sm text-white/55">
               now {tick ? fmtUsd(tick.spot) : "—"} · market {yesOdds}
             </p>
           </div>
 
           {/* yes / no footer hints */}
-          <div className="flex items-end justify-between text-xs">
+          <div className="flex items-end justify-between text-sm">
             <span className="text-rose-300">
               <span className="font-pixel">← no</span>
               <br />
@@ -666,22 +672,97 @@ function PhaseSwiping({
         </div>
       </div>
 
-      <p className="font-pixel text-center text-[10px] tracking-[0.25em] text-white/40 uppercase">
+      {error && <p className="pt-2 text-center text-sm text-red-400">{error}</p>}
+      <p className="font-pixel pt-2 text-center text-[11px] tracking-[0.25em] text-white/40 uppercase">
         {busy ? "minting position…" : "swipe → yes · ← no"}
       </p>
 
-      {error && <p className="text-base text-red-400">{error}</p>}
-
-      <StreamingPnlChart
-        duel={chartDuel}
-        ticks={ticks}
-        myIsP0={myIsP0}
-        youAddress={myAddress}
-        oppAddress={opponent}
-      />
-
-      <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
+      {chartModal === "btc" && (
+        <ChartModal title="btc / usd" onClose={() => setChartModal(null)}>
+          <BtcSpotChart ticks={ticks} cards={roomState.cards} />
+        </ChartModal>
+      )}
+      {chartModal === "pnl" && (
+        <ChartModal title="live pnl" onClose={() => setChartModal(null)}>
+          <StreamingPnlChart
+            duel={chartDuel}
+            ticks={ticks}
+            myIsP0={myIsP0}
+            youAddress={myAddress}
+            oppAddress={opponent}
+          />
+          <div className="mt-3">
+            <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
+          </div>
+        </ChartModal>
+      )}
     </div>
+  )
+}
+
+/** Small pixel chip that opens a chart modal. */
+function ChartChip({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="pixel-tile bg-[#1b2548] px-3 py-1.5 font-pixel text-[10px] tracking-[0.15em] text-white/80 uppercase"
+    >
+      {label}
+    </button>
+  )
+}
+
+/** Portal modal for the in-match charts, matching the app's modal style. */
+function ChartModal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string
+  onClose: () => void
+  children: ReactNode
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    }
+    document.body.style.overflow = "hidden"
+    window.addEventListener("keydown", onKey)
+    return () => {
+      document.body.style.overflow = ""
+      window.removeEventListener("keydown", onKey)
+    }
+  }, [onClose])
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="pixel-frame relative w-full max-w-sm rounded-3xl bg-[#1b2548] p-4 font-pixel text-white"
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-sm tracking-[0.2em] text-white/70 uppercase">
+            {title}
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="close"
+            className="text-xl text-white/55 hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>,
+    document.body,
   )
 }
 
