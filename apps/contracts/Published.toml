@@ -4,9 +4,9 @@
 
 [published.testnet]
 chain-id = "4c78adac"
-published-at = "0xaed053fcc146abd1da507eae72b4f3e9c838d83c83c7b68b230a3c9a2601a522"
-original-id = "0xaed053fcc146abd1da507eae72b4f3e9c838d83c83c7b68b230a3c9a2601a522"
+published-at = "0xe1b1853ab66c44dbe00a4b64238a3f64e226dfcd50c331d095fb38599bdc1854"
+original-id = "0xe1b1853ab66c44dbe00a4b64238a3f64e226dfcd50c331d095fb38599bdc1854"
 version = 1
 toolchain-version = "1.64.0"
 build-config = { flavor = "sui", edition = "2024" }
-upgrade-capability = "0x98e26cadfc6907b8030668facfeb604f86184c031873f91f98497c9d4e1edc90"
+upgrade-capability = "0xd3292796a8ce0a3bac0162714f0462a85d963a7e77a176179cdcbd3ef8c5bf71"

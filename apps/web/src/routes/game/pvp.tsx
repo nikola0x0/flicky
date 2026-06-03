@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import type { CSSProperties } from "react"
+import { useNavigate } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { MatchButton } from "@/components/match-button"
@@ -34,7 +35,8 @@ const TIER_LABEL: Record<Tier, string> = {
 
 export default function GamePvp() {
   const account = useCurrentAccount()
-  const [stake, setStake] = useState<Stake>(3)
+  const navigate = useNavigate()
+  const [stake, setStake] = useState<Stake>(1)
   const [modeOpen, setModeOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [managerId, setManagerId] = useState<string | null>(null)
@@ -105,6 +107,9 @@ export default function GamePvp() {
         wsOpen={wsOpen}
         send={send}
         onMessage={onMessage}
+        // Create/join lands → hand off to the deep-linkable play route so
+        // the live session has a real, reload-safe URL.
+        onDuelReady={(duelId) => navigate(`/game/play/${duelId}`)}
         onExit={() => {
           setMatched(null)
           setQueueSize(null)
@@ -113,12 +118,7 @@ export default function GamePvp() {
     )
   } else if (queueSize !== null) {
     content = (
-      <QueueScreen
-        tier={tier}
-        stake={stake}
-        queueSize={queueSize}
-        onCancel={onQueueMatch}
-      />
+      <QueueScreen tier={tier} stake={stake} onCancel={onQueueMatch} />
     )
   } else {
     content = (
@@ -310,12 +310,10 @@ function StakeSelector({
 function QueueScreen({
   tier,
   stake,
-  queueSize,
   onCancel,
 }: {
   tier: Tier
   stake: Stake
-  queueSize: number
   onCancel: () => void
 }) {
   return (
@@ -368,11 +366,6 @@ function QueueScreen({
               {stake}
             </span>
           </div>
-        </div>
-
-        <div className="flex items-center justify-between rounded-md bg-white/5 px-4 py-2 text-sm tracking-[0.18em] text-white/55 uppercase">
-          <span>in queue</span>
-          <span className="text-base tabular-nums text-white">{queueSize}</span>
         </div>
       </div>
 

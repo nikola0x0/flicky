@@ -25,14 +25,41 @@ export type Unsubscribe = () => void
 const MIN_BACKOFF_MS = 500
 const MAX_BACKOFF_MS = 10_000
 
-export function useFlickySocket(address?: string) {
+/**
+ * @param address  Wallet address to announce via `hello` once connected.
+ *   Optional — the socket connects anonymously without it (oracle/room
+ *   read streams don't require identity) and sends `hello` as soon as an
+ *   address arrives.
+ * @param options.enabled  Set `false` to skip connecting entirely (e.g.
+ *   demo/mock views that synthesize their own data). Defaults to `true`.
+ *   Note: pass the real `address` and gate via `enabled` — don't pass
+ *   `undefined` as `address` to disable, since that now connects
+ *   anonymously rather than staying offline.
+ */
+export function useFlickySocket(
+  address?: string,
+  options?: { enabled?: boolean },
+) {
+  const enabled = options?.enabled ?? true
   const wsRef = useRef<WebSocket | null>(null)
   const handlersRef = useRef<Set<(msg: ServerMsg) => void>>(new Set())
+  // Latest address, read inside the connection lifecycle without making
+  // the socket depend on it — see below. Synced in an effect (not during
+  // render) so it doesn't trip the refs-during-render lint.
+  const addressRef = useRef(address)
+  useEffect(() => {
+    addressRef.current = address
+  }, [address])
   const [wsOpen, setWsOpen] = useState(false)
 
+  // Connect once on mount (while enabled). The socket is intentionally
+  // NOT gated on `address`: the read streams (oracle ticks, room_state)
+  // work for anonymous sockets, so spectator/read-only views (e.g.
+  // duel-view) need ticks before — or without — a connected wallet. We
+  // only send `hello` to announce identity once an address exists (in
+  // onopen if present, or via the effect below when it arrives later).
   useEffect(() => {
-    if (!address) return
-
+    if (!enabled) return
     // Per-effect-instance flags. `unmounted` flips on cleanup so a
     // pending close→reconnect timeout doesn't fire after the component
     // tore down (or after StrictMode's synthetic cleanup in dev).
@@ -49,7 +76,10 @@ export function useFlickySocket(address?: string) {
         if (unmounted) return
         attempt = 0
         setWsOpen(true)
-        ws.send(JSON.stringify({ type: "hello", address } satisfies ClientMsg))
+        const addr = addressRef.current
+        if (addr) {
+          ws.send(JSON.stringify({ type: "hello", address: addr } satisfies ClientMsg))
+        }
       }
 
       ws.onmessage = (ev) => {
@@ -99,7 +129,20 @@ export function useFlickySocket(address?: string) {
       }
       setWsOpen(false)
     }
-  }, [address])
+    // Connect once (per enabled toggle) — independent of `address`.
+  }, [enabled])
+
+  // Announce identity when the wallet connects (or changes) on an
+  // already-open socket, without tearing the connection down. On first
+  // open with an address already present, onopen handles the hello and
+  // this is a no-op (socket still CONNECTING when this runs).
+  useEffect(() => {
+    if (!enabled || !address) return
+    const ws = wsRef.current
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "hello", address } satisfies ClientMsg))
+    }
+  }, [address, enabled])
 
   const send = useCallback((msg: ClientMsg) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

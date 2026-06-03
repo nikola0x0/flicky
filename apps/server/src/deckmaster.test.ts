@@ -3,16 +3,23 @@ import { createHash } from "node:crypto"
 import { bcs } from "@mysten/sui/bcs"
 import {
   allocateSignBalance,
+  atmStrike,
   buildAndProbeDeck,
   buildDeckFromOracles,
+  decideDeckSize,
   difficultyOfPct,
+  OFFSET_CANDIDATES_BPS,
   fetchDeck,
   hashToHex,
   knownHashCount,
   pickMaxAmplitudeStrike,
   rememberDeck,
+  resolveDeckBounds,
+  selectDeckOracleRows,
+  selectViableOracles,
   snapToTick,
   strikePctOf,
+  type OracleRow,
   type OracleSnapshot,
   type ProbeFn,
 } from "./deckmaster"
@@ -282,6 +289,32 @@ describe("pickMaxAmplitudeStrike", () => {
     expect(pick).toBeNull()
   })
 
+  test("early-exits: one probe when the most aggressive strike prices", async () => {
+    let calls = 0
+    const probe: ProbeFn = async () => {
+      calls++
+      return true
+    }
+    await pickMaxAmplitudeStrike(ONE_ORACLE, testPrgStream(SEED_A), probe, +1)
+    expect(calls).toBe(1)
+  })
+
+  test("walks no further than needed: ATM-only → exactly ladder+1 probes", async () => {
+    let calls = 0
+    const probe: ProbeFn = async (o, strike) => {
+      calls++
+      return strike === atmStrike(o)
+    }
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      probe,
+      +1,
+    )
+    expect(pick!.bps).toBe(0)
+    expect(calls).toBe(OFFSET_CANDIDATES_BPS.length + 1)
+  })
+
   test("PRG flip alternates UP-side vs DOWN-side at each |bps| level", async () => {
     // With a permissive probe, both ±2000 work. The PRG decides which sign
     // ends up first in `ordered` (and therefore which sign Promise.all
@@ -409,8 +442,9 @@ describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
 
   test("doesn't collapse to ATM when ANY aggressive offset works (this was the bug)", async () => {
     // Regression guard: with the old code, ANY probe failure on the
-    // single-bucket PRG pick would collapse to ATM. With the new code,
-    // a probe that allows ±300 bps should land EVERY card at ≥300 bps.
+    // single-bucket PRG pick would collapse to ATM. With the coarse ladder
+    // a probe that allows ±300 bps should land EVERY card at 200 — the most
+    // aggressive rung ≤300 — never ATM.
     const deck = await buildAndProbeDeck(
       NULL_CLIENT,
       FIVE_ORACLES,
@@ -422,7 +456,7 @@ describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
       const strike = deck.cards[i].strike
       const diff = strike > fwd ? strike - fwd : fwd - strike
       const absBps = Number((diff * 10_000n) / fwd)
-      expect(absBps).toBe(300)
+      expect(absBps).toBe(200)
     }
   })
 
@@ -502,5 +536,170 @@ describe("rememberDeck + fetchDeck", () => {
     rememberDeck(deck.hash, deck.cards)
     expect(knownHashCount()).toBeGreaterThanOrEqual(before)
     expect(knownHashCount()).toBeLessThanOrEqual(before + 1)
+  })
+})
+
+describe("resolveDeckBounds", () => {
+  test("defaults to the 3–5 band when nothing is passed", () => {
+    expect(resolveDeckBounds({})).toEqual({ min: 3, max: 5 })
+  })
+
+  test("honors caller min/max", () => {
+    expect(resolveDeckBounds({ minDeckSize: 2, maxDeckSize: 4 })).toEqual({
+      min: 2,
+      max: 4,
+    })
+  })
+
+  test("clamps to the contract's [1, 20] range", () => {
+    expect(resolveDeckBounds({ minDeckSize: 0, maxDeckSize: 99 })).toEqual({
+      min: 1,
+      max: 20,
+    })
+  })
+
+  test("forces min ≤ max when min exceeds max", () => {
+    expect(resolveDeckBounds({ minDeckSize: 9, maxDeckSize: 4 })).toEqual({
+      min: 4,
+      max: 4,
+    })
+  })
+
+  test("explicit deckSize collapses the band (back-compat strict path)", () => {
+    expect(resolveDeckBounds({ deckSize: 5 })).toEqual({ min: 5, max: 5 })
+  })
+})
+
+describe("decideDeckSize (greedy 3–5)", () => {
+  const band = { min: 3, max: 5 }
+
+  test("5 live → deck of 5", () => {
+    expect(decideDeckSize(5, band)).toEqual({ ok: true, deckSize: 5 })
+  })
+
+  test("4 live → deck of 4", () => {
+    expect(decideDeckSize(4, band)).toEqual({ ok: true, deckSize: 4 })
+  })
+
+  test("3 live → deck of 3", () => {
+    expect(decideDeckSize(3, band)).toEqual({ ok: true, deckSize: 3 })
+  })
+
+  test("2 live → not ok (below min)", () => {
+    expect(decideDeckSize(2, band).ok).toBe(false)
+  })
+
+  test("more live than max → capped at max", () => {
+    expect(decideDeckSize(9, band)).toEqual({ ok: true, deckSize: 5 })
+  })
+})
+
+describe("selectDeckOracleRows", () => {
+  const NOW = 1_000_000_000_000 // fixed epoch-ms for determinism
+  const MIN = 10 * 60 * 1000 // 10 min headroom
+  const MAX = 3 * 60 * 60 * 1000 // 3h horizon
+  const base = {
+    spot: 100n,
+    forward: 100n,
+    active: true,
+    settled: false,
+    asset: "BTC",
+  }
+  const row = (id: string, minsOut: number): OracleRow => ({
+    ...base,
+    id,
+    expiry: BigInt(NOW + minsOut * 60 * 1000),
+  })
+  const opts = {
+    nowMs: NOW,
+    headroomMs: MIN,
+    maxHorizonMs: MAX,
+    asset: "BTC",
+    cap: 5,
+  }
+
+  test("excludes oracles expiring beyond the horizon (long-dated)", () => {
+    const rows = [row("0x1", 30), row("0x2", 60), row("0x3", 7 * 24 * 60)]
+    const out = selectDeckOracleRows(rows, opts)
+    expect(out.map((r) => r.id)).toEqual(["0x1", "0x2"])
+  })
+
+  test("excludes oracles inside the headroom floor", () => {
+    const rows = [row("0x1", 5), row("0x2", 30)]
+    expect(selectDeckOracleRows(rows, opts).map((r) => r.id)).toEqual(["0x2"])
+  })
+
+  test("sorts soonest-expiry first", () => {
+    const rows = [row("0x3", 90), row("0x1", 20), row("0x2", 45)]
+    expect(selectDeckOracleRows(rows, opts).map((r) => r.id)).toEqual([
+      "0x1",
+      "0x2",
+      "0x3",
+    ])
+  })
+
+  test("caps at the requested count", () => {
+    const rows = [20, 30, 40, 50, 60, 70].map((m, i) => row(`0x${i}`, m))
+    expect(selectDeckOracleRows(rows, { ...opts, cap: 3 })).toHaveLength(3)
+  })
+
+  test("drops inactive, settled, asset-mismatch, and zero-price rows", () => {
+    const rows = [
+      row("0x1", 30),
+      { ...row("0x2", 35), active: false },
+      { ...row("0x3", 40), settled: true },
+      { ...row("0x4", 45), asset: "ETH" },
+      { ...row("0x5", 50), forward: 0n },
+    ]
+    expect(selectDeckOracleRows(rows, opts).map((r) => r.id)).toEqual(["0x1"])
+  })
+})
+
+describe("selectViableOracles", () => {
+  // probe override that rejects every strike for the given oracle ids
+  // (mimics an oracle whose pricing config is unset → no viable strike).
+  const failing = (...ids: string[]): ProbeFn => {
+    const bad = new Set(ids)
+    return async (o) => !bad.has(o.id)
+  }
+
+  test("all viable → returns the first `max`, soonest-first", async () => {
+    const out = await selectViableOracles(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      3,
+      async () => true,
+    )
+    expect(out.map((o) => o.id)).toEqual([addr("01"), addr("02"), addr("03")])
+  })
+
+  test("drops oracles whose ATM probe fails, preserving order", async () => {
+    const out = await selectViableOracles(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      5,
+      failing(addr("02"), addr("04")),
+    )
+    expect(out.map((o) => o.id)).toEqual([addr("01"), addr("03"), addr("05")])
+  })
+
+  test("caps the viable set at `max`", async () => {
+    const out = await selectViableOracles(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      2,
+      failing(addr("02")),
+    )
+    expect(out.map((o) => o.id)).toEqual([addr("01"), addr("03")])
+  })
+
+  test("returns all viable when fewer than `max` survive", async () => {
+    const out = await selectViableOracles(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      5,
+      failing(addr("02"), addr("03"), addr("04"), addr("05")),
+    )
+    expect(out.map((o) => o.id)).toEqual([addr("01")])
   })
 })

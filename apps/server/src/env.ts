@@ -70,6 +70,15 @@ export const env = {
   deckCardMinHeadroomMs: Number(
     process.env.DECK_CARD_MIN_HEADROOM_MS ?? 10 * 60 * 1000,
   ),
+  // Upper expiry bound for deck oracles: the max acceptable time-to-settle
+  // for a duel. A card can only settle once its oracle expires, and
+  // `finalize` needs ALL cards settled, so oracles expiring beyond this
+  // would hold the game open too long. 3h cleanly admits the ~15-min
+  // cadence oracles (≤1h45m lifetime) plus any other soon-settling oracle,
+  // while excluding multi-day oracles.
+  deckCardMaxHorizonMs: Number(
+    process.env.DECK_CARD_MAX_HORIZON_MS ?? 3 * 60 * 60 * 1000,
+  ),
   deckmasterStorePath:
     process.env.DECKMASTER_STORE_PATH ??
     resolve(import.meta.dir, "../.data/decks.json"),

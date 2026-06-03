@@ -83,94 +83,209 @@ const DeckBcs = bcs.vector(CardBcs)
 // ─── Oracle discovery ───────────────────────────────────────────────────────
 
 /**
- * Fetch the 5 nearest live BTC OracleSVI objects whose expiry is
+ * Default strike grid for BTC oracles, used as a fallback when an oracle's
+ * `OracleCreated` event is too deep in history to find cheaply. Matches the
+ * observed testnet config (min_strike $50k, tick $1, both in 1e9 fixed).
+ * A wrong guess only costs amplitude — `probeCard` rejects off-grid strikes
+ * and the picker falls to the next candidate, never producing an invalid
+ * deck.
+ */
+const DEFAULT_BTC_GRID = { minStrike: 50_000_000_000_000n, tickSize: 1_000_000_000n }
+
+/**
+ * Grid-param cache keyed by oracle id. `OracleCreated` events are immutable
+ * and the grid never changes, so once resolved we never re-scan for it.
+ */
+const gridCache = new Map<string, { minStrike: bigint; tickSize: bigint }>()
+
+/**
+ * Resolve `(min_strike, tick_size)` for each id in `wanted` by scanning
+ * `registry::OracleCreated` events. Long-dated oracles' creation events sit
+ * thousands deep, so we paginate up to `maxPages` and stop as soon as every
+ * wanted id is resolved. Cached across calls. Ids still unresolved after the
+ * scan fall back to `DEFAULT_BTC_GRID` at the call site.
+ */
+async function resolveGrids(
+  client: SuiClient,
+  pkg: string,
+  wanted: Set<string>,
+  maxPages = 8,
+): Promise<void> {
+  const missing = new Set([...wanted].filter((id) => !gridCache.has(id)))
+  if (missing.size === 0) return
+  let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
+  for (let page = 0; page < maxPages && missing.size > 0; page++) {
+    const r = await client.queryEvents({
+      query: { MoveEventType: `${pkg}::registry::OracleCreated` },
+      cursor,
+      limit: 50,
+      order: "descending",
+    })
+    for (const e of r.data) {
+      const p = e.parsedJson as {
+        oracle_id: string
+        min_strike?: string
+        tick_size?: string
+      }
+      const id = normalizeSuiObjectId(p.oracle_id)
+      if (!gridCache.has(id)) {
+        gridCache.set(id, {
+          minStrike: BigInt(p.min_strike ?? DEFAULT_BTC_GRID.minStrike.toString()),
+          tickSize: BigInt(p.tick_size ?? DEFAULT_BTC_GRID.tickSize.toString()),
+        })
+      }
+      missing.delete(id)
+    }
+    if (!r.hasNextPage) break
+    cursor = r.nextCursor
+  }
+}
+
+/**
+ * Fetch the `count` nearest live BTC OracleSVI objects whose expiry is
  * strictly more than `now + DECK_CARD_MIN_HEADROOM_MS` (default 10 min).
  *
- * Strategy:
- *   1. Walk recent `registry::OracleCreated` events for BTC.
- *   2. Resolve each to its OracleSVI object, filter by
- *      (active && !settled && expiry > now + 10 min).
- *   3. Sort by expiry ascending, take 5.
+ * Discovery is via `oracle::OraclePricesUpdated` events, NOT
+ * `registry::OracleCreated`. The price-tick cron touches exactly the set
+ * of currently-live oracles every second, so the most recent price-tick
+ * events reveal every active oracle — including long-dated ones whose
+ * creation event is buried thousands deep in history. (The old
+ * creation-event scan with `limit: 30` structurally missed those, which is
+ * why a deck of 7/14/21-day oracles read as "0 live".)
  *
- * Returns an empty array if fewer than 5 eligible oracles exist; callers
- * decide whether to retry or surface a 503 to the client.
+ * Strategy:
+ *   1. Collect oracle ids from recent `OraclePricesUpdated` events.
+ *   2. `getObject` each, filter by (active && !settled && asset && expiry
+ *      > now + headroom).
+ *   3. Resolve strike grid via a bounded `OracleCreated` scan (cached),
+ *      falling back to `DEFAULT_BTC_GRID` when unfindable.
+ *   4. Sort by expiry ascending, take `count`.
+ *
+ * Returns fewer than `count` (possibly empty) if not enough live oracles
+ * exist; callers decide whether to retry or surface a 503.
  */
+/** Normalized, chain-agnostic view of a candidate oracle — the input to
+ *  `selectDeckOracleRows`. Decoupling selection from RPC shapes keeps the
+ *  filter/sort logic pure and unit-testable. */
+export interface OracleRow {
+  id: string
+  expiry: bigint
+  spot: bigint
+  forward: bigint
+  active: boolean
+  settled: boolean
+  /** `undefined` when the object didn't expose `underlying_asset`. */
+  asset?: string
+}
+
+/**
+ * Filter candidate oracles to those eligible for a deck, ordered
+ * soonest-settling first, capped at `cap`.
+ *
+ * Eligible = active && !settled && matching asset && non-zero spot/forward
+ * && `now + headroom < expiry ≤ now + maxHorizon`. The upper bound keeps
+ * the game settling fast (a duel finalizes only once its latest card's
+ * oracle settles); soonest-first ordering means a smaller deck always uses
+ * the fastest oracles.
+ */
+export function selectDeckOracleRows(
+  rows: OracleRow[],
+  opts: {
+    nowMs: number
+    headroomMs: number
+    maxHorizonMs: number
+    asset: string
+    cap: number
+  },
+): OracleRow[] {
+  const minExpiry = BigInt(opts.nowMs) + BigInt(opts.headroomMs)
+  const maxExpiry = BigInt(opts.nowMs) + BigInt(opts.maxHorizonMs)
+  const live = rows.filter(
+    (r) =>
+      r.active &&
+      !r.settled &&
+      (r.asset === undefined || r.asset === opts.asset) &&
+      r.spot !== 0n &&
+      r.forward !== 0n &&
+      r.expiry > minExpiry &&
+      r.expiry <= maxExpiry,
+  )
+  live.sort((a, b) => (a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0))
+  return live.slice(0, opts.cap)
+}
+
 export async function findDeckOracles(
   client: SuiClient,
   asset = "BTC",
   count = 5,
+  maxHorizonMs = env.deckCardMaxHorizonMs,
 ): Promise<OracleSnapshot[]> {
   const pkg = env.deepbookPredictPackageId
   const now = Date.now()
-  const minExpiry = BigInt(now) + BigInt(env.deckCardMinHeadroomMs)
 
-  const evts = await client.queryEvents({
-    query: { MoveEventType: `${pkg}::registry::OracleCreated` },
-    limit: 30,
+  // 1. Recent price-tick events → live oracle id set. One tick tx updates
+  //    the whole live set, so ~100 events covers many ticks' worth of ids.
+  const ticks = await client.queryEvents({
+    query: { MoveEventType: `${pkg}::oracle::OraclePricesUpdated` },
+    limit: 100,
     order: "descending",
   })
-
-  // `min_strike` + `tick_size` aren't stored on the OracleSVI object —
-  // they live in the `OracleCreated` event payload. Capture them here
-  // so we can snap strikes to the grid the on-chain validator enforces.
-  const candidates: string[] = []
-  const gridById = new Map<string, { minStrike: bigint; tickSize: bigint }>()
-  for (const e of evts.data) {
-    const p = e.parsedJson as {
-      oracle_id: string
-      underlying_asset: string
-      min_strike?: string
-      tick_size?: string
-    }
-    if (p.underlying_asset !== asset) continue
-    const id = normalizeSuiObjectId(p.oracle_id)
-    candidates.push(id)
-    gridById.set(id, {
-      minStrike: BigInt(p.min_strike ?? "0"),
-      // Defensive default — if the event ever lacks tick_size, treat
-      // each unit as a tick (no snapping). On real testnet oracles
-      // tick_size is always present.
-      tickSize: BigInt(p.tick_size ?? "1"),
-    })
-    if (candidates.length >= 20) break
+  const candidateIds = new Set<string>()
+  for (const e of ticks.data) {
+    const p = e.parsedJson as { oracle_id?: string }
+    if (p.oracle_id) candidateIds.add(normalizeSuiObjectId(p.oracle_id))
   }
-  if (candidates.length === 0) return []
+  if (candidateIds.size === 0) return []
 
+  // 2. Resolve each candidate object into a normalized row.
   const objs = await client.multiGetObjects({
-    ids: candidates,
+    ids: [...candidateIds],
     options: { showContent: true },
   })
-
-  const eligible: OracleSnapshot[] = []
+  const rows: OracleRow[] = []
   for (const obj of objs) {
     if (obj.data?.content?.dataType !== "moveObject") continue
     const f = obj.data.content.fields as {
       active: boolean
       expiry: string
       settlement_price: unknown
+      underlying_asset?: string
       prices: { fields: { spot: string; forward: string } }
     }
-    if (!f.active) continue
-    if (isSettlementSet(f.settlement_price)) continue
-    const expiry = BigInt(f.expiry)
-    if (expiry <= minExpiry) continue
-    const spot = BigInt(f.prices.fields.spot)
-    const forward = BigInt(f.prices.fields.forward)
-    if (spot === 0n || forward === 0n) continue
-    const id = normalizeSuiObjectId(obj.data.objectId)
-    const grid = gridById.get(id) ?? { minStrike: 0n, tickSize: 1n }
-    eligible.push({
-      id,
-      expiry,
-      spot,
-      forward,
-      minStrike: grid.minStrike,
-      tickSize: grid.tickSize,
+    rows.push({
+      id: normalizeSuiObjectId(obj.data.objectId),
+      expiry: BigInt(f.expiry),
+      spot: BigInt(f.prices.fields.spot),
+      forward: BigInt(f.prices.fields.forward),
+      active: f.active,
+      settled: isSettlementSet(f.settlement_price),
+      asset: f.underlying_asset,
     })
   }
 
-  eligible.sort((a, b) => (a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0))
-  return eligible.slice(0, count)
+  // 3. Filter (asset, live, headroom < expiry ≤ horizon), sort soonest-first,
+  //    take the nearest `count`, then resolve grids only for those.
+  const chosen = selectDeckOracleRows(rows, {
+    nowMs: now,
+    headroomMs: env.deckCardMinHeadroomMs,
+    maxHorizonMs,
+    asset,
+    cap: count,
+  })
+  if (chosen.length === 0) return []
+  await resolveGrids(client, pkg, new Set(chosen.map((o) => o.id)))
+
+  return chosen.map((o) => {
+    const grid = gridCache.get(o.id) ?? DEFAULT_BTC_GRID
+    return {
+      id: o.id,
+      expiry: o.expiry,
+      spot: o.spot,
+      forward: o.forward,
+      minStrike: grid.minStrike,
+      tickSize: grid.tickSize,
+    }
+  })
 }
 
 function isSettlementSet(v: unknown): boolean {
@@ -362,18 +477,31 @@ export async function probeCard(
         tx.pure.id(oracle.id),
       ],
     })
-    let r
-    try {
-      r = await client.devInspectTransactionBlock({
-        transactionBlock: tx,
-        // dev_inspect is read-only; sender just needs to be a
-        // syntactically valid address.
-        sender:
-          "0x0000000000000000000000000000000000000000000000000000000000000001",
-      })
-    } catch {
-      return false
+    // A thrown error here is transient (network blip / RPC rate-limit), NOT
+    // a signal that the strike is invalid — so retry with backoff before
+    // giving up. Only a *clean* dev_inspect response that reports a
+    // non-success status or an out-of-bounds ask means the strike is
+    // genuinely unmintable. Conflating the two (the old `catch → false`)
+    // made throttled probes look like dead oracles.
+    let r:
+      | Awaited<ReturnType<typeof client.devInspectTransactionBlock>>
+      | undefined
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        r = await client.devInspectTransactionBlock({
+          transactionBlock: tx,
+          // dev_inspect is read-only; sender just needs to be a
+          // syntactically valid address.
+          sender:
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        })
+        break
+      } catch {
+        if (attempt === 3) return false
+        await new Promise((res) => setTimeout(res, 200 * (attempt + 1)))
+      }
     }
+    if (!r) return false
     if (r.effects.status.status !== "success") return false
     // results[0] is the market_key call (no public return), results[1] is
     // get_trade_amounts returning (ask_qty, bid_qty), results[2] is
@@ -411,11 +539,16 @@ export async function probeCard(
  * to 0/1 or whose ask falls outside `[min_ask, max_ask]` (1%/99%). On
  * low-vol short-dated oracles even ±5% fails — that's why the previous
  * fixed `STRIKE_BUCKETS = [±1%, ±2%, ±3%, ±5%, ±6%]` deck regularly fell
- * back to ATM. Probing the whole spectrum lets each card land on the
- * widest still-viable offset for THAT oracle.
+ * back to ATM.
+ *
+ * This ladder is deliberately COARSE (5 rungs spanning 20%→1%). Combined
+ * with `pickMaxAmplitudeStrike`'s early-exit, it bounds the per-oracle
+ * `dev_inspect` probe count — public testnet RPC throttles a large burst,
+ * which makes throttled probes look like dead oracles. Coarser rungs trade
+ * a little amplitude granularity for staying under the rate limit.
  */
-const OFFSET_CANDIDATES_BPS: readonly number[] = [
-  2000, 1500, 1200, 1000, 800, 600, 500, 400, 300, 200, 100, 50,
+export const OFFSET_CANDIDATES_BPS: readonly number[] = [
+  2000, 1000, 500, 200, 100,
 ] as const
 
 /**
@@ -424,6 +557,47 @@ const OFFSET_CANDIDATES_BPS: readonly number[] = [
  * function so the algorithm can be exercised without RPC.
  */
 export type ProbeFn = (oracle: OracleSnapshot, strike: bigint) => Promise<boolean>
+
+/**
+ * Bounded-concurrency wrapper. Even with `pickMaxAmplitudeStrike`'s
+ * early-exit, a low-vol oracle can walk the whole ladder, so a deck still
+ * fans out up to `deck_size × (|OFFSET_CANDIDATES_BPS| + 1)` probe calls;
+ * public testnet RPC rate-limits a burst that large and the resulting
+ * errors make `probeCard` return `false` for *every* candidate — which
+ * looks like "oracle has no viable strike" even though each probe passes
+ * when run alone. Routing all probes through a shared limiter caps in-flight
+ * `dev_inspect` calls so none get throttled.
+ */
+function createLimiter(max: number): <T>(thunk: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const queue: Array<() => void> = []
+  const next = () => {
+    active--
+    const run = queue.shift()
+    if (run) run()
+  }
+  return <T>(thunk: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const run = () => {
+        active++
+        thunk().then(resolve, reject).finally(next)
+      }
+      if (active < max) run()
+      else queue.push(run)
+    })
+}
+
+/** Max concurrent `dev_inspect` probes against the RPC. Kept low — public
+ *  testnet fullnodes throttle aggressively, and `probeCard` already retries
+ *  transient failures, so a small pool is both safer and barely slower
+ *  (each pick early-exits on its first viable, most-aggressive candidate). */
+const PROBE_CONCURRENCY = 4
+
+/** Extra oracles to fetch beyond the requested `max` deck size, so deck
+ *  generation can skip a few duds (oracles with unset pricing config / no
+ *  viable strike) and still fill the deck from live supply. Kept small —
+ *  each extra candidate costs an ATM viability probe. */
+const DECK_CANDIDATE_BUFFER = 3
 
 /**
  * Sign bias for `pickMaxAmplitudeStrike`:
@@ -481,21 +655,17 @@ export async function pickMaxAmplitudeStrike(
   }
   ordered.push(0) // ATM as last-resort safety net.
 
-  // Probe everything in parallel. Each candidate gets its snapped strike +
-  // probe result; nulls are unsuitable. Walking the ordered list afterwards
-  // and returning the first non-null entry preserves the descending-|bps|
-  // priority while letting the network round-trips overlap.
-  const probes = await Promise.all(
-    ordered.map(async (bps) => {
-      const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
-      if (raw <= 0n) return null
-      const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
-      const ok = await probe(oracle, strike)
-      return ok ? { strike, bps } : null
-    }),
-  )
-  for (const p of probes) {
-    if (p) return p
+  // Probe SEQUENTIALLY in descending-|bps| order and return the first viable
+  // strike — which, given the ordering, is the most aggressive. Early-exit
+  // is the whole point: an oracle whose aggressive strike prices costs ONE
+  // probe instead of the entire ladder, keeping the deck-wide dev_inspect
+  // count low enough to stay under public-RPC rate limits. (The old
+  // Promise.all fired every candidate regardless of the early winner.)
+  for (const bps of ordered) {
+    const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
+    if (raw <= 0n) continue
+    const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
+    if (await probe(oracle, strike)) return { strike, bps }
   }
   return null
 }
@@ -548,6 +718,44 @@ export function allocateSignBalance(
  * strikes — players have to read the market both ways, not just swipe
  * one direction.
  */
+/** ATM strike for an oracle: its forward snapped to the tick grid. The
+ *  least-aggressive, most-likely-to-price strike — `pickMaxAmplitudeStrike`
+ *  always falls back to it, so if even this fails the probe the oracle has
+ *  no viable strike at all (e.g. pricing config unset). */
+export function atmStrike(o: OracleSnapshot): bigint {
+  return snapToTick(o.forward, o.minStrike, o.tickSize)
+}
+
+/**
+ * From `candidates` (soonest-first), return the first up-to-`max` oracles
+ * whose ATM strike passes `probe`. Oracles with unset pricing config fail
+ * every probe — including ATM — so this drops them, letting deck generation
+ * survive a few duds as long as enough live oracles remain. Because ATM is
+ * `pickMaxAmplitudeStrike`'s last-resort candidate for any sign, an
+ * ATM-viable oracle is guaranteed to yield a strike in `buildAndProbeDeck`,
+ * so the filtered set never triggers its "no viable strike" throw.
+ *
+ * Probes fan out concurrently, bounded by the shared `PROBE_CONCURRENCY`
+ * limiter (a no-op for synthetic test probes).
+ */
+export async function selectViableOracles(
+  client: SuiClient,
+  candidates: OracleSnapshot[],
+  max: number,
+  /** Override the probe — defaults to the real `probeCard`. Tests inject a
+   *  synthetic function to mark specific oracles non-viable. */
+  probeOverride?: ProbeFn,
+): Promise<OracleSnapshot[]> {
+  const limit = createLimiter(PROBE_CONCURRENCY)
+  const rawProbe: ProbeFn =
+    probeOverride ?? ((o, strike) => probeCard(client, o, strike))
+  const probe: ProbeFn = (o, strike) => limit(() => rawProbe(o, strike))
+  const checks = await Promise.all(
+    candidates.map((o) => probe(o, atmStrike(o))),
+  )
+  return candidates.filter((_, i) => checks[i]).slice(0, max)
+}
+
 export async function buildAndProbeDeck(
   client: SuiClient,
   oracles: OracleSnapshot[],
@@ -560,8 +768,14 @@ export async function buildAndProbeDeck(
   if (oracles.length === 0) {
     throw new Error("buildAndProbeDeck: at least one oracle required")
   }
-  const probe: ProbeFn =
+  // Route every probe through a shared limiter so the deck-wide fan-out
+  // (~deck_size × candidates concurrent dev_inspects) doesn't trip RPC
+  // rate limits. Synthetic test probes are instant, so the limiter is a
+  // no-op overhead there.
+  const limit = createLimiter(PROBE_CONCURRENCY)
+  const rawProbe: ProbeFn =
     probeOverride ?? ((o, strike) => probeCard(client, o, strike))
+  const probe: ProbeFn = (o, strike) => limit(() => rawProbe(o, strike))
   // Burn deterministic per-card sub-seeds off the main stream first so the
   // parallel `Promise.all` below doesn't race against a shared PRG.
   const stream = prgStream(seed)
@@ -758,6 +972,43 @@ import { json } from "./lib/http"
 import { getSuiClient } from "./lib/sui"
 import { clientIp, consume } from "./ratelimit"
 
+/**
+ * Resolve a deck-size band from the request body.
+ * - Explicit `deckSize` collapses the band to [n, n] — preserves the old
+ *   strict behavior (503 unless exactly n oracles are live).
+ * - Otherwise default to [3, 5]. Both bounds are clamped to the contract's
+ *   [MIN_DECK_SIZE, MAX_DECK_SIZE] = [1, 20], and `min` is capped at `max`.
+ */
+export function resolveDeckBounds(body: {
+  deckSize?: number
+  minDeckSize?: number
+  maxDeckSize?: number
+}): { min: number; max: number } {
+  const clamp = (n: number) => Math.max(1, Math.min(20, Math.floor(n)))
+  if (body.deckSize != null) {
+    const n = clamp(body.deckSize)
+    return { min: n, max: n }
+  }
+  const max = clamp(body.maxDeckSize ?? 5)
+  const min = Math.min(clamp(body.minDeckSize ?? 3), max)
+  return { min, max }
+}
+
+/**
+ * Greedy sizing: build the largest deck supply allows, capped at `max`.
+ * `ok` is false when fewer than `min` oracles are live — the only failure
+ * case (surfaces as a 503). `deckSize` is meaningful only when `ok`.
+ */
+export function decideDeckSize(
+  liveCount: number,
+  bounds: { min: number; max: number },
+): { ok: boolean; deckSize: number } {
+  return {
+    ok: liveCount >= bounds.min,
+    deckSize: Math.min(liveCount, bounds.max),
+  }
+}
+
 export async function handleDeckmasterRequest(
   req: Request,
   url: URL,
@@ -771,23 +1022,43 @@ export async function handleDeckmasterRequest(
       )
     }
     const body = (await req.json().catch(() => null)) as
-      | { asset?: string; sender?: string; tier?: string }
+      | {
+          asset?: string
+          sender?: string
+          tier?: string
+          deckSize?: number
+          minDeckSize?: number
+          maxDeckSize?: number
+        }
       | null
     const asset = body?.asset ?? "BTC"
     const sender = body?.sender
     const tier = body?.tier
+    // Deck size adapts to live oracle supply within a band (default [3, 5],
+    // clamped to the contract's [1, 20]). An explicit `deckSize` collapses
+    // the band for back-compat. We fetch up to `max`, then size greedily.
+    const bounds = resolveDeckBounds(body ?? {})
     const client = getSuiClient()
     try {
-      const oracles = await findDeckOracles(client, asset, 5)
-      if (oracles.length < 5) {
+      // Over-fetch candidates, then drop oracles with no viable strike
+      // (unset pricing config) so a few duds don't sink the whole deck.
+      const candidates = await findDeckOracles(
+        client,
+        asset,
+        bounds.max + DECK_CANDIDATE_BUFFER,
+      )
+      const viable = await selectViableOracles(client, candidates, bounds.max)
+      const decision = decideDeckSize(viable.length, bounds)
+      if (!decision.ok) {
         return json(
           {
             error: "not enough live oracles",
-            detail: `found ${oracles.length} eligible ${asset} oracles >${env.deckCardMinHeadroomMs / 60_000} min out; retry in a few minutes`,
+            detail: `found ${candidates.length} live ${asset} oracles settling within ${env.deckCardMaxHorizonMs / 60_000}min, ${viable.length} with a viable strike, need ≥${bounds.min}; retry shortly`,
           },
           503,
         )
       }
+      const chosen = viable.slice(0, decision.deckSize)
       // Derive a deterministic seed for this generation. The seed is
       // saved alongside the plaintext so anyone with (seed, oracle list)
       // can recompute the exact strike sequence and verify the deck
@@ -800,16 +1071,19 @@ export async function handleDeckmasterRequest(
         timestampMs: Date.now(),
         nonceHex,
       })
-      const deck = await buildAndProbeDeck(client, oracles, seed)
+      const deck = await buildAndProbeDeck(client, chosen, seed)
       rememberDeck(deck.hash, deck.cards, seed)
       return json({
         cards: deck.cards.map((c, i) => ({
           oracle_id: c.oracle_id,
           strike: c.strike.toString(),
-          expiry: oracles[i].expiry.toString(),
+          expiry: chosen[i].expiry.toString(),
         })),
         hash: deck.hashHex,
         seed: hashToHex(seed),
+        deckSize: decision.deckSize,
+        liveOracleCount: candidates.length,
+        viableOracleCount: viable.length,
       })
     } catch (e) {
       log.error(`generate failed: ${e instanceof Error ? e.message : String(e)}`)

@@ -13,8 +13,6 @@
  * Mirrors `liveCardPnl` / `runningPnl` in apps/playground.
  */
 
-const FLOAT_SCALING = 1_000_000_000n
-
 export interface SwipeLite {
   isUp: boolean
   quantity: string
@@ -22,10 +20,16 @@ export interface SwipeLite {
 }
 
 /**
- * Mark-to-market PnL for one swipe, in dUSDC micro-units (1e6).
- * Returns null when we lack the inputs to project (no swipe, no tick,
- * no strike). Settled cards skip this and use the binary PnL from
- * `cardOutcomes` instead.
+ * Live PnL for one swipe, in dUSDC micro-units (1e6). Returns null when we
+ * lack the inputs (no swipe / tick / strike).
+ *
+ * These are BINARY options, not futures — so the mark isn't a linear
+ * price-diff. We use the "if it settled at the current forward" outcome:
+ * a position currently in-the-money is worth its full `quantity` (so PnL =
+ * quantity − premium), and out-of-the-money is worth 0 (PnL = −premium).
+ * Bounded to [−premium, quantity − premium], flipping as the forward
+ * crosses the strike. Settled cards skip this and use the contract's binary
+ * PnL from `cardOutcomes`.
  */
 export function liveCardPnl(
   swipe: SwipeLite | null,
@@ -35,9 +39,76 @@ export function liveCardPnl(
   if (!swipe || strike === undefined || forward === undefined) return null
   const s = BigInt(strike)
   const f = BigInt(forward)
+  const inMoney = swipe.isUp ? f >= s : f < s
   const q = BigInt(swipe.quantity)
-  const diff = swipe.isUp ? f - s : s - f
-  return (diff * q) / FLOAT_SCALING
+  const premium = BigInt(swipe.premium)
+  return inMoney ? q - premium : -premium
+}
+
+/**
+ * Annualized vol assumption for the live mark-to-market below. Short-dated
+ * BTC binaries are very sensitive to moneyness near expiry; this constant
+ * just sets how reactive the mark is to forward moves. Tunable — it doesn't
+ * affect settled PnL, only the smooth pre-settlement projection.
+ */
+const ASSUMED_VOL = 0.6
+const MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000
+
+/** Standard normal CDF via Abramowitz & Stegun 7.1.26 erf approximation. */
+function normCdf(x: number): number {
+  const sign = x < 0 ? -1 : 1
+  const z = Math.abs(x) / Math.SQRT2
+  const t = 1 / (1 + 0.3275911 * z)
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) *
+      t +
+      0.254829592) *
+      t *
+      Math.exp(-z * z)
+  return 0.5 * (1 + sign * y)
+}
+
+/**
+ * Continuous mark-to-market for one swipe, in dUSDC micro-units (1e6).
+ *
+ * Unlike {@link liveCardPnl} (a binary step that only flips when the forward
+ * crosses the strike), this prices the card as the *fair value* of a binary
+ * option: `quantity × P(in-the-money) − premium`. The probability is a
+ * digital Black-Scholes estimate from the live forward, strike, and
+ * remaining time, so the mark slides smoothly between `−premium` (p→0) and
+ * `quantity − premium` (p→1) as the forward and clock move — and converges
+ * to the exact binary outcome at expiry. This is what makes the live chart
+ * move continuously instead of sitting flat between strike crossings.
+ *
+ * Falls back to the binary outcome when `expiryMs` is unknown or already
+ * reached. Returns null when core inputs are missing.
+ */
+export function markCardPnl(
+  swipe: SwipeLite | null,
+  strike: string | undefined,
+  forward: string | undefined,
+  expiryMs: number | undefined,
+  nowMs: number,
+): bigint | null {
+  if (!swipe || strike === undefined || forward === undefined) return null
+  const f = Number(BigInt(forward))
+  const k = Number(BigInt(strike))
+  if (!(f > 0) || !(k > 0)) return null
+  const q = Number(BigInt(swipe.quantity))
+  const premium = Number(BigInt(swipe.premium))
+  const tYears = expiryMs !== undefined ? (expiryMs - nowMs) / MS_PER_YEAR : 0
+  let pUp: number
+  if (!(tYears > 0)) {
+    // Expired or unknown expiry — collapse to the binary outcome.
+    pUp = f >= k ? 1 : 0
+  } else {
+    const v = ASSUMED_VOL * Math.sqrt(tYears)
+    const d2 = (Math.log(f / k) - 0.5 * v * v) / v
+    pUp = normCdf(d2)
+  }
+  const pIn = swipe.isUp ? pUp : 1 - pUp
+  return BigInt(Math.round(q * pIn - premium))
 }
 
 /**
@@ -96,4 +167,16 @@ export function fmtDusdcSigned(microUnits: bigint): string {
   const sign = microUnits < 0n ? "-" : microUnits > 0n ? "+" : " "
   const abs = microUnits < 0n ? -microUnits : microUnits
   return `${sign}${(Number(abs) / 1e6).toFixed(4)} dUSDC`
+}
+
+/**
+ * Format a PnL as a signed % return on the premium paid, e.g. "+48x"-grade
+ * upside on a long-shot card or "-100%" on a lost one. Both args are dUSDC
+ * micro-units. Falls back to "—" when there's no premium to measure against.
+ */
+export function fmtPnlPct(pnlMicro: bigint, premiumMicro: bigint): string {
+  if (premiumMicro <= 0n) return "—"
+  const pct = (Number(pnlMicro) / Number(premiumMicro)) * 100
+  const sign = pct > 0 ? "+" : ""
+  return `${sign}${pct.toFixed(0)}%`
 }
