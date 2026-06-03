@@ -18,6 +18,14 @@ import { useFlickySign } from "@/lib/use-flicky-sign"
 import { liveCardPnl, runningPnl, fmtDusdcSigned } from "@/lib/pnl"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
 import { WsErrorBanner } from "@/components/ws-error-banner"
+import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
+import { BtcSpotChart } from "@/components/btc-spot-chart"
+
+/** Format a 1e9-scaled on-chain BTC price as a rounded USD string,
+ *  e.g. "67235752957751" → "$67,236". Accepts the raw string or bigint. */
+function fmtUsd(v: string | bigint): string {
+  return `$${(Number(v) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+}
 
 interface Props {
   role: "creator" | "challenger"
@@ -422,6 +430,40 @@ function PhaseSwiping({
     }
   }, [card?.oracle_id, card?.strike, expiry, client])
 
+  const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
+  const opponent = myIsP0 ? roomState.challenger : roomState.creator
+  const chartDuel = {
+    id: duelId,
+    settledCount: roomState.settledCount,
+    cards: roomState.cards,
+    swipes: roomState.swipes,
+    cardOutcomes: roomState.cardOutcomes,
+  }
+
+  // All of my cards are swiped — cardIdx has advanced past the deck. Show a
+  // done / awaiting-settlement panel (live PnL chart + per-card ledger)
+  // instead of a phantom "Loading card N+1…".
+  if (cardIdx >= roomState.cards.length) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="rounded border-2 border-black/55 bg-[#1b2548] p-4 text-center">
+          <p className="text-sm tracking-[0.2em] text-white/55 uppercase">
+            all {roomState.cards.length} cards swiped
+          </p>
+          <p className="mt-1 text-base text-white/70">awaiting settlement…</p>
+        </div>
+        <StreamingPnlChart
+          duel={chartDuel}
+          ticks={ticks}
+          myIsP0={myIsP0}
+          youAddress={myAddress}
+          oppAddress={opponent}
+        />
+        <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
+      </div>
+    )
+  }
+
   if (!card || !expiry) {
     return (
       <p className="text-base text-white/55">Loading card {cardIdx + 1}…</p>
@@ -429,10 +471,6 @@ function PhaseSwiping({
   }
 
   const tick = ticks[card.oracle_id]
-  const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
-  const deck = { cards: roomState.cards }
-  const myRunning = runningPnl(roomState, myIsP0 ? "p0" : "p1", deck, ticks)
-  const oppRunning = runningPnl(roomState, myIsP0 ? "p1" : "p0", deck, ticks)
 
   const doSwipe = async (isUp: boolean) => {
     setBusy(true)
@@ -459,16 +497,18 @@ function PhaseSwiping({
 
   return (
     <div className="flex flex-col gap-4">
+      <BtcSpotChart ticks={ticks} cards={roomState.cards} />
       <div className="rounded border-2 border-black/55 bg-[#1b2548] p-4">
         <p className="text-sm tracking-[0.2em] text-white/55 uppercase">
-          card {cardIdx + 1} / 5
+          card {cardIdx + 1} / {roomState.cards.length}
         </p>
-        <p className="mt-1 text-xl font-bold">strike {card.strike}</p>
+        <p className="mt-1 text-xl font-bold">strike {fmtUsd(card.strike)}</p>
         <p className="text-sm text-white/60">
           oracle {card.oracle_id.slice(0, 10)}&hellip;
         </p>
         <p className="mt-2 text-base text-white/70">
-          spot {tick?.spot ?? "—"} &middot; forward {tick?.forward ?? "—"}
+          spot {tick ? fmtUsd(tick.spot) : "—"} &middot; forward{" "}
+          {tick ? fmtUsd(tick.forward) : "—"}
         </p>
       </div>
 
@@ -511,12 +551,15 @@ function PhaseSwiping({
 
       {error && <p className="text-base text-red-400">{error}</p>}
 
-      <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
+      <StreamingPnlChart
+        duel={chartDuel}
+        ticks={ticks}
+        myIsP0={myIsP0}
+        youAddress={myAddress}
+        oppAddress={opponent}
+      />
 
-      <div className="rounded border border-white/10 bg-white/5 p-3 text-base">
-        <div>you: {fmtDusdcSigned(myRunning)}</div>
-        <div>opponent: {fmtDusdcSigned(oppRunning)}</div>
-      </div>
+      <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
     </div>
   )
 }
