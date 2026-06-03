@@ -36,32 +36,53 @@ export default function PlayDuel() {
   useEffect(() => {
     if (!duelId || !account) return
     let cancelled = false
-    ;(async () => {
+    const me = account.address.toLowerCase()
+    let attempt = 0
+    const attemptLoad = async () => {
       try {
         const [duel, manager] = await Promise.all([
           fetchDuel(client, duelId),
           findPredictManager(client, account.address),
         ])
         if (cancelled) return
-        const me = account.address.toLowerCase()
-        const isParticipant =
-          duel.creator.toLowerCase() === me ||
-          duel.challenger.toLowerCase() === me
-        // Finished duels and non-participants belong on the read-only result
-        // screen — only a live participant can mint here.
-        if (duel.status === "COMPLETE" || !isParticipant || !manager) {
+        // Finished duels are read-only — straight to the result screen.
+        if (duel.status === "COMPLETE") {
           setLoad({ kind: "redirect" })
           return
         }
-        setLoad({ kind: "ready", managerId: manager.id })
+        const isParticipant =
+          duel.creator.toLowerCase() === me ||
+          duel.challenger.toLowerCase() === me
+        if (isParticipant && manager) {
+          setLoad({ kind: "ready", managerId: manager.id })
+          return
+        }
+        // Read-after-write race: a just-joined challenger's `challenger`
+        // field (or a freshly created manager) may not be reflected on the
+        // fullnode yet. Retry a few times before treating them as a
+        // spectator and bouncing to the read-only result.
+        if (attempt < 6) {
+          attempt++
+          setTimeout(attemptLoad, 800)
+          return
+        }
+        setLoad({ kind: "redirect" })
       } catch (e) {
-        if (!cancelled)
-          setLoad({
-            kind: "error",
-            message: e instanceof Error ? e.message : String(e),
-          })
+        if (cancelled) return
+        // The Duel object may not be queryable yet right after create —
+        // retry before surfacing the error.
+        if (attempt < 6) {
+          attempt++
+          setTimeout(attemptLoad, 800)
+          return
+        }
+        setLoad({
+          kind: "error",
+          message: e instanceof Error ? e.message : String(e),
+        })
       }
-    })()
+    }
+    void attemptLoad()
     return () => {
       cancelled = true
     }
