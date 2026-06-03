@@ -539,11 +539,16 @@ export async function probeCard(
  * to 0/1 or whose ask falls outside `[min_ask, max_ask]` (1%/99%). On
  * low-vol short-dated oracles even ±5% fails — that's why the previous
  * fixed `STRIKE_BUCKETS = [±1%, ±2%, ±3%, ±5%, ±6%]` deck regularly fell
- * back to ATM. Probing the whole spectrum lets each card land on the
- * widest still-viable offset for THAT oracle.
+ * back to ATM.
+ *
+ * This ladder is deliberately COARSE (5 rungs spanning 20%→1%). Combined
+ * with `pickMaxAmplitudeStrike`'s early-exit, it bounds the per-oracle
+ * `dev_inspect` probe count — public testnet RPC throttles a large burst,
+ * which makes throttled probes look like dead oracles. Coarser rungs trade
+ * a little amplitude granularity for staying under the rate limit.
  */
-const OFFSET_CANDIDATES_BPS: readonly number[] = [
-  2000, 1500, 1200, 1000, 800, 600, 500, 400, 300, 200, 100, 50,
+export const OFFSET_CANDIDATES_BPS: readonly number[] = [
+  2000, 1000, 500, 200, 100,
 ] as const
 
 /**
@@ -554,13 +559,14 @@ const OFFSET_CANDIDATES_BPS: readonly number[] = [
 export type ProbeFn = (oracle: OracleSnapshot, strike: bigint) => Promise<boolean>
 
 /**
- * Bounded-concurrency wrapper. `buildAndProbeDeck` fans out
- * `deck_size × |OFFSET_CANDIDATES_BPS|` (~125 for a 5-card deck) probe
- * calls; public testnet RPC rate-limits a burst that large and the
- * resulting errors make `probeCard` return `false` for *every* candidate
- * — which looks like "oracle has no viable strike" even though each probe
- * passes when run alone. Routing all probes through a shared limiter caps
- * in-flight `dev_inspect` calls so none get throttled.
+ * Bounded-concurrency wrapper. Even with `pickMaxAmplitudeStrike`'s
+ * early-exit, a low-vol oracle can walk the whole ladder, so a deck still
+ * fans out up to `deck_size × (|OFFSET_CANDIDATES_BPS| + 1)` probe calls;
+ * public testnet RPC rate-limits a burst that large and the resulting
+ * errors make `probeCard` return `false` for *every* candidate — which
+ * looks like "oracle has no viable strike" even though each probe passes
+ * when run alone. Routing all probes through a shared limiter caps in-flight
+ * `dev_inspect` calls so none get throttled.
  */
 function createLimiter(max: number): <T>(thunk: () => Promise<T>) => Promise<T> {
   let active = 0
@@ -589,8 +595,9 @@ const PROBE_CONCURRENCY = 4
 
 /** Extra oracles to fetch beyond the requested `max` deck size, so deck
  *  generation can skip a few duds (oracles with unset pricing config / no
- *  viable strike) and still fill the deck from live supply. */
-const DECK_CANDIDATE_BUFFER = 7
+ *  viable strike) and still fill the deck from live supply. Kept small —
+ *  each extra candidate costs an ATM viability probe. */
+const DECK_CANDIDATE_BUFFER = 3
 
 /**
  * Sign bias for `pickMaxAmplitudeStrike`:
@@ -648,21 +655,17 @@ export async function pickMaxAmplitudeStrike(
   }
   ordered.push(0) // ATM as last-resort safety net.
 
-  // Probe everything in parallel. Each candidate gets its snapped strike +
-  // probe result; nulls are unsuitable. Walking the ordered list afterwards
-  // and returning the first non-null entry preserves the descending-|bps|
-  // priority while letting the network round-trips overlap.
-  const probes = await Promise.all(
-    ordered.map(async (bps) => {
-      const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
-      if (raw <= 0n) return null
-      const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
-      const ok = await probe(oracle, strike)
-      return ok ? { strike, bps } : null
-    }),
-  )
-  for (const p of probes) {
-    if (p) return p
+  // Probe SEQUENTIALLY in descending-|bps| order and return the first viable
+  // strike — which, given the ordering, is the most aggressive. Early-exit
+  // is the whole point: an oracle whose aggressive strike prices costs ONE
+  // probe instead of the entire ladder, keeping the deck-wide dev_inspect
+  // count low enough to stay under public-RPC rate limits. (The old
+  // Promise.all fired every candidate regardless of the early winner.)
+  for (const bps of ordered) {
+    const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
+    if (raw <= 0n) continue
+    const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
+    if (await probe(oracle, strike)) return { strike, bps }
   }
   return null
 }

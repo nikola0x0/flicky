@@ -3,10 +3,12 @@ import { createHash } from "node:crypto"
 import { bcs } from "@mysten/sui/bcs"
 import {
   allocateSignBalance,
+  atmStrike,
   buildAndProbeDeck,
   buildDeckFromOracles,
   decideDeckSize,
   difficultyOfPct,
+  OFFSET_CANDIDATES_BPS,
   fetchDeck,
   hashToHex,
   knownHashCount,
@@ -287,6 +289,32 @@ describe("pickMaxAmplitudeStrike", () => {
     expect(pick).toBeNull()
   })
 
+  test("early-exits: one probe when the most aggressive strike prices", async () => {
+    let calls = 0
+    const probe: ProbeFn = async () => {
+      calls++
+      return true
+    }
+    await pickMaxAmplitudeStrike(ONE_ORACLE, testPrgStream(SEED_A), probe, +1)
+    expect(calls).toBe(1)
+  })
+
+  test("walks no further than needed: ATM-only → exactly ladder+1 probes", async () => {
+    let calls = 0
+    const probe: ProbeFn = async (o, strike) => {
+      calls++
+      return strike === atmStrike(o)
+    }
+    const pick = await pickMaxAmplitudeStrike(
+      ONE_ORACLE,
+      testPrgStream(SEED_A),
+      probe,
+      +1,
+    )
+    expect(pick!.bps).toBe(0)
+    expect(calls).toBe(OFFSET_CANDIDATES_BPS.length + 1)
+  })
+
   test("PRG flip alternates UP-side vs DOWN-side at each |bps| level", async () => {
     // With a permissive probe, both ±2000 work. The PRG decides which sign
     // ends up first in `ordered` (and therefore which sign Promise.all
@@ -414,8 +442,9 @@ describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
 
   test("doesn't collapse to ATM when ANY aggressive offset works (this was the bug)", async () => {
     // Regression guard: with the old code, ANY probe failure on the
-    // single-bucket PRG pick would collapse to ATM. With the new code,
-    // a probe that allows ±300 bps should land EVERY card at ≥300 bps.
+    // single-bucket PRG pick would collapse to ATM. With the coarse ladder
+    // a probe that allows ±300 bps should land EVERY card at 200 — the most
+    // aggressive rung ≤300 — never ATM.
     const deck = await buildAndProbeDeck(
       NULL_CLIENT,
       FIVE_ORACLES,
@@ -427,7 +456,7 @@ describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
       const strike = deck.cards[i].strike
       const diff = strike > fwd ? strike - fwd : fwd - strike
       const absBps = Number((diff * 10_000n) / fwd)
-      expect(absBps).toBe(300)
+      expect(absBps).toBe(200)
     }
   })
 
