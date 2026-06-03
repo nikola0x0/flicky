@@ -1,4 +1,9 @@
-import { useEffect, useRef, useState } from "react"
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react"
 import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
 import type { ClientMsg, ServerMsg } from "@/lib/protocol"
 import { STAKE_TIERS, type Tier } from "@/lib/protocol"
@@ -26,6 +31,10 @@ import { BtcSpotChart } from "@/components/btc-spot-chart"
 function fmtUsd(v: string | bigint): string {
   return `$${(Number(v) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
 }
+
+// Drag-to-swipe tuning — mirrors the lobby DuelView feel.
+const DRAG_COMMIT_FRACTION = 0.3
+const DRAG_MAX_ROTATE_DEG = 18
 
 interface Props {
   role: "creator" | "challenger"
@@ -390,6 +399,20 @@ function PhaseSwiping({
   const [error, setError] = useState<string | null>(null)
   const client = useSuiClient()
 
+  // ── drag-to-swipe state ──────────────────────────────────────────
+  const cardRef = useRef<HTMLDivElement>(null)
+  const dragStartX = useRef(0)
+  const cardWidth = useRef(0)
+  const [drag, setDrag] = useState<{
+    x: number
+    active: boolean
+    flying: null | "up" | "down"
+  }>({ x: 0, active: false, flying: null })
+  // Reset whenever we advance to a new card.
+  useEffect(() => {
+    setDrag({ x: 0, active: false, flying: null })
+  }, [cardIdx])
+
   // Pre-quote both directions when the card changes. Frozen for the
   // duration of this card — re-quoting on every oracle_tick would hammer
   // devInspect. Contract still snapshots the real premium at swipe time.
@@ -490,64 +513,141 @@ function PhaseSwiping({
       onSwipeDone()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+      setDrag({ x: 0, active: false, flying: null })
     } finally {
       setBusy(false)
     }
   }
 
+  // Swipe RIGHT = YES (BTC settles above the strike) → mint UP.
+  // Swipe LEFT  = NO  (it won't)                     → mint DOWN.
+  function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (busy || drag.flying) return
+    cardWidth.current = cardRef.current?.offsetWidth ?? 320
+    dragStartX.current = e.clientX
+    setDrag({ x: 0, active: true, flying: null })
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  function onPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!drag.active) return
+    setDrag((d) => ({ ...d, x: e.clientX - dragStartX.current }))
+  }
+  function onPointerUp() {
+    if (!drag.active) return
+    const ww = cardWidth.current || 320
+    const threshold = ww * DRAG_COMMIT_FRACTION
+    if (drag.x > threshold) {
+      setDrag({ x: drag.x, active: false, flying: "up" })
+      void doSwipe(true)
+    } else if (drag.x < -threshold) {
+      setDrag({ x: drag.x, active: false, flying: "down" })
+      void doSwipe(false)
+    } else {
+      setDrag({ x: 0, active: false, flying: null })
+    }
+  }
+
+  const flyOff =
+    drag.flying === "up"
+      ? `translateX(160%) rotate(${DRAG_MAX_ROTATE_DEG + 6}deg)`
+      : drag.flying === "down"
+        ? `translateX(-160%) rotate(${-(DRAG_MAX_ROTATE_DEG + 6)}deg)`
+        : null
+  const cw = cardWidth.current || 320
+  const rotate = (drag.x / (cw / 2)) * DRAG_MAX_ROTATE_DEG
+  const transform =
+    flyOff ?? (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
+  const progress = Math.min(1, Math.abs(drag.x) / (cw * DRAG_COMMIT_FRACTION))
+  const yesGlow = drag.x > 0 ? progress : 0
+  const noGlow = drag.x < 0 ? progress : 0
+
+  const yesCost = quoteUp ? fmtDusdcSigned(-quoteUp.premium).trim() : "…"
+  const noCost = quoteDown ? fmtDusdcSigned(-quoteDown.premium).trim() : "…"
+  const yesOdds = quoteUp ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(0)}%` : "…"
+  const hasNext = cardIdx + 1 < roomState.cards.length
+
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       <BtcSpotChart ticks={ticks} cards={roomState.cards} />
-      <div className="rounded border-2 border-black/55 bg-[#1b2548] p-4">
-        <p className="text-sm tracking-[0.2em] text-white/55 uppercase">
-          card {cardIdx + 1} / {roomState.cards.length}
-        </p>
-        <p className="mt-1 text-xl font-bold">strike {fmtUsd(card.strike)}</p>
-        <p className="text-sm text-white/60">
-          oracle {card.oracle_id.slice(0, 10)}&hellip;
-        </p>
-        <p className="mt-2 text-base text-white/70">
-          spot {tick ? fmtUsd(tick.spot) : "—"} &middot; forward{" "}
-          {tick ? fmtUsd(tick.forward) : "—"}
-        </p>
+
+      <p className="font-pixel text-center text-[10px] tracking-[0.25em] text-white/45 uppercase">
+        card {cardIdx + 1} / {roomState.cards.length}
+      </p>
+
+      {/* swipe arena — top card draggable, next card peeking from the deck */}
+      <div
+        className="relative select-none"
+        style={{ touchAction: "none", height: 244 }}
+      >
+        {hasNext && (
+          <div
+            aria-hidden
+            className="pixel-tile absolute inset-x-3 bottom-0 top-3 bg-[#141d3a]"
+          />
+        )}
+        <div
+          ref={cardRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          className={`pixel-tile absolute inset-0 flex cursor-grab flex-col justify-between bg-[#1b2548] p-5 ${
+            drag.active ? "" : "transition-transform duration-300 ease-out"
+          } ${drag.flying ? "pointer-events-none" : "active:cursor-grabbing"}`}
+          style={{ transform, willChange: "transform" }}
+        >
+          {/* YES / NO tint + stamps */}
+          <div
+            className="pointer-events-none absolute inset-0 bg-emerald-500/25"
+            style={{ opacity: yesGlow }}
+          />
+          <div
+            className="pointer-events-none absolute inset-0 bg-rose-500/25"
+            style={{ opacity: noGlow }}
+          />
+          {drag.x > 24 && (
+            <div className="font-pixel absolute right-3 top-3 rotate-6 border-2 border-emerald-400 px-2 py-0.5 text-base font-black text-emerald-400 uppercase">
+              yes
+            </div>
+          )}
+          {drag.x < -24 && (
+            <div className="font-pixel absolute left-3 top-3 -rotate-6 border-2 border-rose-400 px-2 py-0.5 text-base font-black text-rose-400 uppercase">
+              no
+            </div>
+          )}
+
+          {/* the claim */}
+          <div>
+            <p className="font-pixel text-[10px] tracking-[0.2em] text-white/45 uppercase">
+              will btc settle
+            </p>
+            <p className="mt-1 text-2xl leading-tight font-black">
+              above {fmtUsd(card.strike)}?
+            </p>
+            <p className="mt-2 text-sm text-white/55">
+              now {tick ? fmtUsd(tick.spot) : "—"} · market {yesOdds}
+            </p>
+          </div>
+
+          {/* yes / no footer hints */}
+          <div className="flex items-end justify-between text-xs">
+            <span className="text-rose-300">
+              <span className="font-pixel">← no</span>
+              <br />
+              {noCost}
+            </span>
+            <span className="text-right text-emerald-300">
+              <span className="font-pixel">yes →</span>
+              <br />
+              {yesCost}
+            </span>
+          </div>
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          disabled={busy || quoteUp === null}
-          onClick={() => void doSwipe(true)}
-          className="rounded-md bg-emerald-600 px-4 py-3 font-bold text-white disabled:opacity-40"
-        >
-          <div className="text-lg">UP</div>
-          <div className="text-sm opacity-80">
-            cost{" "}
-            {quoteUp
-              ? fmtDusdcSigned(-quoteUp.premium).trim()
-              : "…"}
-          </div>
-          <div className="text-sm opacity-60">
-            p {quoteUp ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(1)}%` : "…"}
-          </div>
-        </button>
-        <button
-          type="button"
-          disabled={busy || quoteDown === null}
-          onClick={() => void doSwipe(false)}
-          className="rounded-md bg-rose-600 px-4 py-3 font-bold text-white disabled:opacity-40"
-        >
-          <div className="text-lg">DOWN</div>
-          <div className="text-sm opacity-80">
-            cost{" "}
-            {quoteDown
-              ? fmtDusdcSigned(-quoteDown.premium).trim()
-              : "…"}
-          </div>
-          <div className="text-sm opacity-60">
-            p {quoteDown ? `${(Number(quoteDown.pImplied) / 1e7).toFixed(1)}%` : "…"}
-          </div>
-        </button>
-      </div>
+      <p className="font-pixel text-center text-[10px] tracking-[0.25em] text-white/40 uppercase">
+        {busy ? "minting position…" : "swipe → yes · ← no"}
+      </p>
 
       {error && <p className="text-base text-red-400">{error}</p>}
 
