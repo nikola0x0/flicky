@@ -677,53 +677,71 @@ function PhaseSwiping({
         {busy ? "minting position…" : "swipe → yes · ← no"}
       </p>
 
-      {chartModal === "btc" && (
-        <ChartModal title="btc / usd" onClose={() => setChartModal(null)}>
-          <BtcSpotChart ticks={ticks} cards={roomState.cards} />
-        </ChartModal>
-      )}
-      {chartModal === "pnl" && (
-        <ChartModal title="live pnl" onClose={() => setChartModal(null)}>
-          <StreamingPnlChart
-            duel={chartDuel}
-            ticks={ticks}
-            myIsP0={myIsP0}
-            youAddress={myAddress}
-            oppAddress={opponent}
-          />
-          <div className="mt-3">
-            <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
-          </div>
-        </ChartModal>
-      )}
+      {/* Charts stay mounted (open toggles visibility) so they accumulate
+          oracle-tick history for the whole match — warm on open, no reset. */}
+      <ChartModal
+        open={chartModal === "btc"}
+        title="btc / usd"
+        onClose={() => setChartModal(null)}
+      >
+        <BtcSpotChart ticks={ticks} cards={roomState.cards} />
+      </ChartModal>
+      <ChartModal
+        open={chartModal === "pnl"}
+        title="live pnl"
+        onClose={() => setChartModal(null)}
+      >
+        <StreamingPnlChart
+          duel={chartDuel}
+          ticks={ticks}
+          myIsP0={myIsP0}
+          youAddress={myAddress}
+          oppAddress={opponent}
+        />
+        <div className="mt-3">
+          <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
+        </div>
+      </ChartModal>
     </div>
   )
 }
 
-/** Small pixel chip that opens a chart modal. */
+/** Pixel chip that opens a chart modal. Brightened + bordered so it reads as
+ *  a tappable control against the dark gameplay background. */
 function ChartChip({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="pixel-tile bg-[#1b2548] px-3 py-1.5 font-pixel text-[10px] tracking-[0.15em] text-white/80 uppercase"
+      className="pixel-tile flex items-center gap-1.5 bg-[#3a4d8a] px-3 py-2 font-pixel text-[11px] tracking-[0.15em] text-white uppercase hover:bg-[#46599e]"
     >
+      <span aria-hidden className="text-emerald-300">
+        ◳
+      </span>
       {label}
     </button>
   )
 }
 
-/** Portal modal for the in-match charts, matching the app's modal style. */
+/**
+ * Portal modal for the in-match charts. Stays MOUNTED while closed (toggles
+ * visibility via opacity, not mount/unmount) so the charts inside keep
+ * sampling oracle ticks the whole match — they're warm with history the
+ * instant you open them, and reopening never resets the data.
+ */
 function ChartModal({
+  open,
   title,
   onClose,
   children,
 }: {
+  open: boolean
   title: string
   onClose: () => void
   children: ReactNode
 }) {
   useEffect(() => {
+    if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose()
     }
@@ -733,14 +751,17 @@ function ChartModal({
       document.body.style.overflow = ""
       window.removeEventListener("keydown", onKey)
     }
-  }, [onClose])
+  }, [open, onClose])
 
   return createPortal(
     <div
       role="dialog"
       aria-modal="true"
+      aria-hidden={!open}
       onClick={onClose}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px] transition-opacity ${
+        open ? "opacity-100" : "pointer-events-none opacity-0"
+      }`}
     >
       <div
         onClick={(e) => e.stopPropagation()}
