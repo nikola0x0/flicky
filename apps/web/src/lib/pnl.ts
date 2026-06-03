@@ -13,8 +13,6 @@
  * Mirrors `liveCardPnl` / `runningPnl` in apps/playground.
  */
 
-const FLOAT_SCALING = 1_000_000_000n
-
 export interface SwipeLite {
   isUp: boolean
   quantity: string
@@ -22,10 +20,16 @@ export interface SwipeLite {
 }
 
 /**
- * Mark-to-market PnL for one swipe, in dUSDC micro-units (1e6).
- * Returns null when we lack the inputs to project (no swipe, no tick,
- * no strike). Settled cards skip this and use the binary PnL from
- * `cardOutcomes` instead.
+ * Live PnL for one swipe, in dUSDC micro-units (1e6). Returns null when we
+ * lack the inputs (no swipe / tick / strike).
+ *
+ * These are BINARY options, not futures — so the mark isn't a linear
+ * price-diff. We use the "if it settled at the current forward" outcome:
+ * a position currently in-the-money is worth its full `quantity` (so PnL =
+ * quantity − premium), and out-of-the-money is worth 0 (PnL = −premium).
+ * Bounded to [−premium, quantity − premium], flipping as the forward
+ * crosses the strike. Settled cards skip this and use the contract's binary
+ * PnL from `cardOutcomes`.
  */
 export function liveCardPnl(
   swipe: SwipeLite | null,
@@ -35,9 +39,10 @@ export function liveCardPnl(
   if (!swipe || strike === undefined || forward === undefined) return null
   const s = BigInt(strike)
   const f = BigInt(forward)
+  const inMoney = swipe.isUp ? f >= s : f < s
   const q = BigInt(swipe.quantity)
-  const diff = swipe.isUp ? f - s : s - f
-  return (diff * q) / FLOAT_SCALING
+  const premium = BigInt(swipe.premium)
+  return inMoney ? q - premium : -premium
 }
 
 /**
@@ -96,4 +101,16 @@ export function fmtDusdcSigned(microUnits: bigint): string {
   const sign = microUnits < 0n ? "-" : microUnits > 0n ? "+" : " "
   const abs = microUnits < 0n ? -microUnits : microUnits
   return `${sign}${(Number(abs) / 1e6).toFixed(4)} dUSDC`
+}
+
+/**
+ * Format a PnL as a signed % return on the premium paid, e.g. "+48x"-grade
+ * upside on a long-shot card or "-100%" on a lost one. Both args are dUSDC
+ * micro-units. Falls back to "—" when there's no premium to measure against.
+ */
+export function fmtPnlPct(pnlMicro: bigint, premiumMicro: bigint): string {
+  if (premiumMicro <= 0n) return "—"
+  const pct = (Number(pnlMicro) / Number(premiumMicro)) * 100
+  const sign = pct > 0 ? "+" : ""
+  return `${sign}${pct.toFixed(0)}%`
 }

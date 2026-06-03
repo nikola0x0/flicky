@@ -21,7 +21,7 @@ import {
   quoteSwipePremium,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
-import { liveCardPnl, fmtDusdcSigned } from "@/lib/pnl"
+import { liveCardPnl, fmtDusdcSigned, fmtPnlPct } from "@/lib/pnl"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
 import { WsErrorBanner } from "@/components/ws-error-banner"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
@@ -713,12 +713,14 @@ function CardLedger({
             ? swipeSlot.p0Swipe
             : swipeSlot.p1Swipe
           : null
+        // % return on the premium paid for this card.
+        const premium = mySwipe ? BigInt(mySwipe.premium) : 0n
         let pnlLabel = "—"
         if (settled) {
           const pnl = myIsP0 ? settled.p0Pnl : settled.p1Pnl
           pnlLabel =
             pnl !== null
-              ? `${fmtDusdcSigned(BigInt(pnl))} (settled)`
+              ? `${fmtPnlPct(BigInt(pnl), premium)} (settled)`
               : "skipped"
         } else if (mySwipe) {
           const live = liveCardPnl(
@@ -727,7 +729,7 @@ function CardLedger({
             ticks[card.oracle_id]?.forward,
           )
           pnlLabel =
-            live !== null ? `${fmtDusdcSigned(live)} (live)` : "ticking…"
+            live !== null ? `${fmtPnlPct(live, premium)} (live)` : "ticking…"
         }
         return (
           <div
@@ -792,12 +794,12 @@ function PhaseComplete({
   myAddress: string
 }) {
   const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
+  const myPremium = BigInt(myIsP0 ? roomState.p0Premium : roomState.p1Premium)
+  const oppPremium = BigInt(myIsP0 ? roomState.p1Premium : roomState.p0Premium)
   const myNet =
-    BigInt(myIsP0 ? roomState.p0Payout : roomState.p1Payout) -
-    BigInt(myIsP0 ? roomState.p0Premium : roomState.p1Premium)
+    BigInt(myIsP0 ? roomState.p0Payout : roomState.p1Payout) - myPremium
   const oppNet =
-    BigInt(myIsP0 ? roomState.p1Payout : roomState.p0Payout) -
-    BigInt(myIsP0 ? roomState.p1Premium : roomState.p0Premium)
+    BigInt(myIsP0 ? roomState.p1Payout : roomState.p0Payout) - oppPremium
   const tied = myNet === oppNet
   const youWon = myNet > oppNet
   return (
@@ -807,8 +809,8 @@ function PhaseComplete({
           {tied ? "Tie" : youWon ? "Victory" : "Defeat"}
         </h3>
         <p className="mt-2 text-base text-white/70">
-          you {fmtDusdcSigned(myNet)} &middot; opponent{" "}
-          {fmtDusdcSigned(oppNet)}
+          you {fmtPnlPct(myNet, myPremium)} &middot; opponent{" "}
+          {fmtPnlPct(oppNet, oppPremium)}
         </p>
       </div>
       <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={{}} />
