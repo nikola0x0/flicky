@@ -841,6 +841,88 @@ export function allocateZones(
   return shuffle(zones, prgStream)
 }
 
+/** A picked card strike, with the quote that justified it. */
+export interface ZonePick {
+  strike: bigint
+  bps: number
+  /** UP ask (implied probability) at pick time, 1e9 fixed. */
+  askUp: bigint
+}
+
+/**
+ * Probe order over the sign-restricted ladder, tuned so the expected hit
+ * comes first (early-exit keeps the deck-wide dev_inspect count under
+ * public-RPC rate limits):
+ *   edge  → descending |bps| (aggressive first), ATM last
+ *   close → ATM first, then ascending |bps|
+ *   mid   → middle rung, alternating outward (aggressive neighbor first),
+ *           ATM last
+ */
+export function zoneWalkOrder(
+  zone: Zone,
+  signBias: SignBias,
+  ladderBps: readonly number[] = OFFSET_CANDIDATES_BPS,
+): number[] {
+  const desc = ladderBps.map((b) => signBias * b) // ladder is descending |bps|
+  if (zone === "edge") return [...desc, 0]
+  if (zone === "close") return [0, ...desc.slice().reverse()]
+  const mid = Math.floor(desc.length / 2)
+  const out: number[] = [desc[mid]]
+  for (let step = 1; out.length < desc.length; step++) {
+    if (mid - step >= 0) out.push(desc[mid - step])
+    if (mid + step < desc.length) out.push(desc[mid + step])
+  }
+  out.push(0)
+  return out
+}
+
+/**
+ * Find a strike for one card whose quote lands in `zone`. Deterministic
+ * given (zone, signBias, ladder) — no PRG needed, which keeps the
+ * commit-reveal seed verification simple.
+ *
+ * Fallback chain when the walk exhausts the ladder without a zone hit:
+ *   1. the probed in-band candidate closest to the zone (ties → earliest
+ *      in walk order, i.e. the more zone-appropriate rung),
+ *   2. ATM with protocol-viability only — may sit outside the band; this
+ *      preserves the `selectViableOracles` invariant that an ATM-viable
+ *      oracle always yields a card,
+ *   3. null (oracle has no viable strike at all).
+ */
+export async function pickZoneStrike(
+  oracle: OracleSnapshot,
+  zone: Zone,
+  signBias: SignBias,
+  probe: ProbeFn,
+  ladderBps: readonly number[] = OFFSET_CANDIDATES_BPS,
+  band: QuoteBand = envQuoteBand(),
+): Promise<ZonePick | null> {
+  const seen: ZonePick[] = []
+  let atm: ZonePick | null = null
+  for (const bps of zoneWalkOrder(zone, signBias, ladderBps)) {
+    const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
+    if (raw <= 0n) continue
+    const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
+    const r = await probe(oracle, strike)
+    if (!r.viable) continue
+    const cand: ZonePick = { strike, bps, askUp: r.askUp }
+    if (bps === 0) atm = cand
+    if (quoteInZone(r.askUp, zone, band)) return cand
+    seen.push(cand)
+  }
+  const inBand = seen.filter((c) => c.askUp >= band.min && c.askUp <= band.max)
+  let best: ZonePick | null = null
+  for (const c of inBand) {
+    if (
+      best === null ||
+      zoneDistance(c.askUp, zone, band) < zoneDistance(best.askUp, zone, band)
+    ) {
+      best = c
+    }
+  }
+  return best ?? atm
+}
+
 /**
  * Generate a deck of `oracles.length` cards (one card per oracle). For
  * each card, picks the most aggressive viable strike via
