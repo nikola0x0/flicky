@@ -79,6 +79,12 @@ export const env = {
   deckCardMaxHorizonMs: Number(
     process.env.DECK_CARD_MAX_HORIZON_MS ?? 3 * 60 * 60 * 1000,
   ),
+  // Deckmaster quote band: a card's implied probability (its UP ask from
+  // `predict::get_trade_amounts`) must stay inside [min, max]. Keeps decks
+  // free of near-certain 90/10 cards — the protocol's own ask bounds
+  // (1%/99%) are far looser than what makes a fun prediction.
+  deckQuoteMinProb: Number(process.env.DECK_QUOTE_MIN_PROB ?? 0.2),
+  deckQuoteMaxProb: Number(process.env.DECK_QUOTE_MAX_PROB ?? 0.8),
   deckmasterStorePath:
     process.env.DECKMASTER_STORE_PATH ??
     resolve(import.meta.dir, "../.data/decks.json"),
