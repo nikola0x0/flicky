@@ -720,6 +720,127 @@ export function allocateSignBalance(
   return shuffle(out, prgStream)
 }
 
+// ─── Probability zones ──────────────────────────────────────────────────────
+//
+// Each card targets a difficulty zone expressed on its quote (the UP ask
+// from `predict::get_trade_amounts`, ≈ implied probability, 1e9 fixed):
+//
+//   close: 45–55%            — coin-flip, hardest call
+//   mid:   30–45% / 55–70%   — a lean, readable but contestable
+//   edge:  band-min–30% / 70%–band-max — long-shot vs gimme
+//
+// The inner thresholds are fixed; only edge's outer limit comes from the
+// configured band ([20%, 80%] by default — see DECK_QUOTE_MIN_PROB).
+// Strike-offset % was never the right difficulty knob: the same ±5% is
+// 60/40 on a long-dated oracle and 95/5 on a short-dated low-vol one.
+
+export type Zone = "close" | "mid" | "edge"
+
+/** Quote band in 1e9 fixed-point — the global cap on card extremeness. */
+export interface QuoteBand {
+  min: bigint
+  max: bigint
+}
+
+export function envQuoteBand(): QuoteBand {
+  return {
+    min: BigInt(Math.round(env.deckQuoteMinProb * 1e9)),
+    max: BigInt(Math.round(env.deckQuoteMaxProb * 1e9)),
+  }
+}
+
+const ZONE_CLOSE_LO = 450_000_000n
+const ZONE_CLOSE_HI = 550_000_000n
+const ZONE_MID_LO = 300_000_000n
+const ZONE_MID_HI = 700_000_000n
+
+interface Interval {
+  lo: bigint
+  hi: bigint
+}
+
+/**
+ * The (band-clipped) quote intervals a zone accepts. A zone squeezed
+ * empty by a tight band collapses into its inner neighbor
+ * (edge → mid → close); a band so tight even close vanishes degrades
+ * to the whole band.
+ */
+export function zoneIntervals(zone: Zone, band: QuoteBand): Interval[] {
+  const clip = (lo: bigint, hi: bigint): Interval | null => {
+    const l = lo > band.min ? lo : band.min
+    const h = hi < band.max ? hi : band.max
+    return l <= h ? { lo: l, hi: h } : null
+  }
+  const raw: Record<Zone, Array<Interval | null>> = {
+    close: [clip(ZONE_CLOSE_LO, ZONE_CLOSE_HI)],
+    mid: [
+      clip(ZONE_MID_LO, ZONE_CLOSE_LO - 1n),
+      clip(ZONE_CLOSE_HI + 1n, ZONE_MID_HI),
+    ],
+    edge: [
+      clip(band.min, ZONE_MID_LO - 1n),
+      clip(ZONE_MID_HI + 1n, band.max),
+    ],
+  }
+  const ivs = raw[zone].filter((x): x is Interval => x !== null)
+  if (ivs.length > 0) return ivs
+  if (zone === "edge") return zoneIntervals("mid", band)
+  if (zone === "mid") return zoneIntervals("close", band)
+  return [{ lo: band.min, hi: band.max }]
+}
+
+export function quoteInZone(q: bigint, zone: Zone, band: QuoteBand): boolean {
+  return zoneIntervals(zone, band).some((iv) => q >= iv.lo && q <= iv.hi)
+}
+
+/** Distance from `q` to the nearest accepting interval of `zone` (0n inside). */
+export function zoneDistance(q: bigint, zone: Zone, band: QuoteBand): bigint {
+  let best: bigint | null = null
+  for (const iv of zoneIntervals(zone, band)) {
+    const d = q < iv.lo ? iv.lo - q : q > iv.hi ? q - iv.hi : 0n
+    if (best === null || d < best) best = d
+  }
+  return best ?? 0n
+}
+
+/**
+ * Per-deck zone allocation — the difficulty mix:
+ *   5 → 2 close + 2 mid + 1 edge   (the PRD's 2/2/1, in probability terms)
+ *   4 → 1 close + 2 mid + 1 edge
+ *   3 → 1 close + 1 mid + 1 edge
+ *   2 → 1 close + 1 mid; 1 → close; >5 → repeat the 5-card pattern.
+ * PRG-shuffled so card position never reveals difficulty.
+ */
+const ZONE_PATTERN: readonly Zone[] = [
+  "close",
+  "close",
+  "mid",
+  "mid",
+  "edge",
+] as const
+
+export function allocateZones(
+  deckSize: number,
+  prgStream: Generator<number, never>,
+): Zone[] {
+  if (deckSize <= 0) return []
+  const base: Record<number, readonly Zone[]> = {
+    1: ["close"],
+    2: ["close", "mid"],
+    3: ["close", "mid", "edge"],
+    4: ["close", "mid", "mid", "edge"],
+    5: ZONE_PATTERN,
+  }
+  const zones =
+    deckSize <= 5
+      ? base[deckSize].slice()
+      : Array.from(
+          { length: deckSize },
+          (_, i) => ZONE_PATTERN[i % ZONE_PATTERN.length],
+        )
+  return shuffle(zones, prgStream)
+}
+
 /**
  * Generate a deck of `oracles.length` cards (one card per oracle). For
  * each card, picks the most aggressive viable strike via

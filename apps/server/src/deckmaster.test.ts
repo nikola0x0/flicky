@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import { bcs } from "@mysten/sui/bcs"
 import {
   allocateSignBalance,
+  allocateZones,
   atmStrike,
   buildAndProbeDeck,
   buildDeckFromOracles,
@@ -17,12 +18,16 @@ import {
   resolveDeckBounds,
   selectDeckOracleRows,
   selectViableOracles,
+  quoteInZone,
   snapToTick,
   strikePctOf,
+  zoneDistance,
   type OracleRow,
   type OracleSnapshot,
   type ProbeFn,
   type ProbeResult,
+  type QuoteBand,
+  type Zone,
 } from "./deckmaster"
 
 /** Tiny PRG mirroring the one in deckmaster.ts so tests don't depend on
@@ -710,5 +715,127 @@ describe("selectViableOracles", () => {
       failing(addr("02"), addr("03"), addr("04"), addr("05")),
     )
     expect(out.map((o) => o.id)).toEqual([addr("01")])
+  })
+})
+
+// === probability zones ===
+
+const BAND: QuoteBand = { min: 200_000_000n, max: 800_000_000n } // 20/80
+
+describe("quoteInZone (default 20/80 band)", () => {
+  test("close = [45%, 55%]", () => {
+    expect(quoteInZone(450_000_000n, "close", BAND)).toBe(true)
+    expect(quoteInZone(500_000_000n, "close", BAND)).toBe(true)
+    expect(quoteInZone(550_000_000n, "close", BAND)).toBe(true)
+    expect(quoteInZone(449_999_999n, "close", BAND)).toBe(false)
+    expect(quoteInZone(550_000_001n, "close", BAND)).toBe(false)
+  })
+
+  test("mid = [30%, 45%) ∪ (55%, 70%]", () => {
+    expect(quoteInZone(300_000_000n, "mid", BAND)).toBe(true)
+    expect(quoteInZone(449_999_999n, "mid", BAND)).toBe(true)
+    expect(quoteInZone(450_000_000n, "mid", BAND)).toBe(false)
+    expect(quoteInZone(550_000_001n, "mid", BAND)).toBe(true)
+    expect(quoteInZone(700_000_000n, "mid", BAND)).toBe(true)
+    expect(quoteInZone(700_000_001n, "mid", BAND)).toBe(false)
+  })
+
+  test("edge = [band-min, 30%) ∪ (70%, band-max]", () => {
+    expect(quoteInZone(200_000_000n, "edge", BAND)).toBe(true)
+    expect(quoteInZone(299_999_999n, "edge", BAND)).toBe(true)
+    expect(quoteInZone(300_000_000n, "edge", BAND)).toBe(false)
+    expect(quoteInZone(700_000_001n, "edge", BAND)).toBe(true)
+    expect(quoteInZone(800_000_000n, "edge", BAND)).toBe(true)
+    expect(quoteInZone(199_999_999n, "edge", BAND)).toBe(false)
+    expect(quoteInZone(800_000_001n, "edge", BAND)).toBe(false)
+  })
+
+  test("tight band collapses edge into mid (spec: DECK_QUOTE_MIN_PROB=0.35)", () => {
+    const tight: QuoteBand = { min: 350_000_000n, max: 650_000_000n }
+    // edge's own intervals are empty → falls back to mid's (clipped).
+    expect(quoteInZone(400_000_000n, "edge", tight)).toBe(true)
+    expect(quoteInZone(500_000_000n, "edge", tight)).toBe(false) // close, not mid
+  })
+
+  test("pathologically tight band collapses everything into the band itself", () => {
+    const tiny: QuoteBand = { min: 480_000_000n, max: 520_000_000n }
+    expect(quoteInZone(500_000_000n, "edge", tiny)).toBe(true)
+    expect(quoteInZone(500_000_000n, "mid", tiny)).toBe(true)
+  })
+})
+
+describe("zoneDistance", () => {
+  test("zero inside the zone", () => {
+    expect(zoneDistance(500_000_000n, "close", BAND)).toBe(0n)
+    expect(zoneDistance(250_000_000n, "edge", BAND)).toBe(0n)
+  })
+
+  test("distance to the nearest interval boundary", () => {
+    // 50% to edge: low interval ends at 30%−1, high starts at 70%+1.
+    expect(zoneDistance(500_000_000n, "edge", BAND)).toBe(200_000_001n)
+    // 25% to close: close starts at 45%.
+    expect(zoneDistance(250_000_000n, "close", BAND)).toBe(200_000_000n)
+  })
+})
+
+describe("allocateZones", () => {
+  const tally = (zones: Zone[]) => ({
+    close: zones.filter((z) => z === "close").length,
+    mid: zones.filter((z) => z === "mid").length,
+    edge: zones.filter((z) => z === "edge").length,
+  })
+
+  test("5 cards → 2 close + 2 mid + 1 edge", () => {
+    expect(tally(allocateZones(5, testPrgStream(SEED_A)))).toEqual({
+      close: 2,
+      mid: 2,
+      edge: 1,
+    })
+  })
+
+  test("4 cards → 1 close + 2 mid + 1 edge", () => {
+    expect(tally(allocateZones(4, testPrgStream(SEED_A)))).toEqual({
+      close: 1,
+      mid: 2,
+      edge: 1,
+    })
+  })
+
+  test("3 cards → 1 of each", () => {
+    expect(tally(allocateZones(3, testPrgStream(SEED_A)))).toEqual({
+      close: 1,
+      mid: 1,
+      edge: 1,
+    })
+  })
+
+  test("degraded small sizes: 2 → close+mid, 1 → close, 0 → empty", () => {
+    expect(tally(allocateZones(2, testPrgStream(SEED_A)))).toEqual({
+      close: 1,
+      mid: 1,
+      edge: 0,
+    })
+    expect(allocateZones(1, testPrgStream(SEED_A))).toEqual(["close"])
+    expect(allocateZones(0, testPrgStream(SEED_A))).toEqual([])
+  })
+
+  test(">5 repeats the 2/2/1 pattern (7 → 4 close + 2 mid + 1 edge)", () => {
+    expect(tally(allocateZones(7, testPrgStream(SEED_A)))).toEqual({
+      close: 4,
+      mid: 2,
+      edge: 1,
+    })
+  })
+
+  test("order varies per seed (PRG-shuffled) and is deterministic per seed", () => {
+    const seen = new Set<string>()
+    for (let s = 0; s < 20; s++) {
+      const seed = new Uint8Array(32).fill(s)
+      seen.add(allocateZones(5, testPrgStream(seed)).join(","))
+    }
+    expect(seen.size).toBeGreaterThan(1)
+    expect(allocateZones(5, testPrgStream(SEED_A))).toEqual(
+      allocateZones(5, testPrgStream(SEED_A)),
+    )
   })
 })
