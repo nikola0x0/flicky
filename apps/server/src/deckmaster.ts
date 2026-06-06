@@ -423,10 +423,12 @@ function readU64LE(bytes: number[]): bigint {
 }
 
 /**
- * dev_inspect a candidate (oracle, strike, direction) tuple. Returns
- * `true` only if the inspect succeeds AND the resulting ask lies in
- * the protocol's ask bounds for BOTH UP and DOWN — that's everything
- * the actual `predict::mint` checks before it touches the manager.
+ * dev_inspect a candidate (oracle, strike, direction) tuple. `viable`
+ * only if the inspect succeeds AND the resulting ask lies in the
+ * protocol's ask bounds for BOTH UP and DOWN — that's everything the
+ * actual `predict::mint` checks before it touches the manager. When
+ * viable, the decoded asks (≈ implied probabilities, 1e9 fixed) ride
+ * along so callers can band/zone-check the quote without re-probing.
  *
  * Catches two distinct aborts the player would otherwise hit:
  *   - `pricing_config::quote_spread_from_fair_price` code 1
@@ -445,9 +447,10 @@ export async function probeCard(
   client: SuiClient,
   oracle: OracleSnapshot,
   strike: bigint,
-): Promise<boolean> {
+): Promise<ProbeResult> {
   const pkg = env.deepbookPredictPackageId
   const FLOAT_SCALING = 1_000_000_000n
+  const asks = { up: 0n, down: 0n }
   for (const dir of ["up", "down"] as const) {
     const tx = new Transaction()
     const mk = tx.moveCall({
@@ -497,12 +500,12 @@ export async function probeCard(
         })
         break
       } catch {
-        if (attempt === 3) return false
+        if (attempt === 3) return NOT_VIABLE
         await new Promise((res) => setTimeout(res, 200 * (attempt + 1)))
       }
     }
-    if (!r) return false
-    if (r.effects.status.status !== "success") return false
+    if (!r) return NOT_VIABLE
+    if (r.effects.status.status !== "success") return NOT_VIABLE
     // results[0] is the market_key call (no public return), results[1] is
     // get_trade_amounts returning (ask_qty, bid_qty), results[2] is
     // ask_bounds returning (min, max). returnValues entry shape:
@@ -510,14 +513,15 @@ export async function probeCard(
     const trade = r.results?.[1]?.returnValues
     const bounds = r.results?.[2]?.returnValues
     if (!trade || !bounds || trade.length < 1 || bounds.length < 2) {
-      return false
+      return NOT_VIABLE
     }
     const ask = readU64LE(trade[0][0])
     const minAsk = readU64LE(bounds[0][0])
     const maxAsk = readU64LE(bounds[1][0])
-    if (ask < minAsk || ask > maxAsk) return false
+    if (ask < minAsk || ask > maxAsk) return NOT_VIABLE
+    asks[dir] = ask
   }
-  return true
+  return { viable: true, askUp: asks.up, askDown: asks.down }
 }
 
 /**
@@ -551,12 +555,29 @@ export const OFFSET_CANDIDATES_BPS: readonly number[] = [
   2000, 1000, 500, 200, 100,
 ] as const
 
+/** What a probe learns about one (oracle, strike) candidate. */
+export interface ProbeResult {
+  /** dev_inspect succeeded and both asks sit inside the protocol's
+   *  ask bounds — everything `predict::mint` checks pre-manager. */
+  viable: boolean
+  /** UP ask at qty = 1e9 — the implied probability of UP, 1e9 fixed.
+   *  0n when !viable. */
+  askUp: bigint
+  /** DOWN ask, same scale. 0n when !viable. */
+  askDown: bigint
+}
+
+const NOT_VIABLE: ProbeResult = { viable: false, askUp: 0n, askDown: 0n }
+
 /**
- * Probe function shape — `(oracle, strike) → viable?`. Defaults to the
+ * Probe function shape — `(oracle, strike) → ProbeResult`. Defaults to the
  * real `probeCard` against a `SuiClient`; tests inject a synthetic
  * function so the algorithm can be exercised without RPC.
  */
-export type ProbeFn = (oracle: OracleSnapshot, strike: bigint) => Promise<boolean>
+export type ProbeFn = (
+  oracle: OracleSnapshot,
+  strike: bigint,
+) => Promise<ProbeResult>
 
 /**
  * Bounded-concurrency wrapper. Even with `pickMaxAmplitudeStrike`'s
@@ -665,7 +686,7 @@ export async function pickMaxAmplitudeStrike(
     const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
     if (raw <= 0n) continue
     const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
-    if (await probe(oracle, strike)) return { strike, bps }
+    if ((await probe(oracle, strike)).viable) return { strike, bps }
   }
   return null
 }
@@ -753,7 +774,7 @@ export async function selectViableOracles(
   const checks = await Promise.all(
     candidates.map((o) => probe(o, atmStrike(o))),
   )
-  return candidates.filter((_, i) => checks[i]).slice(0, max)
+  return candidates.filter((_, i) => checks[i].viable).slice(0, max)
 }
 
 export async function buildAndProbeDeck(

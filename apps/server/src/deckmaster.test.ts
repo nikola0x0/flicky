@@ -22,6 +22,7 @@ import {
   type OracleRow,
   type OracleSnapshot,
   type ProbeFn,
+  type ProbeResult,
 } from "./deckmaster"
 
 /** Tiny PRG mirroring the one in deckmaster.ts so tests don't depend on
@@ -227,13 +228,21 @@ const ONE_ORACLE: OracleSnapshot = {
   tickSize: 1n,
 }
 
-/** Build a probe that accepts strikes within `±maxAbsBps` of forward. */
+const VIABLE_5050: ProbeResult = {
+  viable: true,
+  askUp: 500_000_000n,
+  askDown: 500_000_000n,
+}
+const NOT_VIABLE: ProbeResult = { viable: false, askUp: 0n, askDown: 0n }
+
+/** Build a probe that accepts strikes within `±maxAbsBps` of forward,
+ *  always quoting a flat 50/50 when viable. */
 function probeWithCeiling(maxAbsBps: number): ProbeFn {
   return async (o, strike) => {
     const fwd = o.forward
     const diff = strike > fwd ? strike - fwd : fwd - strike
     const absBps = Number((diff * 10_000n) / fwd)
-    return absBps <= maxAbsBps
+    return absBps <= maxAbsBps ? VIABLE_5050 : NOT_VIABLE
   }
 }
 
@@ -242,7 +251,7 @@ describe("pickMaxAmplitudeStrike", () => {
     const pick = await pickMaxAmplitudeStrike(
       ONE_ORACLE,
       testPrgStream(SEED_A),
-      async () => true,
+      async () => VIABLE_5050,
     )
     expect(pick).not.toBeNull()
     expect(Math.abs(pick!.bps)).toBe(2000)
@@ -284,7 +293,7 @@ describe("pickMaxAmplitudeStrike", () => {
     const pick = await pickMaxAmplitudeStrike(
       ONE_ORACLE,
       testPrgStream(SEED_A),
-      async () => false,
+      async () => NOT_VIABLE,
     )
     expect(pick).toBeNull()
   })
@@ -293,7 +302,7 @@ describe("pickMaxAmplitudeStrike", () => {
     let calls = 0
     const probe: ProbeFn = async () => {
       calls++
-      return true
+      return VIABLE_5050
     }
     await pickMaxAmplitudeStrike(ONE_ORACLE, testPrgStream(SEED_A), probe, +1)
     expect(calls).toBe(1)
@@ -303,7 +312,7 @@ describe("pickMaxAmplitudeStrike", () => {
     let calls = 0
     const probe: ProbeFn = async (o, strike) => {
       calls++
-      return strike === atmStrike(o)
+      return strike === atmStrike(o) ? VIABLE_5050 : NOT_VIABLE
     }
     const pick = await pickMaxAmplitudeStrike(
       ONE_ORACLE,
@@ -325,7 +334,7 @@ describe("pickMaxAmplitudeStrike", () => {
       const pick = await pickMaxAmplitudeStrike(
         ONE_ORACLE,
         testPrgStream(seed),
-        async () => true,
+        async () => VIABLE_5050,
       )
       seedsTried.add(Math.sign(pick!.bps))
     }
@@ -391,7 +400,7 @@ describe("pickMaxAmplitudeStrike with signBias", () => {
     const pick = await pickMaxAmplitudeStrike(
       ONE_ORACLE,
       testPrgStream(SEED_A),
-      async () => true,
+      async () => VIABLE_5050,
       +1,
     )
     expect(pick).not.toBeNull()
@@ -403,7 +412,7 @@ describe("pickMaxAmplitudeStrike with signBias", () => {
     const pick = await pickMaxAmplitudeStrike(
       ONE_ORACLE,
       testPrgStream(SEED_A),
-      async () => true,
+      async () => VIABLE_5050,
       -1,
     )
     expect(pick).not.toBeNull()
@@ -470,7 +479,7 @@ describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
         NULL_CLIENT,
         FIVE_ORACLES,
         seed,
-        async () => true, // accept everything → max amplitude land
+        async () => VIABLE_5050, // accept everything → max amplitude land
       )
       let ups = 0
       let downs = 0
@@ -495,7 +504,7 @@ describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
         NULL_CLIENT,
         FIVE_ORACLES,
         SEED_A,
-        async () => false,
+        async () => NOT_VIABLE,
       ),
     ).rejects.toThrow(/no viable strike/)
   })
@@ -660,7 +669,7 @@ describe("selectViableOracles", () => {
   // (mimics an oracle whose pricing config is unset → no viable strike).
   const failing = (...ids: string[]): ProbeFn => {
     const bad = new Set(ids)
-    return async (o) => !bad.has(o.id)
+    return async (o) => (bad.has(o.id) ? NOT_VIABLE : VIABLE_5050)
   }
 
   test("all viable → returns the first `max`, soonest-first", async () => {
@@ -668,7 +677,7 @@ describe("selectViableOracles", () => {
       NULL_CLIENT,
       FIVE_ORACLES,
       3,
-      async () => true,
+      async () => VIABLE_5050,
     )
     expect(out.map((o) => o.id)).toEqual([addr("01"), addr("02"), addr("03")])
   })
