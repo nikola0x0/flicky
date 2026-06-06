@@ -1310,6 +1310,10 @@ export async function handleDeckmasterRequest(
           oracle_id: c.oracle_id,
           strike: c.strike.toString(),
           expiry: chosen[i].expiry.toString(),
+          // Implied probability of UP at generation time, e.g. "0.6250".
+          quote: deck.quotes
+            ? (Number(deck.quotes[i]) / 1e9).toFixed(4)
+            : undefined,
         })),
         hash: deck.hashHex,
         seed: hashToHex(seed),
