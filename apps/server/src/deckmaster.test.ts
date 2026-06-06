@@ -24,6 +24,7 @@ import {
   strikePctOf,
   zoneDistance,
   zoneWalkOrder,
+  type GeneratedDeck,
   type OracleRow,
   type OracleSnapshot,
   type ProbeFn,
@@ -439,80 +440,80 @@ describe("pickMaxAmplitudeStrike with signBias", () => {
 })
 
 describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
-  test("picks ±500 bps on every card when the SVI ceiling is 500", async () => {
-    const deck = await buildAndProbeDeck(
-      NULL_CLIENT,
-      FIVE_ORACLES,
-      SEED_A,
-      probeWithCeiling(500),
-    )
-    expect(deck.cards).toHaveLength(5)
+  // slope 250_000: edge→|1000|bps (25%/75%), mid→|500| (37.5%/62.5%),
+  // close→ATM (50%).
+  const STEEP = quoteProbe(250_000n)
+
+  function absBpsOf(deck: GeneratedDeck, i: number): number {
+    const fwd = FIVE_ORACLES[i].forward
+    const strike = deck.cards[i].strike
+    const diff = strike > fwd ? strike - fwd : fwd - strike
+    return Number((diff * 10_000n) / fwd)
+  }
+
+  test("5-card deck lands the 2/2/1 zone mix (2 ATM, 2 mid, 1 edge)", async () => {
+    const deck = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    const tally = { 0: 0, 500: 0, 1000: 0 }
     for (let i = 0; i < 5; i++) {
-      const fwd = FIVE_ORACLES[i].forward
-      const strike = deck.cards[i].strike
-      const diff = strike > fwd ? strike - fwd : fwd - strike
-      const absBps = Number((diff * 10_000n) / fwd)
-      expect(absBps).toBe(500)
+      tally[absBpsOf(deck, i) as 0 | 500 | 1000]++
+    }
+    expect(tally[0]).toBe(2) // close zone → ATM
+    expect(tally[500]).toBe(2) // mid
+    expect(tally[1000]).toBe(1) // edge
+  })
+
+  test("every card's quote stays inside the 20/80 band", async () => {
+    const deck = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    expect(deck.quotes).toHaveLength(5)
+    for (const q of deck.quotes!) {
+      expect(q >= 200_000_000n).toBe(true)
+      expect(q <= 800_000_000n).toBe(true)
     }
   })
 
-  test("doesn't collapse to ATM when ANY aggressive offset works (this was the bug)", async () => {
-    // Regression guard: with the old code, ANY probe failure on the
-    // single-bucket PRG pick would collapse to ATM. With the coarse ladder
-    // a probe that allows ±300 bps should land EVERY card at 200 — the most
-    // aggressive rung ≤300 — never ATM.
-    const deck = await buildAndProbeDeck(
-      NULL_CLIENT,
-      FIVE_ORACLES,
-      SEED_A,
-      probeWithCeiling(300),
-    )
-    for (let i = 0; i < 5; i++) {
-      const fwd = FIVE_ORACLES[i].forward
-      const strike = deck.cards[i].strike
-      const diff = strike > fwd ? strike - fwd : fwd - strike
-      const absBps = Number((diff * 10_000n) / fwd)
-      expect(absBps).toBe(200)
-    }
-  })
-
-  test("deck has balanced sign distribution (never all-UP or all-DOWN)", async () => {
-    // 5-card deck → 3+2 of one sign vs other, PRG-picked. Across many
-    // seeds we should see both 3-up-2-down and 3-down-2-up but never 5/0.
-    const distributions = new Set<string>()
+  test("non-ATM strikes appear on both sides of forward across seeds", async () => {
+    const sides = new Set<string>()
     for (let s = 0; s < 16; s++) {
       const seed = new Uint8Array(32).fill(s)
-      const deck = await buildAndProbeDeck(
-        NULL_CLIENT,
-        FIVE_ORACLES,
-        seed,
-        async () => VIABLE_5050, // accept everything → max amplitude land
-      )
-      let ups = 0
-      let downs = 0
+      const deck = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, seed, STEEP)
       for (let i = 0; i < 5; i++) {
         const fwd = FIVE_ORACLES[i].forward
-        const strike = deck.cards[i].strike
-        if (strike > fwd) ups++
-        else if (strike < fwd) downs++
+        if (deck.cards[i].strike > fwd) sides.add("up")
+        if (deck.cards[i].strike < fwd) sides.add("down")
       }
-      expect(Math.max(ups, downs)).toBe(3)
-      expect(Math.min(ups, downs)).toBe(2)
-      distributions.add(`${ups}-${downs}`)
     }
-    // Both 3-2 and 2-3 should appear across 16 seeds.
-    expect(distributions.has("3-2")).toBe(true)
-    expect(distributions.has("2-3")).toBe(true)
+    expect(sides.has("up")).toBe(true)
+    expect(sides.has("down")).toBe(true)
+  })
+
+  test("deterministic — same seed, same hash", async () => {
+    const a = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    const b = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    expect(a.hashHex).toBe(b.hashHex)
+  })
+
+  test("different seed → different zone order → (usually) different hash", async () => {
+    const a = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    const b = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_B, STEEP)
+    expect(a.hashHex).not.toBe(b.hashHex)
+  })
+
+  test("works for 3- and 4-card decks (auto-deck-size)", async () => {
+    for (const n of [3, 4]) {
+      const deck = await buildAndProbeDeck(
+        NULL_CLIENT,
+        FIVE_ORACLES.slice(0, n),
+        SEED_A,
+        STEEP,
+      )
+      expect(deck.cards).toHaveLength(n)
+      expect(deck.quotes).toHaveLength(n)
+    }
   })
 
   test("throws when even ATM is rejected (oracle pricing config unset)", async () => {
     await expect(
-      buildAndProbeDeck(
-        NULL_CLIENT,
-        FIVE_ORACLES,
-        SEED_A,
-        async () => NOT_VIABLE,
-      ),
+      buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, async () => NOT_VIABLE),
     ).rejects.toThrow(/no viable strike/)
   })
 })

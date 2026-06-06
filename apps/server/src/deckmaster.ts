@@ -41,6 +41,10 @@ export interface GeneratedDeck {
   cards: DeckCard[]
   hash: Uint8Array
   hashHex: string
+  /** Per-card UP ask at generation time (1e9 fixed), aligned with `cards`.
+   *  Only set by `buildAndProbeDeck`; the legacy `buildDeckFromOracles`
+   *  path doesn't probe quotes. */
+  quotes?: bigint[]
 }
 
 export interface OracleSnapshot {
@@ -924,23 +928,23 @@ export async function pickZoneStrike(
 }
 
 /**
- * Generate a deck of `oracles.length` cards (one card per oracle). For
- * each card, picks the most aggressive viable strike via
- * `pickMaxAmplitudeStrike` — no fixed difficulty buckets, no silent ATM
- * fallback unless the oracle's SVI literally rejects every offset.
+ * Generate a deck of `oracles.length` cards (one card per oracle). Each
+ * card is steered to its allocated probability zone via `pickZoneStrike`,
+ * so a deck always mixes coin-flips, leans, and long-shots — and no card
+ * quotes outside the configured band (default 20/80) except the rare
+ * ATM-last-resort path.
  *
  * Why we don't go through `buildDeckFromOracles` anymore: the old path
- * picked from a narrow ±1%–±6% bucket which the on-chain pricing
- * frequently rejected on short-dated low-vol oracles, then quietly
- * collapsed to ATM. Players got a 5-card deck that was effectively all
- * coin-flips with no payout variance. The new path probes ±0.5%–±20%
- * and picks whichever passes, so amplitude scales with each oracle's
- * actual liquidity.
+ * picked strike offsets as a % of forward, but offset % was never the
+ * right difficulty knob — the same ±5% is 60/40 on a long-dated oracle
+ * and 95/5 on a short-dated low-vol one. Probing the actual quote and
+ * targeting zones in probability space bounds what the player
+ * experiences directly.
  *
  * Deck-level shape: signs are pre-allocated balanced (`allocateSignBalance`)
- * so a 5-card deck always carries a mix of UP-favoring + DOWN-favoring
- * strikes — players have to read the market both ways, not just swipe
- * one direction.
+ * and zones 2/2/1 (`allocateZones`), both PRG-shuffled from the seed, so a
+ * deck carries a mix of UP-favoring + DOWN-favoring strikes across the
+ * difficulty spread.
  */
 /** ATM strike for an oracle: its forward snapped to the tick grid. The
  *  least-aggressive, most-likely-to-price strike — `pickMaxAmplitudeStrike`
@@ -986,8 +990,10 @@ export async function buildAndProbeDeck(
   seed: Uint8Array,
   /** Override the per-strike probe — defaults to the real `probeCard`
    *  against the supplied `client`. Tests inject a synthetic function to
-   *  exercise the descend-by-aggressiveness algorithm without RPC. */
+   *  exercise the zone-walk algorithm without RPC. */
   probeOverride?: ProbeFn,
+  ladderBps: readonly number[] = OFFSET_CANDIDATES_BPS,
+  band: QuoteBand = envQuoteBand(),
 ): Promise<GeneratedDeck> {
   if (oracles.length === 0) {
     throw new Error("buildAndProbeDeck: at least one oracle required")
@@ -1000,34 +1006,31 @@ export async function buildAndProbeDeck(
   const rawProbe: ProbeFn =
     probeOverride ?? ((o, strike) => probeCard(client, o, strike))
   const probe: ProbeFn = (o, strike) => limit(() => rawProbe(o, strike))
-  // Burn deterministic per-card sub-seeds off the main stream first so the
-  // parallel `Promise.all` below doesn't race against a shared PRG.
+  // Deck-level shape, drawn deterministically from the seed BEFORE the
+  // parallel per-card picks: balanced signs + shuffled difficulty zones.
+  // The per-card walk itself is deterministic, so nothing below races
+  // against the shared PRG.
   const stream = prgStream(seed)
   const signs = allocateSignBalance(oracles.length, stream)
-  const subSeeds: Uint8Array[] = []
-  for (let i = 0; i < oracles.length; i++) {
-    const sub = new Uint8Array(32)
-    for (let k = 0; k < 32; k++) sub[k] = stream.next().value
-    subSeeds.push(sub)
-  }
-  const fixedCards: DeckCard[] = await Promise.all(
+  const zones = allocateZones(oracles.length, stream)
+  const picks = await Promise.all(
     oracles.map(async (o, i) => {
-      const subStream = prgStream(subSeeds[i])
-      const pick = await pickMaxAmplitudeStrike(o, subStream, probe, signs[i])
+      const pick = await pickZoneStrike(o, zones[i], signs[i], probe, ladderBps, band)
       if (pick === null) {
         throw new Error(
           `oracle ${o.id} has no viable strike (pricing config may be unset)`,
         )
       }
       log.info(
-        `card ${i}: ${o.id.slice(0, 12)}… forward=${o.forward} → strike=${pick.strike} (offset ${pick.bps} bps, side=${signs[i] > 0 ? "DOWN-fav" : "UP-fav"})`,
+        `card ${i}: ${o.id.slice(0, 12)}… zone=${zones[i]} forward=${o.forward} → strike=${pick.strike} (offset ${pick.bps} bps, quote=${(Number(pick.askUp) / 1e9).toFixed(3)}, side=${signs[i] > 0 ? "DOWN-fav" : "UP-fav"})`,
       )
-      return {
-        oracle_id: normalizeSuiAddress(o.id),
-        strike: pick.strike,
-      }
+      return pick
     }),
   )
+  const fixedCards: DeckCard[] = picks.map((p, i) => ({
+    oracle_id: normalizeSuiAddress(oracles[i].id),
+    strike: p.strike,
+  }))
   const bytes = DeckBcs.serialize(
     fixedCards.map((c) => ({
       oracle_id: c.oracle_id,
@@ -1035,7 +1038,12 @@ export async function buildAndProbeDeck(
     })),
   ).toBytes()
   const hash = new Uint8Array(createHash("sha256").update(bytes).digest())
-  return { cards: fixedCards, hash, hashHex: hashToHex(hash) }
+  return {
+    cards: fixedCards,
+    hash,
+    hashHex: hashToHex(hash),
+    quotes: picks.map((p) => p.askUp),
+  }
 }
 
 export function buildDeckFromOracles(
