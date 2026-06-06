@@ -530,16 +530,9 @@ export async function probeCard(
 
 /**
  * Candidate strike offsets from the oracle's forward price, in basis points
- * (1/100 of a percent). Listed from MOST aggressive to LEAST, then mirrored
- * to cover both sides of the forward; `pickMaxAmplitudeStrike` walks these
- * in descending |bps| order and picks the first one that passes
- * `probeCard`.
- *
- * The goal is to maximise the game's score variance: a strike far from
- * forward gives an implied probability close to 0 or 1, so a correct UP/
- * DOWN call there pays roughly `quantity` against a tiny `premium` — the
- * payout asymmetry that makes the game fun. ATM (offset 0) is the safe
- * fallback that always works but pays close to 50/50, which is boring.
+ * (1/100 of a percent). Listed from MOST aggressive to LEAST, then signed
+ * per card; `pickZoneStrike` walks these in a zone-tuned order and accepts
+ * the first strike whose quote lands in the card's probability zone.
  *
  * The on-chain pricing engine
  * (`pricing_config::quote_spread_from_fair_price` and
@@ -550,10 +543,10 @@ export async function probeCard(
  * back to ATM.
  *
  * This ladder is deliberately COARSE (5 rungs spanning 20%→1%). Combined
- * with `pickMaxAmplitudeStrike`'s early-exit, it bounds the per-oracle
+ * with `pickZoneStrike`'s early-exit, it bounds the per-oracle
  * `dev_inspect` probe count — public testnet RPC throttles a large burst,
  * which makes throttled probes look like dead oracles. Coarser rungs trade
- * a little amplitude granularity for staying under the rate limit.
+ * a little zone-landing precision for staying under the rate limit.
  */
 export const OFFSET_CANDIDATES_BPS: readonly number[] = [
   2000, 1000, 500, 200, 100,
@@ -584,7 +577,7 @@ export type ProbeFn = (
 ) => Promise<ProbeResult>
 
 /**
- * Bounded-concurrency wrapper. Even with `pickMaxAmplitudeStrike`'s
+ * Bounded-concurrency wrapper. Even with `pickZoneStrike`'s
  * early-exit, a low-vol oracle can walk the whole ladder, so a deck still
  * fans out up to `deck_size × (|OFFSET_CANDIDATES_BPS| + 1)` probe calls;
  * public testnet RPC rate-limits a burst that large and the resulting
@@ -625,75 +618,18 @@ const PROBE_CONCURRENCY = 4
 const DECK_CANDIDATE_BUFFER = 3
 
 /**
- * Sign bias for `pickMaxAmplitudeStrike`:
+ * Sign bias for `pickZoneStrike`:
  *   * `+1` — only probe strikes ABOVE forward (DOWN-favoring market —
  *           settlement likely below strike, UP swipe is the risky high-
  *           reward play, DOWN is the safe-but-expensive play).
  *   * `-1` — only probe strikes BELOW forward (UP-favoring market —
  *           swipe UP is the safe play, DOWN is the long-shot).
- *   * `undefined` — probe both signs (legacy / single-card use).
  *
  * Used by `buildAndProbeDeck` to force a balanced sign distribution
  * across the whole deck so a single duel never ships as all-UP-favoring
  * (boring: same swipe pattern wins everything).
  */
 export type SignBias = -1 | 1
-
-/**
- * For one oracle, find the strike that maximises `|strike - forward|`
- * while still passing `probe` (which exercises both UP and DOWN
- * `predict::mint`-like preconditions). Probes all candidates from
- * `OFFSET_CANDIDATES_BPS` in parallel — dev_inspect is read-only, so the
- * fan-out is cheap and we get the answer in one round-trip's worth of
- * latency instead of K. Returns `null` if not even ATM is viable; caller
- * treats that as a hard oracle failure.
- *
- * `signBias` restricts which side of `forward` the strike lands on:
- *   * `+1` → strike > forward; `-1` → strike < forward; `undefined` →
- *     PRG decides at each aggressiveness level.
- *
- * `prgStream` is consumed only when `signBias` is undefined — to
- * randomise UP-side vs DOWN-side at each tier. When `signBias` is fixed
- * the algorithm is deterministic for that oracle (still descends by
- * `|bps|` so the most aggressive viable wins).
- */
-export async function pickMaxAmplitudeStrike(
-  oracle: OracleSnapshot,
-  prgStream: Generator<number, never>,
-  probe: ProbeFn,
-  signBias?: SignBias,
-): Promise<{ strike: bigint; bps: number } | null> {
-  // Build candidate list ordered by descending |bps|.
-  //   * `signBias` set     → only that sign, monotone descending.
-  //   * `signBias` unset   → both signs interleaved at each |bps| tier,
-  //                          PRG-shuffled (legacy behavior).
-  const ordered: number[] = []
-  if (signBias !== undefined) {
-    for (const absBps of OFFSET_CANDIDATES_BPS) {
-      ordered.push(signBias * absBps)
-    }
-  } else {
-    for (const absBps of OFFSET_CANDIDATES_BPS) {
-      const shuffled = shuffle([-absBps, +absBps], prgStream)
-      ordered.push(...shuffled)
-    }
-  }
-  ordered.push(0) // ATM as last-resort safety net.
-
-  // Probe SEQUENTIALLY in descending-|bps| order and return the first viable
-  // strike — which, given the ordering, is the most aggressive. Early-exit
-  // is the whole point: an oracle whose aggressive strike prices costs ONE
-  // probe instead of the entire ladder, keeping the deck-wide dev_inspect
-  // count low enough to stay under public-RPC rate limits. (The old
-  // Promise.all fired every candidate regardless of the early winner.)
-  for (const bps of ordered) {
-    const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
-    if (raw <= 0n) continue
-    const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
-    if ((await probe(oracle, strike)).viable) return { strike, bps }
-  }
-  return null
-}
 
 /**
  * Allocate sign bias across `deckSize` cards so a deck is never
@@ -704,7 +640,7 @@ export async function pickMaxAmplitudeStrike(
  * Card order PRG-shuffled so the "side" sequence varies per duel.
  *
  * ATM (bps=0) intentionally excluded — every card is forced aggressive.
- * Per-card amplitude still floors to ATM if `pickMaxAmplitudeStrike`'s
+ * Per-card amplitude still floors to ATM if `pickZoneStrike`'s
  * sign-constrained probe finds nothing else viable; that's a per-oracle
  * fallback, not a deck-level design choice.
  */
@@ -947,8 +883,8 @@ export async function pickZoneStrike(
  * difficulty spread.
  */
 /** ATM strike for an oracle: its forward snapped to the tick grid. The
- *  least-aggressive, most-likely-to-price strike — `pickMaxAmplitudeStrike`
- *  always falls back to it, so if even this fails the probe the oracle has
+ *  least-aggressive, most-likely-to-price strike — every `pickZoneStrike`
+ *  walk order includes it, so if even this fails the probe the oracle has
  *  no viable strike at all (e.g. pricing config unset). */
 export function atmStrike(o: OracleSnapshot): bigint {
   return snapToTick(o.forward, o.minStrike, o.tickSize)
@@ -959,7 +895,7 @@ export function atmStrike(o: OracleSnapshot): bigint {
  * whose ATM strike passes `probe`. Oracles with unset pricing config fail
  * every probe — including ATM — so this drops them, letting deck generation
  * survive a few duds as long as enough live oracles remain. Because ATM is
- * `pickMaxAmplitudeStrike`'s last-resort candidate for any sign, an
+ * in every `pickZoneStrike` walk order (and its last-resort fallback), an
  * ATM-viable oracle is guaranteed to yield a strike in `buildAndProbeDeck`,
  * so the filtered set never triggers its "no viable strike" throw.
  *

@@ -9,11 +9,9 @@ import {
   buildDeckFromOracles,
   decideDeckSize,
   difficultyOfPct,
-  OFFSET_CANDIDATES_BPS,
   fetchDeck,
   hashToHex,
   knownHashCount,
-  pickMaxAmplitudeStrike,
   pickZoneStrike,
   rememberDeck,
   resolveDeckBounds,
@@ -225,7 +223,7 @@ describe("hashToHex", () => {
   })
 })
 
-// === pickMaxAmplitudeStrike — the max-amplitude search ===
+// === shared probe fixtures ===
 
 const ONE_ORACLE: OracleSnapshot = {
   id: addr("01"),
@@ -242,113 +240,6 @@ const VIABLE_5050: ProbeResult = {
   askDown: 500_000_000n,
 }
 const NOT_VIABLE: ProbeResult = { viable: false, askUp: 0n, askDown: 0n }
-
-/** Build a probe that accepts strikes within `±maxAbsBps` of forward,
- *  always quoting a flat 50/50 when viable. */
-function probeWithCeiling(maxAbsBps: number): ProbeFn {
-  return async (o, strike) => {
-    const fwd = o.forward
-    const diff = strike > fwd ? strike - fwd : fwd - strike
-    const absBps = Number((diff * 10_000n) / fwd)
-    return absBps <= maxAbsBps ? VIABLE_5050 : NOT_VIABLE
-  }
-}
-
-describe("pickMaxAmplitudeStrike", () => {
-  test("when the SVI accepts everything, picks the MOST aggressive (2000 bps)", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      async () => VIABLE_5050,
-    )
-    expect(pick).not.toBeNull()
-    expect(Math.abs(pick!.bps)).toBe(2000)
-  })
-
-  test("when SVI caps at ±500 bps, picks exactly ±500 (not lower, not 0)", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probeWithCeiling(500),
-    )
-    expect(pick).not.toBeNull()
-    expect(Math.abs(pick!.bps)).toBe(500)
-  })
-
-  test("when SVI caps at ±150 bps, picks ±100 (next viable down from 150)", async () => {
-    // OFFSET_CANDIDATES_BPS has 200, 100 — 150 is between them, so the
-    // search finds 100 (the most aggressive viable candidate ≤ ceiling).
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probeWithCeiling(150),
-    )
-    expect(pick).not.toBeNull()
-    expect(Math.abs(pick!.bps)).toBe(100)
-  })
-
-  test("when SVI rejects everything except ATM, returns 0 (fallback)", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probeWithCeiling(0),
-    )
-    expect(pick).not.toBeNull()
-    expect(pick!.bps).toBe(0)
-  })
-
-  test("when SVI rejects EVERYTHING (probe always false), returns null", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      async () => NOT_VIABLE,
-    )
-    expect(pick).toBeNull()
-  })
-
-  test("early-exits: one probe when the most aggressive strike prices", async () => {
-    let calls = 0
-    const probe: ProbeFn = async () => {
-      calls++
-      return VIABLE_5050
-    }
-    await pickMaxAmplitudeStrike(ONE_ORACLE, testPrgStream(SEED_A), probe, +1)
-    expect(calls).toBe(1)
-  })
-
-  test("walks no further than needed: ATM-only → exactly ladder+1 probes", async () => {
-    let calls = 0
-    const probe: ProbeFn = async (o, strike) => {
-      calls++
-      return strike === atmStrike(o) ? VIABLE_5050 : NOT_VIABLE
-    }
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probe,
-      +1,
-    )
-    expect(pick!.bps).toBe(0)
-    expect(calls).toBe(OFFSET_CANDIDATES_BPS.length + 1)
-  })
-
-  test("PRG flip alternates UP-side vs DOWN-side at each |bps| level", async () => {
-    // With a permissive probe, both ±2000 work. The PRG decides which sign
-    // ends up first in `ordered` (and therefore which sign Promise.all
-    // returns first). Two different seeds should yield different signs.
-    const seedsTried = new Set<number>()
-    for (let s = 0; s < 16 && seedsTried.size < 2; s++) {
-      const seed = new Uint8Array(32).fill(s)
-      const pick = await pickMaxAmplitudeStrike(
-        ONE_ORACLE,
-        testPrgStream(seed),
-        async () => VIABLE_5050,
-      )
-      seedsTried.add(Math.sign(pick!.bps))
-    }
-    expect(seedsTried.size).toBe(2) // saw both +sign and −sign
-  })
-})
 
 describe("allocateSignBalance", () => {
   test("even N → exactly N/2 of each sign", () => {
@@ -400,42 +291,6 @@ describe("allocateSignBalance", () => {
 
   test("N=0 → empty array", () => {
     expect(allocateSignBalance(0, testPrgStream(SEED_A))).toEqual([])
-  })
-})
-
-describe("pickMaxAmplitudeStrike with signBias", () => {
-  test("signBias=+1 only returns strike > forward", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      async () => VIABLE_5050,
-      +1,
-    )
-    expect(pick).not.toBeNull()
-    expect(pick!.bps).toBeGreaterThan(0)
-    expect(pick!.strike > ONE_ORACLE.forward).toBe(true)
-  })
-
-  test("signBias=-1 only returns strike < forward", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      async () => VIABLE_5050,
-      -1,
-    )
-    expect(pick).not.toBeNull()
-    expect(pick!.bps).toBeLessThan(0)
-    expect(pick!.strike < ONE_ORACLE.forward).toBe(true)
-  })
-
-  test("signBias=+1 with capped probe → max |bps| on that side", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probeWithCeiling(500),
-      +1,
-    )
-    expect(pick!.bps).toBe(500)
   })
 })
 
