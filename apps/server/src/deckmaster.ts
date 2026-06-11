@@ -41,6 +41,10 @@ export interface GeneratedDeck {
   cards: DeckCard[]
   hash: Uint8Array
   hashHex: string
+  /** Per-card UP ask at generation time (1e9 fixed), aligned with `cards`.
+   *  Only set by `buildAndProbeDeck`; the legacy `buildDeckFromOracles`
+   *  path doesn't probe quotes. */
+  quotes?: bigint[]
 }
 
 export interface OracleSnapshot {
@@ -423,10 +427,12 @@ function readU64LE(bytes: number[]): bigint {
 }
 
 /**
- * dev_inspect a candidate (oracle, strike, direction) tuple. Returns
- * `true` only if the inspect succeeds AND the resulting ask lies in
- * the protocol's ask bounds for BOTH UP and DOWN — that's everything
- * the actual `predict::mint` checks before it touches the manager.
+ * dev_inspect a candidate (oracle, strike, direction) tuple. `viable`
+ * only if the inspect succeeds AND the resulting ask lies in the
+ * protocol's ask bounds for BOTH UP and DOWN — that's everything the
+ * actual `predict::mint` checks before it touches the manager. When
+ * viable, the decoded asks (≈ implied probabilities, 1e9 fixed) ride
+ * along so callers can band/zone-check the quote without re-probing.
  *
  * Catches two distinct aborts the player would otherwise hit:
  *   - `pricing_config::quote_spread_from_fair_price` code 1
@@ -445,9 +451,10 @@ export async function probeCard(
   client: SuiClient,
   oracle: OracleSnapshot,
   strike: bigint,
-): Promise<boolean> {
+): Promise<ProbeResult> {
   const pkg = env.deepbookPredictPackageId
   const FLOAT_SCALING = 1_000_000_000n
+  const asks = { up: 0n, down: 0n }
   for (const dir of ["up", "down"] as const) {
     const tx = new Transaction()
     const mk = tx.moveCall({
@@ -497,12 +504,12 @@ export async function probeCard(
         })
         break
       } catch {
-        if (attempt === 3) return false
+        if (attempt === 3) return NOT_VIABLE
         await new Promise((res) => setTimeout(res, 200 * (attempt + 1)))
       }
     }
-    if (!r) return false
-    if (r.effects.status.status !== "success") return false
+    if (!r) return NOT_VIABLE
+    if (r.effects.status.status !== "success") return NOT_VIABLE
     // results[0] is the market_key call (no public return), results[1] is
     // get_trade_amounts returning (ask_qty, bid_qty), results[2] is
     // ask_bounds returning (min, max). returnValues entry shape:
@@ -510,63 +517,49 @@ export async function probeCard(
     const trade = r.results?.[1]?.returnValues
     const bounds = r.results?.[2]?.returnValues
     if (!trade || !bounds || trade.length < 1 || bounds.length < 2) {
-      return false
+      return NOT_VIABLE
     }
     const ask = readU64LE(trade[0][0])
     const minAsk = readU64LE(bounds[0][0])
     const maxAsk = readU64LE(bounds[1][0])
-    if (ask < minAsk || ask > maxAsk) return false
+    if (ask < minAsk || ask > maxAsk) return NOT_VIABLE
+    asks[dir] = ask
   }
-  return true
+  return { viable: true, askUp: asks.up, askDown: asks.down }
 }
 
-/**
- * Candidate strike offsets from the oracle's forward price, in basis points
- * (1/100 of a percent). Listed from MOST aggressive to LEAST, then mirrored
- * to cover both sides of the forward; `pickMaxAmplitudeStrike` walks these
- * in descending |bps| order and picks the first one that passes
- * `probeCard`.
- *
- * The goal is to maximise the game's score variance: a strike far from
- * forward gives an implied probability close to 0 or 1, so a correct UP/
- * DOWN call there pays roughly `quantity` against a tiny `premium` — the
- * payout asymmetry that makes the game fun. ATM (offset 0) is the safe
- * fallback that always works but pays close to 50/50, which is boring.
- *
- * The on-chain pricing engine
- * (`pricing_config::quote_spread_from_fair_price` and
- * `predict::assert_mintable_ask`) rejects strikes whose fair price rounds
- * to 0/1 or whose ask falls outside `[min_ask, max_ask]` (1%/99%). On
- * low-vol short-dated oracles even ±5% fails — that's why the previous
- * fixed `STRIKE_BUCKETS = [±1%, ±2%, ±3%, ±5%, ±6%]` deck regularly fell
- * back to ATM.
- *
- * This ladder is deliberately COARSE (5 rungs spanning 20%→1%). Combined
- * with `pickMaxAmplitudeStrike`'s early-exit, it bounds the per-oracle
- * `dev_inspect` probe count — public testnet RPC throttles a large burst,
- * which makes throttled probes look like dead oracles. Coarser rungs trade
- * a little amplitude granularity for staying under the rate limit.
- */
-export const OFFSET_CANDIDATES_BPS: readonly number[] = [
-  2000, 1000, 500, 200, 100,
-] as const
+/** What a probe learns about one (oracle, strike) candidate. */
+export interface ProbeResult {
+  /** dev_inspect succeeded and both asks sit inside the protocol's
+   *  ask bounds — everything `predict::mint` checks pre-manager. */
+  viable: boolean
+  /** UP ask at qty = 1e9 — the implied probability of UP, 1e9 fixed.
+   *  0n when !viable. */
+  askUp: bigint
+  /** DOWN ask, same scale. 0n when !viable. */
+  askDown: bigint
+}
+
+const NOT_VIABLE: ProbeResult = { viable: false, askUp: 0n, askDown: 0n }
 
 /**
- * Probe function shape — `(oracle, strike) → viable?`. Defaults to the
+ * Probe function shape — `(oracle, strike) → ProbeResult`. Defaults to the
  * real `probeCard` against a `SuiClient`; tests inject a synthetic
  * function so the algorithm can be exercised without RPC.
  */
-export type ProbeFn = (oracle: OracleSnapshot, strike: bigint) => Promise<boolean>
+export type ProbeFn = (
+  oracle: OracleSnapshot,
+  strike: bigint,
+) => Promise<ProbeResult>
 
 /**
- * Bounded-concurrency wrapper. Even with `pickMaxAmplitudeStrike`'s
- * early-exit, a low-vol oracle can walk the whole ladder, so a deck still
- * fans out up to `deck_size × (|OFFSET_CANDIDATES_BPS| + 1)` probe calls;
- * public testnet RPC rate-limits a burst that large and the resulting
- * errors make `probeCard` return `false` for *every* candidate — which
- * looks like "oracle has no viable strike" even though each probe passes
- * when run alone. Routing all probes through a shared limiter caps in-flight
- * `dev_inspect` calls so none get throttled.
+ * Bounded-concurrency wrapper. A deck fans out up to
+ * `deck_size × ADAPTIVE_PROBE_BUDGET` probe calls; public testnet RPC
+ * rate-limits a burst that large and the resulting errors make `probeCard`
+ * return `false` for *every* candidate — which looks like "oracle has no
+ * viable strike" even though each probe passes when run alone. Routing all
+ * probes through a shared limiter caps in-flight `dev_inspect` calls so none
+ * get throttled.
  */
 function createLimiter(max: number): <T>(thunk: () => Promise<T>) => Promise<T> {
   let active = 0
@@ -600,75 +593,18 @@ const PROBE_CONCURRENCY = 4
 const DECK_CANDIDATE_BUFFER = 3
 
 /**
- * Sign bias for `pickMaxAmplitudeStrike`:
- *   * `+1` — only probe strikes ABOVE forward (DOWN-favoring market —
+ * Sign bias for `pickStrikeAdaptive`:
+ *   * `+1` — steer the strike ABOVE forward (DOWN-favoring market —
  *           settlement likely below strike, UP swipe is the risky high-
  *           reward play, DOWN is the safe-but-expensive play).
- *   * `-1` — only probe strikes BELOW forward (UP-favoring market —
+ *   * `-1` — steer the strike BELOW forward (UP-favoring market —
  *           swipe UP is the safe play, DOWN is the long-shot).
- *   * `undefined` — probe both signs (legacy / single-card use).
  *
  * Used by `buildAndProbeDeck` to force a balanced sign distribution
  * across the whole deck so a single duel never ships as all-UP-favoring
  * (boring: same swipe pattern wins everything).
  */
 export type SignBias = -1 | 1
-
-/**
- * For one oracle, find the strike that maximises `|strike - forward|`
- * while still passing `probe` (which exercises both UP and DOWN
- * `predict::mint`-like preconditions). Probes all candidates from
- * `OFFSET_CANDIDATES_BPS` in parallel — dev_inspect is read-only, so the
- * fan-out is cheap and we get the answer in one round-trip's worth of
- * latency instead of K. Returns `null` if not even ATM is viable; caller
- * treats that as a hard oracle failure.
- *
- * `signBias` restricts which side of `forward` the strike lands on:
- *   * `+1` → strike > forward; `-1` → strike < forward; `undefined` →
- *     PRG decides at each aggressiveness level.
- *
- * `prgStream` is consumed only when `signBias` is undefined — to
- * randomise UP-side vs DOWN-side at each tier. When `signBias` is fixed
- * the algorithm is deterministic for that oracle (still descends by
- * `|bps|` so the most aggressive viable wins).
- */
-export async function pickMaxAmplitudeStrike(
-  oracle: OracleSnapshot,
-  prgStream: Generator<number, never>,
-  probe: ProbeFn,
-  signBias?: SignBias,
-): Promise<{ strike: bigint; bps: number } | null> {
-  // Build candidate list ordered by descending |bps|.
-  //   * `signBias` set     → only that sign, monotone descending.
-  //   * `signBias` unset   → both signs interleaved at each |bps| tier,
-  //                          PRG-shuffled (legacy behavior).
-  const ordered: number[] = []
-  if (signBias !== undefined) {
-    for (const absBps of OFFSET_CANDIDATES_BPS) {
-      ordered.push(signBias * absBps)
-    }
-  } else {
-    for (const absBps of OFFSET_CANDIDATES_BPS) {
-      const shuffled = shuffle([-absBps, +absBps], prgStream)
-      ordered.push(...shuffled)
-    }
-  }
-  ordered.push(0) // ATM as last-resort safety net.
-
-  // Probe SEQUENTIALLY in descending-|bps| order and return the first viable
-  // strike — which, given the ordering, is the most aggressive. Early-exit
-  // is the whole point: an oracle whose aggressive strike prices costs ONE
-  // probe instead of the entire ladder, keeping the deck-wide dev_inspect
-  // count low enough to stay under public-RPC rate limits. (The old
-  // Promise.all fired every candidate regardless of the early winner.)
-  for (const bps of ordered) {
-    const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
-    if (raw <= 0n) continue
-    const strike = snapToTick(raw, oracle.minStrike, oracle.tickSize)
-    if (await probe(oracle, strike)) return { strike, bps }
-  }
-  return null
-}
 
 /**
  * Allocate sign bias across `deckSize` cards so a deck is never
@@ -678,10 +614,9 @@ export async function pickMaxAmplitudeStrike(
  *              which sign gets the extra card.
  * Card order PRG-shuffled so the "side" sequence varies per duel.
  *
- * ATM (bps=0) intentionally excluded — every card is forced aggressive.
- * Per-card amplitude still floors to ATM if `pickMaxAmplitudeStrike`'s
- * sign-constrained probe finds nothing else viable; that's a per-oracle
- * fallback, not a deck-level design choice.
+ * Non-close cards aim off ATM toward their zone target. Per-card amplitude
+ * still floors to ATM if `pickStrikeAdaptive`'s sign-constrained probes find
+ * nothing else viable; that's a per-oracle fallback, not a deck-level choice.
  */
 export function allocateSignBalance(
   deckSize: number,
@@ -699,29 +634,369 @@ export function allocateSignBalance(
   return shuffle(out, prgStream)
 }
 
+// ─── Probability zones ──────────────────────────────────────────────────────
+//
+// Each card targets a difficulty zone expressed on its quote (the UP ask
+// from `predict::get_trade_amounts`, ≈ implied probability, 1e9 fixed):
+//
+//   close: 45–55%            — coin-flip, hardest call
+//   mid:   30–45% / 55–70%   — a lean, readable but contestable
+//   edge:  band-min–30% / 70%–band-max — long-shot vs gimme
+//
+// The inner thresholds are fixed; only edge's outer limit comes from the
+// configured band ([20%, 80%] by default — see DECK_QUOTE_MIN_PROB).
+// Strike-offset % was never the right difficulty knob: the same ±5% is
+// 60/40 on a long-dated oracle and 95/5 on a short-dated low-vol one.
+
+export type Zone = "close" | "mid" | "edge"
+
+/** Quote band in 1e9 fixed-point — the global cap on card extremeness. */
+export interface QuoteBand {
+  min: bigint
+  max: bigint
+}
+
+export function envQuoteBand(): QuoteBand {
+  return {
+    min: BigInt(Math.round(env.deckQuoteMinProb * 1e9)),
+    max: BigInt(Math.round(env.deckQuoteMaxProb * 1e9)),
+  }
+}
+
+const ZONE_CLOSE_LO = 450_000_000n
+const ZONE_CLOSE_HI = 550_000_000n
+const ZONE_MID_LO = 300_000_000n
+const ZONE_MID_HI = 700_000_000n
+
+interface Interval {
+  lo: bigint
+  hi: bigint
+}
+
 /**
- * Generate a deck of `oracles.length` cards (one card per oracle). For
- * each card, picks the most aggressive viable strike via
- * `pickMaxAmplitudeStrike` — no fixed difficulty buckets, no silent ATM
- * fallback unless the oracle's SVI literally rejects every offset.
+ * The (band-clipped) quote intervals a zone accepts. A zone squeezed
+ * empty by a tight band collapses into its inner neighbor
+ * (edge → mid → close); a band so tight even close vanishes degrades
+ * to the whole band.
+ */
+export function zoneIntervals(zone: Zone, band: QuoteBand): Interval[] {
+  const clip = (lo: bigint, hi: bigint): Interval | null => {
+    const l = lo > band.min ? lo : band.min
+    const h = hi < band.max ? hi : band.max
+    return l <= h ? { lo: l, hi: h } : null
+  }
+  const raw: Record<Zone, Array<Interval | null>> = {
+    close: [clip(ZONE_CLOSE_LO, ZONE_CLOSE_HI)],
+    mid: [
+      clip(ZONE_MID_LO, ZONE_CLOSE_LO - 1n),
+      clip(ZONE_CLOSE_HI + 1n, ZONE_MID_HI),
+    ],
+    edge: [
+      clip(band.min, ZONE_MID_LO - 1n),
+      clip(ZONE_MID_HI + 1n, band.max),
+    ],
+  }
+  const ivs = raw[zone].filter((x): x is Interval => x !== null)
+  if (ivs.length > 0) return ivs
+  if (zone === "edge") return zoneIntervals("mid", band)
+  if (zone === "mid") return zoneIntervals("close", band)
+  return [{ lo: band.min, hi: band.max }]
+}
+
+export function quoteInZone(q: bigint, zone: Zone, band: QuoteBand): boolean {
+  return zoneIntervals(zone, band).some((iv) => q >= iv.lo && q <= iv.hi)
+}
+
+/** Distance from `q` to the nearest accepting interval of `zone` (0n inside). */
+export function zoneDistance(q: bigint, zone: Zone, band: QuoteBand): bigint {
+  let best: bigint | null = null
+  for (const iv of zoneIntervals(zone, band)) {
+    const d = q < iv.lo ? iv.lo - q : q > iv.hi ? q - iv.hi : 0n
+    if (best === null || d < best) best = d
+  }
+  return best ?? 0n
+}
+
+/**
+ * The quote a card aims for, given its zone and sign — the midpoint of the
+ * zone's accepting region on the side the sign favors. `signBias = +1`
+ * (DOWN-favoring, strike above forward) aims below 0.5; `-1` aims above.
+ * Computed from the raw zone bounds (not the ±1-clipped intervals) so the
+ * targets are clean and mirror around 0.5: close 0.50, mid 0.375/0.625,
+ * edge 0.25/0.75. Only edge's outer bound tracks the configured band.
+ */
+export function zoneTarget(
+  zone: Zone,
+  signBias: SignBias,
+  band: QuoteBand,
+): bigint {
+  const mid = (lo: bigint, hi: bigint) => (lo + hi) / 2n
+  if (zone === "close") return mid(ZONE_CLOSE_LO, ZONE_CLOSE_HI)
+  if (zone === "mid") {
+    return signBias > 0
+      ? mid(ZONE_MID_LO, ZONE_CLOSE_LO)
+      : mid(ZONE_CLOSE_HI, ZONE_MID_HI)
+  }
+  return signBias > 0
+    ? mid(band.min, ZONE_MID_LO)
+    : mid(ZONE_MID_HI, band.max)
+}
+
+/**
+ * Per-deck zone allocation — the difficulty mix:
+ *   5 → 2 close + 2 mid + 1 edge   (the PRD's 2/2/1, in probability terms)
+ *   4 → 1 close + 2 mid + 1 edge
+ *   3 → 1 close + 1 mid + 1 edge
+ *   2 → 1 close + 1 mid; 1 → close; >5 → repeat the 5-card pattern.
+ * PRG-shuffled so card position never reveals difficulty.
+ */
+const ZONE_PATTERN: readonly Zone[] = [
+  "close",
+  "close",
+  "mid",
+  "mid",
+  "edge",
+] as const
+
+export function allocateZones(
+  deckSize: number,
+  prgStream: Generator<number, never>,
+): Zone[] {
+  if (deckSize <= 0) return []
+  const base: Record<number, readonly Zone[]> = {
+    1: ["close"],
+    2: ["close", "mid"],
+    3: ["close", "mid", "edge"],
+    4: ["close", "mid", "mid", "edge"],
+    5: ZONE_PATTERN,
+  }
+  const zones =
+    deckSize <= 5
+      ? base[deckSize].slice()
+      : Array.from(
+          { length: deckSize },
+          (_, i) => ZONE_PATTERN[i % ZONE_PATTERN.length],
+        )
+  return shuffle(zones, prgStream)
+}
+
+/** A picked card strike, with the quote that justified it. */
+export interface ZonePick {
+  strike: bigint
+  bps: number
+  /** UP ask (implied probability) at pick time, 1e9 fixed. */
+  askUp: bigint
+}
+
+// ─── Adaptive bracket strike selection ──────────────────────────────────────
+//
+// Replaces the fixed-bps ladder walk. The in-band strikes (quote ∈ band) live
+// in a 10–75bps window on testnet, and that window's width tracks each oracle's
+// vol × time-to-expiry — far too variable for any fixed ladder. So instead of
+// walking rungs, measure the local quote-vs-bps slope and aim: probe ATM + a
+// small seed, interpolate straight to the zone's target quote, verify, refine
+// once. ~3–4 probes/card vs a whole ladder, and it adapts to any steepness.
+
+/** Initial seed offset (bps). Viable on both near-expiry and fresh oracles
+ *  measured live, so the first slope sample normally succeeds. */
+const SEED_OFFSET_BPS = 15
+/** Clamp floor for the interpolated offset; also the one seed retry halves
+ *  toward this. */
+const MIN_OFFSET_BPS = 5
+/** Clamp ceiling — only gentle oracles reach it; ~10% is the outer bound that
+ *  can still land the edge zone there. */
+const MAX_OFFSET_BPS = 1000
+/** Hard cap on probes per card: ATM + seed + verify + at most one refine. */
+const ADAPTIVE_PROBE_BUDGET = 4
+
+/** Solve a 2-point line for the bps that yields `target`, requiring a strictly
+ *  decreasing quote-vs-bps slope (the market is monotone: strike up → UP less
+ *  likely). Returns null on a flat/non-decreasing/degenerate sample. */
+function solveOffsetForQuote(
+  x0: number,
+  y0: bigint,
+  x1: number,
+  y1: bigint,
+  target: bigint,
+): number | null {
+  const dx = x1 - x0
+  if (dx === 0) return null
+  const slope = Number(y1 - y0) / dx
+  if (slope >= 0) return null
+  const bps = x0 + Number(target - y0) / slope
+  return Number.isFinite(bps) ? Math.round(bps) : null
+}
+
+/** Clamp a signed bps offset to [MIN, MAX] in magnitude, preserving sign. */
+function clampOffset(bps: number): number {
+  const sign = bps < 0 ? -1 : 1
+  const mag = Math.min(
+    MAX_OFFSET_BPS,
+    Math.max(MIN_OFFSET_BPS, Math.abs(Math.round(bps))),
+  )
+  return sign * mag
+}
+
+function absDiff(a: bigint, b: bigint): bigint {
+  return a > b ? a - b : b - a
+}
+
+/**
+ * Adaptive replacement for `pickZoneStrike`. Steers one card to its zone's
+ * target quote by measuring the oracle's local quote-vs-strike slope and
+ * interpolating, rather than walking a fixed ladder. Deterministic given
+ * (oracle, zone, signBias) — no PRG — so commit-reveal verification is simple.
+ *
+ * `atmQuote`, if supplied (e.g. from `selectViableOracles`' ATM check), skips
+ * the ATM probe.
+ *
+ * Fallback chain (preserves the `selectViableOracles` invariant): best in-band
+ * probe closest to target → ATM (even if out of band) → null (nothing viable).
+ */
+export async function pickStrikeAdaptive(
+  oracle: OracleSnapshot,
+  zone: Zone,
+  signBias: SignBias,
+  probe: ProbeFn,
+  band: QuoteBand = envQuoteBand(),
+  atmQuote?: bigint,
+): Promise<ZonePick | null> {
+  const target = zoneTarget(zone, signBias, band)
+  const seen: ZonePick[] = []
+  const probedBps = new Set<number>()
+  let atm: ZonePick | null = null
+  let budget = ADAPTIVE_PROBE_BUDGET
+
+  const strikeAt = (bps: number): bigint =>
+    snapToTick(
+      oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n,
+      oracle.minStrike,
+      oracle.tickSize,
+    )
+
+  const probeAt = async (bps: number): Promise<ZonePick | null> => {
+    if (budget <= 0 || probedBps.has(bps)) return null
+    const raw = oracle.forward + (oracle.forward * BigInt(bps)) / 10_000n
+    if (raw <= 0n) return null
+    budget--
+    probedBps.add(bps)
+    const strike = strikeAt(bps)
+    const r = await probe(oracle, strike)
+    if (!r.viable) return null
+    const pick: ZonePick = { strike, bps, askUp: r.askUp }
+    if (bps === 0) atm = pick
+    seen.push(pick)
+    return pick
+  }
+
+  const fallback = (): ZonePick | null => {
+    let best: ZonePick | null = null
+    for (const c of seen) {
+      if (c.askUp < band.min || c.askUp > band.max) continue
+      if (best === null || absDiff(c.askUp, target) < absDiff(best.askUp, target)) {
+        best = c
+      }
+    }
+    return best ?? atm
+  }
+
+  // 1. ATM (reuse a supplied quote if given).
+  let q0: bigint
+  if (atmQuote !== undefined) {
+    atm = { strike: strikeAt(0), bps: 0, askUp: atmQuote }
+    seen.push(atm)
+    probedBps.add(0)
+    q0 = atmQuote
+  } else {
+    const a = await probeAt(0)
+    if (a === null) return null
+    q0 = a.askUp
+  }
+  if (zone === "close") return atm
+
+  // 2. Seed probe toward the target; one retry at half on rejection.
+  const dir = target < q0 ? 1 : -1
+  let seedPick: ZonePick | null = null
+  let seedBps = 0
+  for (const mag of [
+    SEED_OFFSET_BPS,
+    Math.max(MIN_OFFSET_BPS, Math.round(SEED_OFFSET_BPS / 2)),
+  ]) {
+    seedBps = dir * mag
+    seedPick = await probeAt(seedBps)
+    if (seedPick !== null) break
+  }
+  if (seedPick === null) return fallback()
+  if (quoteInZone(seedPick.askUp, zone, band)) return seedPick
+
+  // 3. Interpolate from (ATM, seed) and verify.
+  const interp = solveOffsetForQuote(0, q0, seedBps, seedPick.askUp, target)
+  if (interp !== null) {
+    const p2 = await probeAt(clampOffset(interp))
+    if (p2 !== null) {
+      if (quoteInZone(p2.askUp, zone, band)) return p2
+      // 4. One secant refine: interpolate between the two probed points whose
+      //    quotes most tightly bracket the target (else the two closest).
+      const refine = secantRefineOffset(seen, target)
+      if (refine !== null) {
+        const p3 = await probeAt(clampOffset(refine))
+        if (p3 !== null && quoteInZone(p3.askUp, zone, band)) return p3
+      }
+    }
+  }
+
+  // 5. Best in-band, else ATM.
+  return fallback()
+}
+
+/** Pick the two probed points that best bracket `target` (one above, one
+ *  below) — or the two closest to it — and solve the line through them. */
+function secantRefineOffset(seen: ZonePick[], target: bigint): number | null {
+  let below: ZonePick | null = null
+  let above: ZonePick | null = null
+  for (const p of seen) {
+    if (p.askUp <= target && (below === null || p.askUp > below.askUp)) below = p
+    if (p.askUp >= target && (above === null || p.askUp < above.askUp)) above = p
+  }
+  let a: ZonePick
+  let b: ZonePick
+  if (below !== null && above !== null && below.bps !== above.bps) {
+    a = below
+    b = above
+  } else {
+    const sorted = [...seen].sort((x, y) =>
+      absDiff(x.askUp, target) < absDiff(y.askUp, target) ? -1 : 1,
+    )
+    if (sorted.length < 2 || sorted[0].bps === sorted[1].bps) return null
+    a = sorted[0]
+    b = sorted[1]
+  }
+  return solveOffsetForQuote(a.bps, a.askUp, b.bps, b.askUp, target)
+}
+
+/**
+ * Generate a deck of `oracles.length` cards (one card per oracle). Each
+ * card is steered to its allocated probability zone via `pickStrikeAdaptive`,
+ * so a deck always mixes coin-flips, leans, and long-shots — and no card
+ * quotes outside the configured band (default 20/80) except the rare
+ * ATM-last-resort path.
  *
  * Why we don't go through `buildDeckFromOracles` anymore: the old path
- * picked from a narrow ±1%–±6% bucket which the on-chain pricing
- * frequently rejected on short-dated low-vol oracles, then quietly
- * collapsed to ATM. Players got a 5-card deck that was effectively all
- * coin-flips with no payout variance. The new path probes ±0.5%–±20%
- * and picks whichever passes, so amplitude scales with each oracle's
- * actual liquidity.
+ * picked strike offsets as a % of forward, but offset % was never the
+ * right difficulty knob — the same ±5% is 60/40 on a long-dated oracle
+ * and 95/5 on a short-dated low-vol one. Probing the actual quote and
+ * targeting zones in probability space bounds what the player
+ * experiences directly.
  *
  * Deck-level shape: signs are pre-allocated balanced (`allocateSignBalance`)
- * so a 5-card deck always carries a mix of UP-favoring + DOWN-favoring
- * strikes — players have to read the market both ways, not just swipe
- * one direction.
+ * and zones 2/2/1 (`allocateZones`), both PRG-shuffled from the seed, so a
+ * deck carries a mix of UP-favoring + DOWN-favoring strikes across the
+ * difficulty spread.
  */
 /** ATM strike for an oracle: its forward snapped to the tick grid. The
- *  least-aggressive, most-likely-to-price strike — `pickMaxAmplitudeStrike`
- *  always falls back to it, so if even this fails the probe the oracle has
- *  no viable strike at all (e.g. pricing config unset). */
+ *  least-aggressive, most-likely-to-price strike — `pickStrikeAdaptive`
+ *  always probes it (and falls back to it), so if even this fails the probe
+ *  the oracle has no viable strike at all (e.g. pricing config unset). */
 export function atmStrike(o: OracleSnapshot): bigint {
   return snapToTick(o.forward, o.minStrike, o.tickSize)
 }
@@ -730,8 +1005,8 @@ export function atmStrike(o: OracleSnapshot): bigint {
  * From `candidates` (soonest-first), return the first up-to-`max` oracles
  * whose ATM strike passes `probe`. Oracles with unset pricing config fail
  * every probe — including ATM — so this drops them, letting deck generation
- * survive a few duds as long as enough live oracles remain. Because ATM is
- * `pickMaxAmplitudeStrike`'s last-resort candidate for any sign, an
+ * survive a few duds as long as enough live oracles remain. Because
+ * `pickStrikeAdaptive` always probes ATM (and falls back to it), an
  * ATM-viable oracle is guaranteed to yield a strike in `buildAndProbeDeck`,
  * so the filtered set never triggers its "no viable strike" throw.
  *
@@ -753,7 +1028,7 @@ export async function selectViableOracles(
   const checks = await Promise.all(
     candidates.map((o) => probe(o, atmStrike(o))),
   )
-  return candidates.filter((_, i) => checks[i]).slice(0, max)
+  return candidates.filter((_, i) => checks[i].viable).slice(0, max)
 }
 
 export async function buildAndProbeDeck(
@@ -762,48 +1037,46 @@ export async function buildAndProbeDeck(
   seed: Uint8Array,
   /** Override the per-strike probe — defaults to the real `probeCard`
    *  against the supplied `client`. Tests inject a synthetic function to
-   *  exercise the descend-by-aggressiveness algorithm without RPC. */
+   *  exercise the zone-walk algorithm without RPC. */
   probeOverride?: ProbeFn,
+  band: QuoteBand = envQuoteBand(),
 ): Promise<GeneratedDeck> {
   if (oracles.length === 0) {
     throw new Error("buildAndProbeDeck: at least one oracle required")
   }
   // Route every probe through a shared limiter so the deck-wide fan-out
-  // (~deck_size × candidates concurrent dev_inspects) doesn't trip RPC
+  // (~deck_size × probe-budget concurrent dev_inspects) doesn't trip RPC
   // rate limits. Synthetic test probes are instant, so the limiter is a
   // no-op overhead there.
   const limit = createLimiter(PROBE_CONCURRENCY)
   const rawProbe: ProbeFn =
     probeOverride ?? ((o, strike) => probeCard(client, o, strike))
   const probe: ProbeFn = (o, strike) => limit(() => rawProbe(o, strike))
-  // Burn deterministic per-card sub-seeds off the main stream first so the
-  // parallel `Promise.all` below doesn't race against a shared PRG.
+  // Deck-level shape, drawn deterministically from the seed BEFORE the
+  // parallel per-card picks: balanced signs + shuffled difficulty zones.
+  // The per-card pick itself is deterministic, so nothing below races
+  // against the shared PRG.
   const stream = prgStream(seed)
   const signs = allocateSignBalance(oracles.length, stream)
-  const subSeeds: Uint8Array[] = []
-  for (let i = 0; i < oracles.length; i++) {
-    const sub = new Uint8Array(32)
-    for (let k = 0; k < 32; k++) sub[k] = stream.next().value
-    subSeeds.push(sub)
-  }
-  const fixedCards: DeckCard[] = await Promise.all(
+  const zones = allocateZones(oracles.length, stream)
+  const picks = await Promise.all(
     oracles.map(async (o, i) => {
-      const subStream = prgStream(subSeeds[i])
-      const pick = await pickMaxAmplitudeStrike(o, subStream, probe, signs[i])
+      const pick = await pickStrikeAdaptive(o, zones[i], signs[i], probe, band)
       if (pick === null) {
         throw new Error(
           `oracle ${o.id} has no viable strike (pricing config may be unset)`,
         )
       }
       log.info(
-        `card ${i}: ${o.id.slice(0, 12)}… forward=${o.forward} → strike=${pick.strike} (offset ${pick.bps} bps, side=${signs[i] > 0 ? "DOWN-fav" : "UP-fav"})`,
+        `card ${i}: ${o.id.slice(0, 12)}… zone=${zones[i]} forward=${o.forward} → strike=${pick.strike} (offset ${pick.bps} bps, quote=${(Number(pick.askUp) / 1e9).toFixed(3)}, side=${signs[i] > 0 ? "DOWN-fav" : "UP-fav"})`,
       )
-      return {
-        oracle_id: normalizeSuiAddress(o.id),
-        strike: pick.strike,
-      }
+      return pick
     }),
   )
+  const fixedCards: DeckCard[] = picks.map((p, i) => ({
+    oracle_id: normalizeSuiAddress(oracles[i].id),
+    strike: p.strike,
+  }))
   const bytes = DeckBcs.serialize(
     fixedCards.map((c) => ({
       oracle_id: c.oracle_id,
@@ -811,7 +1084,12 @@ export async function buildAndProbeDeck(
     })),
   ).toBytes()
   const hash = new Uint8Array(createHash("sha256").update(bytes).digest())
-  return { cards: fixedCards, hash, hashHex: hashToHex(hash) }
+  return {
+    cards: fixedCards,
+    hash,
+    hashHex: hashToHex(hash),
+    quotes: picks.map((p) => p.askUp),
+  }
 }
 
 export function buildDeckFromOracles(
@@ -1078,6 +1356,10 @@ export async function handleDeckmasterRequest(
           oracle_id: c.oracle_id,
           strike: c.strike.toString(),
           expiry: chosen[i].expiry.toString(),
+          // Implied probability of UP at generation time, e.g. "0.6250".
+          quote: deck.quotes
+            ? (Number(deck.quotes[i]) / 1e9).toFixed(4)
+            : undefined,
         })),
         hash: deck.hashHex,
         seed: hashToHex(seed),

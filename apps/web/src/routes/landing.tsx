@@ -5,7 +5,7 @@ export default function Landing() {
     <div className="min-h-dvh w-full bg-background text-foreground font-display">
       <div className="mx-auto flex min-h-dvh max-w-3xl flex-col items-center justify-center px-6 text-center">
         <h1 className="text-6xl tracking-tight md:text-8xl">flicky</h1>
-        <p className="mt-4 max-w-md text-balance text-ink-subtle">
+        <p className="mt-6 max-w-md text-balance leading-loose text-ink-subtle">
           Tinder-style PvP prediction duels on Sui. Swipe YES/NO, mint real
           Predict positions, take the pot.
         </p>

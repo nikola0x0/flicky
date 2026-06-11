@@ -3,25 +3,31 @@ import { createHash } from "node:crypto"
 import { bcs } from "@mysten/sui/bcs"
 import {
   allocateSignBalance,
-  atmStrike,
+  allocateZones,
   buildAndProbeDeck,
   buildDeckFromOracles,
   decideDeckSize,
   difficultyOfPct,
-  OFFSET_CANDIDATES_BPS,
   fetchDeck,
   hashToHex,
   knownHashCount,
-  pickMaxAmplitudeStrike,
+  pickStrikeAdaptive,
   rememberDeck,
   resolveDeckBounds,
   selectDeckOracleRows,
   selectViableOracles,
+  quoteInZone,
   snapToTick,
   strikePctOf,
+  zoneDistance,
+  zoneTarget,
+  type GeneratedDeck,
   type OracleRow,
   type OracleSnapshot,
   type ProbeFn,
+  type ProbeResult,
+  type QuoteBand,
+  type Zone,
 } from "./deckmaster"
 
 /** Tiny PRG mirroring the one in deckmaster.ts so tests don't depend on
@@ -216,7 +222,7 @@ describe("hashToHex", () => {
   })
 })
 
-// === pickMaxAmplitudeStrike — the max-amplitude search ===
+// === shared probe fixtures ===
 
 const ONE_ORACLE: OracleSnapshot = {
   id: addr("01"),
@@ -227,111 +233,12 @@ const ONE_ORACLE: OracleSnapshot = {
   tickSize: 1n,
 }
 
-/** Build a probe that accepts strikes within `±maxAbsBps` of forward. */
-function probeWithCeiling(maxAbsBps: number): ProbeFn {
-  return async (o, strike) => {
-    const fwd = o.forward
-    const diff = strike > fwd ? strike - fwd : fwd - strike
-    const absBps = Number((diff * 10_000n) / fwd)
-    return absBps <= maxAbsBps
-  }
+const VIABLE_5050: ProbeResult = {
+  viable: true,
+  askUp: 500_000_000n,
+  askDown: 500_000_000n,
 }
-
-describe("pickMaxAmplitudeStrike", () => {
-  test("when the SVI accepts everything, picks the MOST aggressive (2000 bps)", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      async () => true,
-    )
-    expect(pick).not.toBeNull()
-    expect(Math.abs(pick!.bps)).toBe(2000)
-  })
-
-  test("when SVI caps at ±500 bps, picks exactly ±500 (not lower, not 0)", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probeWithCeiling(500),
-    )
-    expect(pick).not.toBeNull()
-    expect(Math.abs(pick!.bps)).toBe(500)
-  })
-
-  test("when SVI caps at ±150 bps, picks ±100 (next viable down from 150)", async () => {
-    // OFFSET_CANDIDATES_BPS has 200, 100 — 150 is between them, so the
-    // search finds 100 (the most aggressive viable candidate ≤ ceiling).
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probeWithCeiling(150),
-    )
-    expect(pick).not.toBeNull()
-    expect(Math.abs(pick!.bps)).toBe(100)
-  })
-
-  test("when SVI rejects everything except ATM, returns 0 (fallback)", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probeWithCeiling(0),
-    )
-    expect(pick).not.toBeNull()
-    expect(pick!.bps).toBe(0)
-  })
-
-  test("when SVI rejects EVERYTHING (probe always false), returns null", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      async () => false,
-    )
-    expect(pick).toBeNull()
-  })
-
-  test("early-exits: one probe when the most aggressive strike prices", async () => {
-    let calls = 0
-    const probe: ProbeFn = async () => {
-      calls++
-      return true
-    }
-    await pickMaxAmplitudeStrike(ONE_ORACLE, testPrgStream(SEED_A), probe, +1)
-    expect(calls).toBe(1)
-  })
-
-  test("walks no further than needed: ATM-only → exactly ladder+1 probes", async () => {
-    let calls = 0
-    const probe: ProbeFn = async (o, strike) => {
-      calls++
-      return strike === atmStrike(o)
-    }
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probe,
-      +1,
-    )
-    expect(pick!.bps).toBe(0)
-    expect(calls).toBe(OFFSET_CANDIDATES_BPS.length + 1)
-  })
-
-  test("PRG flip alternates UP-side vs DOWN-side at each |bps| level", async () => {
-    // With a permissive probe, both ±2000 work. The PRG decides which sign
-    // ends up first in `ordered` (and therefore which sign Promise.all
-    // returns first). Two different seeds should yield different signs.
-    const seedsTried = new Set<number>()
-    for (let s = 0; s < 16 && seedsTried.size < 2; s++) {
-      const seed = new Uint8Array(32).fill(s)
-      const pick = await pickMaxAmplitudeStrike(
-        ONE_ORACLE,
-        testPrgStream(seed),
-        async () => true,
-      )
-      seedsTried.add(Math.sign(pick!.bps))
-    }
-    expect(seedsTried.size).toBe(2) // saw both +sign and −sign
-  })
-})
+const NOT_VIABLE: ProbeResult = { viable: false, askUp: 0n, askDown: 0n }
 
 describe("allocateSignBalance", () => {
   test("even N → exactly N/2 of each sign", () => {
@@ -386,107 +293,86 @@ describe("allocateSignBalance", () => {
   })
 })
 
-describe("pickMaxAmplitudeStrike with signBias", () => {
-  test("signBias=+1 only returns strike > forward", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      async () => true,
-      +1,
-    )
-    expect(pick).not.toBeNull()
-    expect(pick!.bps).toBeGreaterThan(0)
-    expect(pick!.strike > ONE_ORACLE.forward).toBe(true)
-  })
-
-  test("signBias=-1 only returns strike < forward", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      async () => true,
-      -1,
-    )
-    expect(pick).not.toBeNull()
-    expect(pick!.bps).toBeLessThan(0)
-    expect(pick!.strike < ONE_ORACLE.forward).toBe(true)
-  })
-
-  test("signBias=+1 with capped probe → max |bps| on that side", async () => {
-    const pick = await pickMaxAmplitudeStrike(
-      ONE_ORACLE,
-      testPrgStream(SEED_A),
-      probeWithCeiling(500),
-      +1,
-    )
-    expect(pick!.bps).toBe(500)
-  })
-})
-
 describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
-  test("picks ±500 bps on every card when the SVI ceiling is 500", async () => {
-    const deck = await buildAndProbeDeck(
-      NULL_CLIENT,
-      FIVE_ORACLES,
-      SEED_A,
-      probeWithCeiling(500),
-    )
-    expect(deck.cards).toHaveLength(5)
+  // slope 250_000: edge→|1000|bps (25%/75%), mid→|500| (37.5%/62.5%),
+  // close→ATM (50%).
+  const STEEP = quoteProbe(250_000n)
+
+  function absBpsOf(deck: GeneratedDeck, i: number): number {
+    const fwd = FIVE_ORACLES[i].forward
+    const strike = deck.cards[i].strike
+    const diff = strike > fwd ? strike - fwd : fwd - strike
+    return Number((diff * 10_000n) / fwd)
+  }
+
+  test("5-card deck lands the 2/2/1 zone mix (2 ATM, 2 mid, 1 edge)", async () => {
+    const deck = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    const tally = { 0: 0, 500: 0, 1000: 0 }
     for (let i = 0; i < 5; i++) {
-      const fwd = FIVE_ORACLES[i].forward
-      const strike = deck.cards[i].strike
-      const diff = strike > fwd ? strike - fwd : fwd - strike
-      const absBps = Number((diff * 10_000n) / fwd)
-      expect(absBps).toBe(500)
+      tally[absBpsOf(deck, i) as 0 | 500 | 1000]++
+    }
+    expect(tally[0]).toBe(2) // close zone → ATM
+    expect(tally[500]).toBe(2) // mid
+    expect(tally[1000]).toBe(1) // edge
+  })
+
+  test("every card's quote stays inside the 20/80 band", async () => {
+    const deck = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    expect(deck.quotes).toHaveLength(5)
+    for (const q of deck.quotes!) {
+      expect(q >= 200_000_000n).toBe(true)
+      expect(q <= 800_000_000n).toBe(true)
     }
   })
 
-  test("doesn't collapse to ATM when ANY aggressive offset works (this was the bug)", async () => {
-    // Regression guard: with the old code, ANY probe failure on the
-    // single-bucket PRG pick would collapse to ATM. With the coarse ladder
-    // a probe that allows ±300 bps should land EVERY card at 200 — the most
-    // aggressive rung ≤300 — never ATM.
-    const deck = await buildAndProbeDeck(
-      NULL_CLIENT,
-      FIVE_ORACLES,
-      SEED_A,
-      probeWithCeiling(300),
-    )
-    for (let i = 0; i < 5; i++) {
-      const fwd = FIVE_ORACLES[i].forward
-      const strike = deck.cards[i].strike
-      const diff = strike > fwd ? strike - fwd : fwd - strike
-      const absBps = Number((diff * 10_000n) / fwd)
-      expect(absBps).toBe(200)
-    }
-  })
-
-  test("deck has balanced sign distribution (never all-UP or all-DOWN)", async () => {
-    // 5-card deck → 3+2 of one sign vs other, PRG-picked. Across many
-    // seeds we should see both 3-up-2-down and 3-down-2-up but never 5/0.
-    const distributions = new Set<string>()
+  test("non-ATM strikes appear on both sides of forward across seeds", async () => {
+    const sides = new Set<string>()
     for (let s = 0; s < 16; s++) {
       const seed = new Uint8Array(32).fill(s)
       const deck = await buildAndProbeDeck(
         NULL_CLIENT,
         FIVE_ORACLES,
         seed,
-        async () => true, // accept everything → max amplitude land
+        STEEP,
       )
-      let ups = 0
-      let downs = 0
       for (let i = 0; i < 5; i++) {
         const fwd = FIVE_ORACLES[i].forward
-        const strike = deck.cards[i].strike
-        if (strike > fwd) ups++
-        else if (strike < fwd) downs++
+        if (deck.cards[i].strike > fwd) sides.add("up")
+        if (deck.cards[i].strike < fwd) sides.add("down")
       }
-      expect(Math.max(ups, downs)).toBe(3)
-      expect(Math.min(ups, downs)).toBe(2)
-      distributions.add(`${ups}-${downs}`)
     }
-    // Both 3-2 and 2-3 should appear across 16 seeds.
-    expect(distributions.has("3-2")).toBe(true)
-    expect(distributions.has("2-3")).toBe(true)
+    expect(sides.has("up")).toBe(true)
+    expect(sides.has("down")).toBe(true)
+  })
+
+  test("deterministic — same seed, same hash", async () => {
+    const a = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    const b = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    expect(a.hashHex).toBe(b.hashHex)
+  })
+
+  test("different seed → different zone order → (usually) different hash", async () => {
+    const a = await buildAndProbeDeck(NULL_CLIENT, FIVE_ORACLES, SEED_A, STEEP)
+    const b = await buildAndProbeDeck(
+      NULL_CLIENT,
+      FIVE_ORACLES,
+      SEED_B,
+      STEEP,
+    )
+    expect(a.hashHex).not.toBe(b.hashHex)
+  })
+
+  test("works for 3- and 4-card decks (auto-deck-size)", async () => {
+    for (const n of [3, 4]) {
+      const deck = await buildAndProbeDeck(
+        NULL_CLIENT,
+        FIVE_ORACLES.slice(0, n),
+        SEED_A,
+        STEEP,
+      )
+      expect(deck.cards).toHaveLength(n)
+      expect(deck.quotes).toHaveLength(n)
+    }
   })
 
   test("throws when even ATM is rejected (oracle pricing config unset)", async () => {
@@ -495,7 +381,7 @@ describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
         NULL_CLIENT,
         FIVE_ORACLES,
         SEED_A,
-        async () => false,
+        async () => NOT_VIABLE,
       ),
     ).rejects.toThrow(/no viable strike/)
   })
@@ -660,7 +546,7 @@ describe("selectViableOracles", () => {
   // (mimics an oracle whose pricing config is unset → no viable strike).
   const failing = (...ids: string[]): ProbeFn => {
     const bad = new Set(ids)
-    return async (o) => !bad.has(o.id)
+    return async (o) => (bad.has(o.id) ? NOT_VIABLE : VIABLE_5050)
   }
 
   test("all viable → returns the first `max`, soonest-first", async () => {
@@ -668,7 +554,7 @@ describe("selectViableOracles", () => {
       NULL_CLIENT,
       FIVE_ORACLES,
       3,
-      async () => true,
+      async () => VIABLE_5050,
     )
     expect(out.map((o) => o.id)).toEqual([addr("01"), addr("02"), addr("03")])
   })
@@ -701,5 +587,318 @@ describe("selectViableOracles", () => {
       failing(addr("02"), addr("03"), addr("04"), addr("05")),
     )
     expect(out.map((o) => o.id)).toEqual([addr("01")])
+  })
+})
+
+// === probability zones ===
+
+const BAND: QuoteBand = { min: 200_000_000n, max: 800_000_000n } // 20/80
+
+describe("quoteInZone (default 20/80 band)", () => {
+  test("close = [45%, 55%]", () => {
+    expect(quoteInZone(450_000_000n, "close", BAND)).toBe(true)
+    expect(quoteInZone(500_000_000n, "close", BAND)).toBe(true)
+    expect(quoteInZone(550_000_000n, "close", BAND)).toBe(true)
+    expect(quoteInZone(449_999_999n, "close", BAND)).toBe(false)
+    expect(quoteInZone(550_000_001n, "close", BAND)).toBe(false)
+  })
+
+  test("mid = [30%, 45%) ∪ (55%, 70%]", () => {
+    expect(quoteInZone(300_000_000n, "mid", BAND)).toBe(true)
+    expect(quoteInZone(449_999_999n, "mid", BAND)).toBe(true)
+    expect(quoteInZone(450_000_000n, "mid", BAND)).toBe(false)
+    expect(quoteInZone(550_000_001n, "mid", BAND)).toBe(true)
+    expect(quoteInZone(700_000_000n, "mid", BAND)).toBe(true)
+    expect(quoteInZone(700_000_001n, "mid", BAND)).toBe(false)
+  })
+
+  test("edge = [band-min, 30%) ∪ (70%, band-max]", () => {
+    expect(quoteInZone(200_000_000n, "edge", BAND)).toBe(true)
+    expect(quoteInZone(299_999_999n, "edge", BAND)).toBe(true)
+    expect(quoteInZone(300_000_000n, "edge", BAND)).toBe(false)
+    expect(quoteInZone(700_000_001n, "edge", BAND)).toBe(true)
+    expect(quoteInZone(800_000_000n, "edge", BAND)).toBe(true)
+    expect(quoteInZone(199_999_999n, "edge", BAND)).toBe(false)
+    expect(quoteInZone(800_000_001n, "edge", BAND)).toBe(false)
+  })
+
+  test("tight band collapses edge into mid (spec: DECK_QUOTE_MIN_PROB=0.35)", () => {
+    const tight: QuoteBand = { min: 350_000_000n, max: 650_000_000n }
+    // edge's own intervals are empty → falls back to mid's (clipped).
+    expect(quoteInZone(400_000_000n, "edge", tight)).toBe(true)
+    expect(quoteInZone(500_000_000n, "edge", tight)).toBe(false) // close, not mid
+  })
+
+  test("pathologically tight band collapses everything into the band itself", () => {
+    const tiny: QuoteBand = { min: 480_000_000n, max: 520_000_000n }
+    expect(quoteInZone(500_000_000n, "edge", tiny)).toBe(true)
+    expect(quoteInZone(500_000_000n, "mid", tiny)).toBe(true)
+  })
+})
+
+describe("zoneDistance", () => {
+  test("zero inside the zone", () => {
+    expect(zoneDistance(500_000_000n, "close", BAND)).toBe(0n)
+    expect(zoneDistance(250_000_000n, "edge", BAND)).toBe(0n)
+  })
+
+  test("distance to the nearest interval boundary", () => {
+    // 50% to edge: low interval ends at 30%−1, high starts at 70%+1.
+    expect(zoneDistance(500_000_000n, "edge", BAND)).toBe(200_000_001n)
+    // 25% to close: close starts at 45%.
+    expect(zoneDistance(250_000_000n, "close", BAND)).toBe(200_000_000n)
+  })
+})
+
+describe("zoneTarget", () => {
+  test("close → coin-flip midpoint, both signs", () => {
+    expect(zoneTarget("close", 1, BAND)).toBe(500_000_000n)
+    expect(zoneTarget("close", -1, BAND)).toBe(500_000_000n)
+  })
+
+  test("mid → 0.375 DOWN-fav (low), 0.625 UP-fav (high)", () => {
+    expect(zoneTarget("mid", 1, BAND)).toBe(375_000_000n)
+    expect(zoneTarget("mid", -1, BAND)).toBe(625_000_000n)
+  })
+
+  test("edge → 0.25 DOWN-fav (low), 0.75 UP-fav (high)", () => {
+    expect(zoneTarget("edge", 1, BAND)).toBe(250_000_000n)
+    expect(zoneTarget("edge", -1, BAND)).toBe(750_000_000n)
+  })
+
+  test("targets land inside their own zone", () => {
+    for (const z of ["close", "mid", "edge"] as const) {
+      for (const s of [1, -1] as const) {
+        expect(quoteInZone(zoneTarget(z, s, BAND), z, BAND)).toBe(true)
+      }
+    }
+  })
+
+  test("opposite signs mirror around 0.5", () => {
+    expect(zoneTarget("mid", 1, BAND) + zoneTarget("mid", -1, BAND)).toBe(
+      1_000_000_000n,
+    )
+    expect(zoneTarget("edge", 1, BAND) + zoneTarget("edge", -1, BAND)).toBe(
+      1_000_000_000n,
+    )
+  })
+
+  test("edge outer target follows the band", () => {
+    // Wider band pushes the long-shot/gimme targets further out.
+    const wide: QuoteBand = { min: 100_000_000n, max: 900_000_000n }
+    expect(zoneTarget("edge", 1, wide)).toBe(200_000_000n) // (0.10+0.30)/2
+    expect(zoneTarget("edge", -1, wide)).toBe(800_000_000n) // (0.70+0.90)/2
+  })
+})
+
+describe("allocateZones", () => {
+  const tally = (zones: Zone[]) => ({
+    close: zones.filter((z) => z === "close").length,
+    mid: zones.filter((z) => z === "mid").length,
+    edge: zones.filter((z) => z === "edge").length,
+  })
+
+  test("5 cards → 2 close + 2 mid + 1 edge", () => {
+    expect(tally(allocateZones(5, testPrgStream(SEED_A)))).toEqual({
+      close: 2,
+      mid: 2,
+      edge: 1,
+    })
+  })
+
+  test("4 cards → 1 close + 2 mid + 1 edge", () => {
+    expect(tally(allocateZones(4, testPrgStream(SEED_A)))).toEqual({
+      close: 1,
+      mid: 2,
+      edge: 1,
+    })
+  })
+
+  test("3 cards → 1 of each", () => {
+    expect(tally(allocateZones(3, testPrgStream(SEED_A)))).toEqual({
+      close: 1,
+      mid: 1,
+      edge: 1,
+    })
+  })
+
+  test("degraded small sizes: 2 → close+mid, 1 → close, 0 → empty", () => {
+    expect(tally(allocateZones(2, testPrgStream(SEED_A)))).toEqual({
+      close: 1,
+      mid: 1,
+      edge: 0,
+    })
+    expect(allocateZones(1, testPrgStream(SEED_A))).toEqual(["close"])
+    expect(allocateZones(0, testPrgStream(SEED_A))).toEqual([])
+  })
+
+  test(">5 repeats the 2/2/1 pattern (7 → 4 close + 2 mid + 1 edge)", () => {
+    expect(tally(allocateZones(7, testPrgStream(SEED_A)))).toEqual({
+      close: 4,
+      mid: 2,
+      edge: 1,
+    })
+  })
+
+  test("order varies per seed (PRG-shuffled) and is deterministic per seed", () => {
+    const seen = new Set<string>()
+    for (let s = 0; s < 20; s++) {
+      const seed = new Uint8Array(32).fill(s)
+      seen.add(allocateZones(5, testPrgStream(seed)).join(","))
+    }
+    expect(seen.size).toBeGreaterThan(1)
+    expect(allocateZones(5, testPrgStream(SEED_A))).toEqual(
+      allocateZones(5, testPrgStream(SEED_A)),
+    )
+  })
+})
+
+// Linear quote model for the buildAndProbeDeck e2e block: askUp =
+// 0.5e9 − signedBps × slopePerBp. Strike above forward → UP less likely →
+// askUp < 50%. Monotone, so the adaptive picker's slope estimate is exact.
+function quoteProbe(slopePerBp: bigint): ProbeFn {
+  return async (o, strike) => {
+    const bps = ((strike - o.forward) * 10_000n) / o.forward
+    const askUp = 500_000_000n - bps * slopePerBp
+    if (askUp < 10_000_000n || askUp > 990_000_000n) return NOT_VIABLE
+    return { viable: true, askUp, askDown: 1_000_000_000n - askUp }
+  }
+}
+
+// === pickStrikeAdaptive ===
+
+/**
+ * Synthetic digital-option probe with a LOGISTIC quote in strike-offset
+ * space: askUp = 1/(1+exp(k·bps/100)). ATM → 0.5; +offset → lower UP odds;
+ * larger k = steeper (near-expiry). Mimics the protocol rejecting strikes
+ * whose quote rounds past [1%, 99%] → NOT_VIABLE. Non-linear on purpose —
+ * a linear probe would make interpolation trivially exact and hide bugs.
+ */
+function sigmoidProbe(k: number): ProbeFn {
+  return async (o, strike) => {
+    const bps = Number(((strike - o.forward) * 10_000n) / o.forward)
+    const askUp = 1 / (1 + Math.exp((k * bps) / 100))
+    if (askUp < 0.01 || askUp > 0.99) return NOT_VIABLE
+    const up = BigInt(Math.round(askUp * 1e9))
+    return { viable: true, askUp: up, askDown: 1_000_000_000n - up }
+  }
+}
+
+/** Wrap a probe to count how many times it is called. */
+function counted(probe: ProbeFn): { fn: ProbeFn; calls: () => number } {
+  let n = 0
+  return {
+    fn: async (o, s) => {
+      n++
+      return probe(o, s)
+    },
+    calls: () => n,
+  }
+}
+
+describe("pickStrikeAdaptive", () => {
+  const STEEP = sigmoidProbe(6) // near-expiry-like
+  const GENTLE = sigmoidProbe(2) // fresh-like
+
+  test("steep oracle: edge DOWN-fav lands in the edge zone, strike above forward", async () => {
+    const pick = await pickStrikeAdaptive(ONE_ORACLE, "edge", 1, STEEP, BAND)
+    expect(pick).not.toBeNull()
+    expect(quoteInZone(pick!.askUp, "edge", BAND)).toBe(true)
+    expect(pick!.askUp < 500_000_000n).toBe(true)
+    expect(pick!.strike > ONE_ORACLE.forward).toBe(true)
+  })
+
+  test("steep oracle: edge UP-fav lands in the edge zone, strike below forward", async () => {
+    const pick = await pickStrikeAdaptive(ONE_ORACLE, "edge", -1, STEEP, BAND)
+    expect(quoteInZone(pick!.askUp, "edge", BAND)).toBe(true)
+    expect(pick!.askUp > 500_000_000n).toBe(true)
+    expect(pick!.strike < ONE_ORACLE.forward).toBe(true)
+  })
+
+  for (const [name, probe] of [
+    ["steep", STEEP],
+    ["gentle", GENTLE],
+  ] as const) {
+    test(`${name} oracle: every (zone, sign) lands in its zone, in band`, async () => {
+      for (const zone of ["close", "mid", "edge"] as const) {
+        for (const sign of [1, -1] as const) {
+          const pick = await pickStrikeAdaptive(ONE_ORACLE, zone, sign, probe, BAND)
+          expect(pick).not.toBeNull()
+          expect(pick!.askUp >= BAND.min && pick!.askUp <= BAND.max).toBe(true)
+          expect(quoteInZone(pick!.askUp, zone, BAND)).toBe(true)
+        }
+      }
+    })
+  }
+
+  test("close → ATM in a single probe", async () => {
+    const c = counted(STEEP)
+    const pick = await pickStrikeAdaptive(ONE_ORACLE, "close", 1, c.fn, BAND)
+    expect(pick!.bps).toBe(0)
+    expect(pick!.askUp).toBe(500_000_000n)
+    expect(c.calls()).toBe(1)
+  })
+
+  test("pinned oracle (only ATM viable) → ATM fallback, no throw", async () => {
+    const pinned = sigmoidProbe(100) // even ±7bps rounds past 99% → rejected
+    const pick = await pickStrikeAdaptive(ONE_ORACLE, "edge", 1, pinned, BAND)
+    expect(pick).not.toBeNull()
+    expect(pick!.bps).toBe(0)
+    expect(pick!.askUp).toBe(500_000_000n)
+  })
+
+  test("nothing viable at all → null", async () => {
+    const pick = await pickStrikeAdaptive(
+      ONE_ORACLE,
+      "edge",
+      1,
+      async () => NOT_VIABLE,
+      BAND,
+    )
+    expect(pick).toBeNull()
+  })
+
+  test("respects the 4-probe budget", async () => {
+    for (const zone of ["close", "mid", "edge"] as const) {
+      const c = counted(GENTLE)
+      await pickStrikeAdaptive(ONE_ORACLE, zone, 1, c.fn, BAND)
+      expect(c.calls()).toBeLessThanOrEqual(4)
+    }
+  })
+
+  test("deterministic — same oracle/zone/sign → identical pick", async () => {
+    const a = await pickStrikeAdaptive(ONE_ORACLE, "edge", 1, STEEP, BAND)
+    const b = await pickStrikeAdaptive(ONE_ORACLE, "edge", 1, STEEP, BAND)
+    expect(a!.strike).toBe(b!.strike)
+    expect(a!.askUp).toBe(b!.askUp)
+    expect(a!.bps).toBe(b!.bps)
+  })
+
+  test("reuses a supplied ATM quote (skips the ATM probe)", async () => {
+    const c = counted(STEEP)
+    await pickStrikeAdaptive(ONE_ORACLE, "close", 1, c.fn, BAND, 500_000_000n)
+    // close + known ATM → zero probes needed.
+    expect(c.calls()).toBe(0)
+  })
+
+  test("refine: first interpolation lands in-band but wrong zone → one refine reaches the zone", async () => {
+    // Kinked probe: steep slope (−0.01/bp) within ±15bps, then nearly flat
+    // (−0.001/bp) beyond. A single slope measured at the seed overshoots,
+    // landing the first interpolation in MID; the secant refine corrects it
+    // into EDGE. Linear-everywhere would have hit on the first try.
+    const KINK = 15
+    const kinked: ProbeFn = async (o, strike) => {
+      const bps = Number(((strike - o.forward) * 10_000n) / o.forward)
+      const a = Math.abs(bps)
+      const drop = a <= KINK ? 0.01 * a : 0.01 * KINK + 0.001 * (a - KINK)
+      const askUp = bps >= 0 ? 0.5 - drop : 0.5 + drop
+      if (askUp < 0.01 || askUp > 0.99) return NOT_VIABLE
+      const up = BigInt(Math.round(askUp * 1e9))
+      return { viable: true, askUp: up, askDown: 1_000_000_000n - up }
+    }
+    const c = counted(kinked)
+    const pick = await pickStrikeAdaptive(ONE_ORACLE, "edge", 1, c.fn, BAND)
+    expect(quoteInZone(pick!.askUp, "edge", BAND)).toBe(true)
+    expect(c.calls()).toBe(4) // ATM + seed + interpolate (miss) + 1 refine
   })
 })
