@@ -35,6 +35,19 @@ function fmtUsd(v: string | bigint): string {
   return `$${(Number(v) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
 }
 
+/** Time until a card settles, auto-scaled: ≥1h → "2h 47m", <1h → "47:12",
+ *  ≤0 → "now". Drives the live "settles in …" countdown on the swipe card so
+ *  the player knows the horizon they're predicting. */
+function fmtCountdown(ms: number): string {
+  if (ms <= 0) return "now"
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}h ${m.toString().padStart(2, "0")}m`
+  return `${m}:${s.toString().padStart(2, "0")}`
+}
+
 // Drag-to-swipe tuning — mirrors the lobby DuelView feel.
 const DRAG_COMMIT_FRACTION = 0.3
 const DRAG_MAX_ROTATE_DEG = 18
@@ -453,6 +466,15 @@ function PhaseSwiping({
   const [chartModal, setChartModal] = useState<null | "btc" | "pnl">(null)
   const client = useSuiClient()
 
+  // 1 Hz wall-clock so the "settles in …" countdown ticks. Keyed off nothing
+  // but the interval — does NOT re-quote (that effect keys on the card), so
+  // it won't hammer devInspect.
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
   // ── drag-to-swipe state ──────────────────────────────────────────
   const cardRef = useRef<HTMLDivElement>(null)
   const dragStartX = useRef(0)
@@ -602,6 +624,19 @@ function PhaseSwiping({
   const yesOdds = quoteUp ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(0)}%` : "…"
   const hasNext = cardIdx + 1 < roomState.cards.length
 
+  // Live settle countdown — the horizon the player is predicting over.
+  // Colour ramps cyan → amber → rose as settlement nears.
+  const remainingMs = expiry !== undefined ? Number(expiry) - nowMs : null
+  const countdown = remainingMs !== null ? fmtCountdown(remainingMs) : null
+  const countdownColor =
+    remainingMs === null
+      ? "text-white/50"
+      : remainingMs <= 120_000
+        ? "text-rose-300"
+        : remainingMs <= 600_000
+          ? "text-amber-300"
+          : "text-cyan-300"
+
   // Mascot art reacts to the swipe direction. These are placeholder pixel
   // icons — drop your generated mascot PNGs in `public/cards/` and point
   // CARD_ART at them (e.g. idle: "/cards/coin.png", yes: "/cards/bull.png").
@@ -718,6 +753,21 @@ function PhaseSwiping({
             <p className="mt-1 text-3xl leading-none font-black text-white">
               above {fmtUsd(card.strike)}?
             </p>
+            {countdown && (
+              <p
+                className={`font-pixel mt-1.5 flex items-center gap-1.5 text-sm tracking-[0.2em] uppercase tabular-nums ${countdownColor}`}
+              >
+                <img
+                  src="/icons/clock.png"
+                  alt=""
+                  aria-hidden
+                  className="size-3.5 [image-rendering:pixelated]"
+                />
+                {remainingMs !== null && remainingMs <= 0
+                  ? "settling…"
+                  : `settles in ${countdown}`}
+              </p>
+            )}
           </div>
 
           {/* live stat pills */}
@@ -1011,7 +1061,7 @@ function SettlingHandoff({ duelId }: { duelId: string }) {
         alt=""
         aria-hidden
         draggable={false}
-        className="size-36 select-none [image-rendering:pixelated] [-webkit-user-drag:none] drop-shadow-[0_0_16px_rgba(74,255,154,0.35)]"
+        className="size-56 select-none [image-rendering:pixelated] [-webkit-user-drag:none] drop-shadow-[0_0_22px_rgba(74,255,154,0.4)]"
       />
       <p className="font-pixel text-base tracking-[0.2em] text-emerald-300 uppercase">
         picks locked in
