@@ -67,6 +67,29 @@ export function hexFromBytes(bytes: number[] | string): string {
   return "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
+/**
+ * Classify a settle/redeem failure as terminal — retrying it can never
+ * succeed, so the keeper should mark the duel finalized and stop. Returns
+ * false for transient errors (RPC blips, 429s, timeouts) that should keep
+ * retrying.
+ *
+ * Terminal cases:
+ *   - `flicky::duel` EDuelNotActive (abort code 2): the duel already
+ *     finalized/refunded out from under us. The dry-run budget error shows
+ *     the raw code, not the name, so we also match a bare `2)`.
+ *   - `predict_manager::decrease_position` abort (EInsufficientPosition,
+ *     code 1): a player's Predict position was already redeemed.
+ *     decrease_position has no other abort code, so matching the function
+ *     name is sufficient. Nothing more for the keeper to do.
+ */
+export function isTerminalSettleError(msg: string): boolean {
+  if (msg.includes("EDuelNotActive") || /\babort code: 2\b|\b2\)/.test(msg)) {
+    return true
+  }
+  if (msg.includes("decrease_position")) return true
+  return false
+}
+
 interface RawSwipe {
   fields: { is_up: boolean; quantity: string; premium: string }
 }
@@ -389,9 +412,10 @@ export class Keeper {
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      // EDuelNotActive (code 2) means the duel already finalized/refunded
-      // out from under us — stop retrying it.
-      if (msg.includes("EDuelNotActive") || /\babort code: 2\b|\b2\)/.test(msg)) {
+      // Terminal aborts — the duel already finalized, or a player's Predict
+      // position was already redeemed — can never succeed on retry. Mark the
+      // duel done so the keeper stops re-attempting (and stops logging) it.
+      if (isTerminalSettleError(msg)) {
         this.finalized.add(duelId)
         return
       }

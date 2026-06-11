@@ -4,7 +4,44 @@
  * exercised by `src/scripts/e2e.test.ts` (opt-in live testnet).
  */
 import { describe, expect, test } from "bun:test"
-import { hexFromBytes, parseDuelFromObject, parseSwipe } from "./keeper"
+import {
+  hexFromBytes,
+  isTerminalSettleError,
+  parseDuelFromObject,
+  parseSwipe,
+} from "./keeper"
+
+describe("isTerminalSettleError", () => {
+  test("EDuelNotActive (named) → terminal, stop retrying", () => {
+    expect(
+      isTerminalSettleError("MoveAbort in flicky::duel: EDuelNotActive"),
+    ).toBe(true)
+  })
+
+  test("raw duel abort code 2 → terminal", () => {
+    expect(
+      isTerminalSettleError(
+        'MoveAbort(MoveLocation { module: ModuleId { address: 0xabc, name: Identifier("duel") }, function: 5, instruction: 10, function_name: Some("finalize") }, 2) in command 6',
+      ),
+    ).toBe(true)
+  })
+
+  test("predict_manager::decrease_position abort → terminal (position already redeemed)", () => {
+    // The exact dry-run budget error the keeper hit on a stuck duel: a
+    // redeem aborts because the player's Predict position was already
+    // redeemed (EInsufficientPosition, code 1). Before the fix the keeper
+    // logged this every poll forever.
+    const msg =
+      'Dry run failed, could not automatically determine a budget: MoveAbort(MoveLocation { module: ModuleId { address: f5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138, name: Identifier("predict_manager") }, function: 9, instruction: 24, function_name: Some("decrease_position") }, 1) in command 7'
+    expect(isTerminalSettleError(msg)).toBe(true)
+  })
+
+  test("transient RPC / network error → NOT terminal (keep retrying)", () => {
+    expect(isTerminalSettleError("fetch failed: ECONNRESET")).toBe(false)
+    expect(isTerminalSettleError("Unexpected status code: 429")).toBe(false)
+    expect(isTerminalSettleError("request timed out")).toBe(false)
+  })
+})
 
 describe("hexFromBytes", () => {
   test("string input passes through with 0x lowercase", () => {
