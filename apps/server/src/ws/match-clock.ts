@@ -35,24 +35,30 @@ export function stopMatchClock(): void {
   }
 }
 
-function tick(): void {
+async function tick(): Promise<void> {
   const rooms = subscribedRoomIds()
   if (rooms.length === 0) return
   const now = Date.now()
-  for (const duelId of rooms) {
-    let status: "PENDING" | "ACTIVE" | "COMPLETE" = "PENDING"
-    try {
-      const d = getDuel(duelId)
-      if (d) status = d.status
-    } catch {
-      // db error already logged inside db.ts; keep ticking
-    }
-    if (status === "COMPLETE") continue // no need to push clock after settle
-    broadcastRoom(duelId, {
-      type: "match_tick",
-      duelId,
-      serverNowMs: now,
-      status,
-    })
-  }
+  // Look up every room's status in parallel so one slow query doesn't
+  // stall the whole tick. Each lookup self-handles errors and resolves,
+  // so the outer await never rejects (no unhandled rejection from the
+  // setInterval driver).
+  await Promise.all(
+    rooms.map(async (duelId) => {
+      let status: "PENDING" | "ACTIVE" | "COMPLETE" = "PENDING"
+      try {
+        const d = await getDuel(duelId)
+        if (d) status = d.status
+      } catch {
+        // db error already logged inside db.ts; keep ticking
+      }
+      if (status === "COMPLETE") return // no need to push clock after settle
+      broadcastRoom(duelId, {
+        type: "match_tick",
+        duelId,
+        serverNowMs: now,
+        status,
+      })
+    }),
+  )
 }

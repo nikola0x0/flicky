@@ -1,6 +1,8 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeEach, describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { bcs } from "@mysten/sui/bcs"
+import { closeDb } from "./db"
+import { HAS_TEST_DB, resetTables } from "./test-db"
 import {
   allocateSignBalance,
   allocateZones,
@@ -387,11 +389,20 @@ describe("buildAndProbeDeck (end-to-end with mock probe)", () => {
   })
 })
 
-describe("rememberDeck + fetchDeck", () => {
-  test("round-trips by hash hex", () => {
+// DB-backed: runs only with a TEST_DATABASE_URL (see test-preload.ts).
+describe.skipIf(!HAS_TEST_DB)("rememberDeck + fetchDeck (Postgres store)", () => {
+  beforeEach(async () => {
+    await resetTables()
+  })
+
+  afterAll(async () => {
+    await closeDb()
+  })
+
+  test("round-trips by hash hex", async () => {
     const deck = buildDeckFromOracles(FIVE_ORACLES, SEED_A)
-    const hex = rememberDeck(deck.hash, deck.cards)
-    const fetched = fetchDeck(hex)
+    const hex = await rememberDeck(deck.hash, deck.cards)
+    const fetched = await fetchDeck(hex)
     expect(fetched).toBeDefined()
     expect(fetched).toHaveLength(5)
     for (let i = 0; i < 5; i++) {
@@ -400,28 +411,21 @@ describe("rememberDeck + fetchDeck", () => {
     }
   })
 
-  test("fetchDeck is case-insensitive on hash hex", () => {
+  test("fetchDeck is case-insensitive on hash hex", async () => {
     const deck = buildDeckFromOracles(FIVE_ORACLES, SEED_A)
-    rememberDeck(deck.hash, deck.cards)
-    expect(fetchDeck(deck.hashHex.toUpperCase())).toBeDefined()
+    await rememberDeck(deck.hash, deck.cards)
+    expect(await fetchDeck(deck.hashHex.toUpperCase())).toBeDefined()
   })
 
-  test("fetchDeck returns undefined for unknown hash", () => {
-    expect(fetchDeck("0x" + "ee".repeat(32))).toBeUndefined()
+  test("fetchDeck returns undefined for unknown hash", async () => {
+    expect(await fetchDeck("0x" + "ee".repeat(32))).toBeUndefined()
   })
 
-  test("knownHashCount reflects store after remember", () => {
-    // Use a per-invocation suffix so the on-disk store doesn't already
-    // have this hash from prior test runs.
-    const suffix = (Date.now() % 0xff).toString(16).padStart(2, "0")
-    const deck = buildDeckFromOracles(
-      [...FIVE_ORACLES.slice(0, 4), { ...FIVE_ORACLES[4], id: addr(suffix) }],
-      SEED_A,
-    )
-    const before = knownHashCount()
-    rememberDeck(deck.hash, deck.cards)
-    expect(knownHashCount()).toBeGreaterThanOrEqual(before)
-    expect(knownHashCount()).toBeLessThanOrEqual(before + 1)
+  test("knownHashCount reflects store after remember", async () => {
+    const before = await knownHashCount()
+    const deck = buildDeckFromOracles(FIVE_ORACLES, SEED_A)
+    await rememberDeck(deck.hash, deck.cards)
+    expect(await knownHashCount()).toBe(before + 1)
   })
 })
 

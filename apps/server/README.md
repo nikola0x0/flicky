@@ -13,8 +13,8 @@ src/
 ├── index.ts            # Bun.serve entry + service boot + graceful shutdown
 ├── env.ts              # centralized env loading
 ├── log.ts              # tiny tagged logger
-├── db.ts               # bun:sqlite — cursors, duel mirror, chat, player ratings
-├── deckmaster.ts       # /deckmaster/{generate,reveal} — 5-oracle deck builder + seeded PRG + plaintext store
+├── db.ts               # Bun.sql (Postgres) — cursors, duel mirror, chat, player ratings, deck store
+├── deckmaster.ts       # /deckmaster/{generate,reveal} — 5-oracle deck builder + seeded PRG + Postgres plaintext store
 ├── oracle.ts           # /oracle/list, /oracle/{id} — DeepBook OracleSVI reads
 ├── duels-api.ts        # /duels/recent, /duels/{id} — read from indexer mirror
 ├── leaderboard-api.ts  # /leaderboard — top players by MMR
@@ -110,7 +110,7 @@ See `src/ws/protocol.ts` for exact TypeScript types.
 
 ## Background services
 
-- **Indexer** — polls 6 flicky event types ascending from per-tracker cursors stored in `event_cursor` (SQLite). Refreshes touched duels → mirrors to `duel` table → broadcasts `room_state` to subscribers. Also applies MMR ELO update on `DuelFinalized`. Restart-safe; first boot seeds cursors to latest event so we don't replay history.
+- **Indexer** — polls 6 flicky event types ascending from per-tracker cursors stored in `event_cursor` (Postgres). Refreshes touched duels → mirrors to `duel` table → broadcasts `room_state` to subscribers. Also applies MMR ELO update on `DuelFinalized`. Restart-safe; first boot seeds cursors to latest event so we don't replay history.
 - **Keeper** — sweeps recent duels and runs `reveal_deck` (when plaintext is in the store) → `settle_card × pending` → `redeem_permissionless × N` (dUSDC only) → `finalize` in a single PTB. Permissionless on chain.
 - **Match clock** — every 1 s, pushes `match_tick { serverNowMs, status }` to subscribers of every non-`COMPLETE` room. PRD: "match timing is authoritative from the server."
 - **Oracle stream** — every 2 s, batch-reads every currently-subscribed `OracleSVI` and pushes `oracle_tick` to each oracle's subscribers. Powers the lockup-phase live-mark UI.
@@ -119,9 +119,9 @@ See `src/ws/protocol.ts` for exact TypeScript types.
 
 Toggle: `INDEXER_ENABLED=false` / `KEEPER_ENABLED=false` (background services other than these two always run; they're cheap and need no chain credentials).
 
-## SQLite (`apps/server/.data/flicky.db`)
+## Postgres (Bun.sql)
 
-Single file, WAL mode, `synchronous=NORMAL`, `busy_timeout=2000`. Opens lazily with a smoke-test (insert + read sentinel) so a broken DB fails at boot, not mid-tick.
+All persistence is Postgres, reached through Bun's built-in `Bun.sql` (zero extra deps) over a connection pool built from `DATABASE_URL`. The schema is created on first use (`CREATE TABLE IF NOT EXISTS`, idempotent), so a fresh database needs no migration step. Because the backend is now stateless, it runs as a normal container (no volume) and can fan out across replicas.
 
 | Table | Owner | Purpose |
 |---|---|---|
@@ -129,14 +129,16 @@ Single file, WAL mode, `synchronous=NORMAL`, `busy_timeout=2000`. Opens lazily w
 | `duel` | indexer | mirror of recent duel state for `/duels/*` reads |
 | `chat_message` | chat | global chat backlog, auto-pruned |
 | `player_rating` | mmr | ELO ratings + W/L/T counters |
-| `_smoketest` | db.ts | single-row boot sentinel |
+| `deck` | deckmaster | commit-reveal plaintext keyed by hash (was `.data/decks.json`) |
+
+`DATABASE_URL` is required. On Railway the deployed service references the Postgres plugin's private URL; locally use the public proxy URL or a local Postgres. See `.env.example`.
 
 ## Commands
 
 ```bash
 bun --filter server dev                # bun --watch src/index.ts (default :3001)
 bun --filter server start              # production-style run
-bun --filter server test               # unit tests (fast, no network) — 63 tests
+bun --filter server test               # unit tests — DB suites skip unless TEST_DATABASE_URL is set
 bun --filter server test:e2e           # live testnet E2E (requires ADMIN_SECRET_KEY)
 bun --filter server typecheck          # tsc --noEmit
 bun --filter server deepbook:discover  # list active DeepBook OracleSVI on testnet
@@ -145,18 +147,25 @@ bun --filter server demo:duel          # end-to-end DeepBook-backed duel demo
 
 ## Env
 
-Copy `.env.example` → `.env` and fill what your local run needs. Minimum to boot the HTTP+WS layer: nothing required (sponsor returns 503, keeper logs a warning and stays disabled). For the keeper to settle: `KEEPER_SECRET_KEY` (falls back to `BOT_SECRET_KEY`). For sponsored gas: `ENOKI_PRIVATE_KEY`. Default network is `testnet`; DeepBook + dUSDC ids are baked into `env.ts` defaults so `.env` only carries overrides. To serve mainnet sponsored gas you must also set `FLICKY_PACKAGE_MAINNET` + `DEEPBOOK_PREDICT_PACKAGE_MAINNET` — sponsor throws a clear error rather than approve `0x0` placeholders.
+Copy `.env.example` → `.env` and fill what your local run needs. **`DATABASE_URL` is required** for any DB-backed feature (duel mirror, chat, MMR, deck store). The HTTP/WS layer still boots without it — `/health` answers and reports the DB as unreachable — but the indexer/keeper/chat will error until it's set. For the keeper to settle: `KEEPER_SECRET_KEY` (falls back to `BOT_SECRET_KEY`). For sponsored gas: `ENOKI_PRIVATE_KEY`. Default network is `testnet`; DeepBook + dUSDC ids are baked into `env.ts` defaults so `.env` only carries overrides. To serve mainnet sponsored gas you must also set `FLICKY_PACKAGE_MAINNET` + `DEEPBOOK_PREDICT_PACKAGE_MAINNET` — sponsor throws a clear error rather than approve `0x0` placeholders.
 
-## Deploy
+## Deploy (Railway)
 
-`apps/server/Dockerfile` builds a Bun runtime image. Build from the monorepo root:
+The server + its Postgres both live in one Railway project (workspace **Le Quoc Uy's Projects**). State is in Postgres, so the container is stateless — no volume.
+
+- `railway.json` (repo root) pins the **Dockerfile** builder at `apps/server/Dockerfile` and the `/health` healthcheck.
+- `.railwayignore` / `.dockerignore` keep `node_modules` + **`.env` secrets** out of the build context — env is injected at runtime via Railway service variables.
+- The `flicky-server` service reads `DATABASE_URL=${{Postgres.DATABASE_URL}}` (private network). Add `KEEPER_SECRET_KEY`, `ENOKI_PRIVATE_KEY`, `ALLOWED_ORIGIN` as service variables to light up the keeper / sponsor / CORS.
 
 ```bash
-docker build -f apps/server/Dockerfile -t flicky-server .
-docker run -d --name flicky-server -p 3001:3001 \
-  --env-file apps/server/.env \
-  -v flicky-data:/app/apps/server/.data \
-  flicky-server
+railway up --service flicky-server --ci    # build + deploy current dir
+railway domain --service flicky-server      # mint a public URL
+railway logs --service flicky-server        # tail runtime logs
 ```
 
-`HEALTHCHECK` polls `/health`. Mount the volume on `.data` so SQLite + the deckmaster plaintext store persist across container restarts.
+The same image runs locally for a smoke test (point `DATABASE_URL` at a reachable Postgres):
+
+```bash
+docker build -f apps/server/Dockerfile -t flicky-server .   # from repo root
+docker run --rm -p 3001:3001 -e DATABASE_URL=postgres://… flicky-server
+```

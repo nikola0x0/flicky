@@ -13,18 +13,17 @@
  * On-chain commit-reveal:
  *   - `buildDeck` returns `{ cards, hash }` where hash = sha2-256 of the
  *     BCS-serialized card vector that flicky::duel::reveal_deck expects.
- *   - The plaintext is persisted to `.data/decks.json` so a server
- *     restart doesn't strand pending duels. The keeper or the player's
- *     tab calls `reveal_deck` after `join_duel` lands; we just serve the
- *     plaintext on demand.
+ *   - The plaintext is persisted to the Postgres `deck` table (see db.ts)
+ *     so a server restart doesn't strand pending duels. The keeper or the
+ *     player's tab calls `reveal_deck` after `join_duel` lands; we just
+ *     serve the plaintext on demand.
  */
 import { bcs } from "@mysten/sui/bcs"
 import { Transaction } from "@mysten/sui/transactions"
 import { normalizeSuiAddress, normalizeSuiObjectId } from "@mysten/sui/utils"
 import type { SuiClient } from "@mysten/sui/client"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
+import { countDecks, deleteDeck, getDeck, upsertDeck } from "./db"
 import { env } from "./env"
 import { makeLogger } from "./log"
 
@@ -1150,98 +1149,66 @@ export function hashToHex(hash: Uint8Array): string {
   )
 }
 
-// ─── Plaintext persistence ──────────────────────────────────────────────────
+// ─── Plaintext persistence (Postgres `deck` table) ───────────────────────────
 //
-// Each entry stores the cards plus the seed used to derive their strikes.
-// `seed` is optional for backwards-compat with stores from before the
-// deterministic-seed change (those decks were generated from the fixed
-// STRIKE_PCTS array and have no seed).
+// Was apps/server/.data/decks.json — now one row per commitment (keyed by
+// the lowercased "0x…" sha2-256 hash) so the store survives restarts with
+// no mounted volume and is shared across any future server replicas. Each
+// entry holds the revealed cards plus the seed used to derive their
+// strikes; `seedHex` is optional for back-compat with decks generated
+// before the deterministic-seed change.
 
-interface StoreEntry {
+export interface StoreEntry {
   cards: DeckCard[]
   seedHex?: string
 }
 
-const store: Map<string, StoreEntry> = loadStore()
-
-function loadStore(): Map<string, StoreEntry> {
-  const path = env.deckmasterStorePath
-  if (!existsSync(path)) return new Map()
-  try {
-    const raw = readFileSync(path, "utf-8")
-    const obj = JSON.parse(raw) as Record<
-      string,
-      | Array<{ oracle_id: string; strike: string }>
-      | { cards: Array<{ oracle_id: string; strike: string }>; seedHex?: string }
-    >
-    const m = new Map<string, StoreEntry>()
-    for (const [hex, entry] of Object.entries(obj)) {
-      // Legacy: bare cards array. New: { cards, seedHex }.
-      const cardsRaw = Array.isArray(entry) ? entry : entry.cards
-      const seedHex = Array.isArray(entry) ? undefined : entry.seedHex
-      m.set(hex.toLowerCase(), {
-        cards: cardsRaw.map((c) => ({
-          oracle_id: c.oracle_id,
-          strike: BigInt(c.strike),
-        })),
-        seedHex,
-      })
-    }
-    return m
-  } catch (e) {
-    log.warn(
-      `failed to load ${path}: ${e instanceof Error ? e.message : String(e)}`,
-    )
-    return new Map()
-  }
+/** Cards serialize to JSON with strikes as decimal strings (u64 > 2^53). */
+function serializeCards(cards: DeckCard[]): string {
+  return JSON.stringify(
+    cards.map((c) => ({ oracle_id: c.oracle_id, strike: c.strike.toString() })),
+  )
 }
 
-function persistStore(): void {
-  const obj: Record<string, { cards: Array<{ oracle_id: string; strike: string }>; seedHex?: string }> = {}
-  for (const [hex, entry] of store.entries()) {
-    obj[hex] = {
-      cards: entry.cards.map((c) => ({
-        oracle_id: c.oracle_id,
-        strike: c.strike.toString(),
-      })),
-      seedHex: entry.seedHex,
-    }
-  }
-  try {
-    mkdirSync(dirname(env.deckmasterStorePath), { recursive: true })
-    writeFileSync(env.deckmasterStorePath, JSON.stringify(obj, null, 2), "utf-8")
-  } catch (e) {
-    log.warn(
-      `failed to persist ${env.deckmasterStorePath}: ${e instanceof Error ? e.message : String(e)}`,
-    )
-  }
+function deserializeCards(json: string): DeckCard[] {
+  const arr = JSON.parse(json) as Array<{ oracle_id: string; strike: string }>
+  return arr.map((c) => ({ oracle_id: c.oracle_id, strike: BigInt(c.strike) }))
 }
 
-export function rememberDeck(
+export async function rememberDeck(
   hash: Uint8Array,
   cards: DeckCard[],
   seed?: Uint8Array,
-): string {
+): Promise<string> {
   const hex = hashToHex(hash)
-  store.set(hex, { cards, seedHex: seed ? hashToHex(seed) : undefined })
-  persistStore()
+  await upsertDeck(hex, serializeCards(cards), seed ? hashToHex(seed) : null)
   return hex
 }
 
-export function fetchDeck(hashHex: string): DeckCard[] | undefined {
-  return store.get(hashHex.toLowerCase())?.cards
+export async function fetchDeck(
+  hashHex: string,
+): Promise<DeckCard[] | undefined> {
+  const row = await getDeck(hashHex)
+  return row ? deserializeCards(row.cardsJson) : undefined
 }
 
-export function fetchDeckEntry(hashHex: string): StoreEntry | undefined {
-  return store.get(hashHex.toLowerCase())
+export async function fetchDeckEntry(
+  hashHex: string,
+): Promise<StoreEntry | undefined> {
+  const row = await getDeck(hashHex)
+  if (!row) return undefined
+  return {
+    cards: deserializeCards(row.cardsJson),
+    seedHex: row.seedHex ?? undefined,
+  }
 }
 
-export function forgetDeck(hashHex: string): void {
-  if (store.delete(hashHex.toLowerCase())) persistStore()
+export async function forgetDeck(hashHex: string): Promise<void> {
+  await deleteDeck(hashHex)
 }
 
-export function knownHashCount(): number {
-  return store.size
+export async function knownHashCount(): Promise<number> {
+  return countDecks()
 }
 
 // ─── HTTP routes ────────────────────────────────────────────────────────────
@@ -1350,7 +1317,7 @@ export async function handleDeckmasterRequest(
         nonceHex,
       })
       const deck = await buildAndProbeDeck(client, chosen, seed)
-      rememberDeck(deck.hash, deck.cards, seed)
+      await rememberDeck(deck.hash, deck.cards, seed)
       return json({
         cards: deck.cards.map((c, i) => ({
           oracle_id: c.oracle_id,
@@ -1379,7 +1346,7 @@ export async function handleDeckmasterRequest(
   if (url.pathname === "/deckmaster/reveal" && req.method === "GET") {
     const hash = url.searchParams.get("hash")
     if (!hash) return json({ error: "hash param required" }, 400)
-    const entry = fetchDeckEntry(hash)
+    const entry = await fetchDeckEntry(hash)
     if (!entry) return json({ error: "unknown hash" }, 404)
     return json({
       cards: entry.cards.map((c) => ({

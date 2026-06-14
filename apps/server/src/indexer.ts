@@ -305,7 +305,7 @@ async function fetchDuel(
   // duel is already COMPLETE, preserve mirror's outcomes.
   if (cardOutcomes.length === 0 && status === "COMPLETE") {
     try {
-      cardOutcomes = getDuel(normalizeSuiObjectId(id))?.cardOutcomes ?? []
+      cardOutcomes = (await getDuel(normalizeSuiObjectId(id)))?.cardOutcomes ?? []
     } catch {
       cardOutcomes = []
     }
@@ -363,7 +363,7 @@ export class DuelIndexer {
    * DuelCreated events for backfill, so we don't lose live duels.
    */
   private async seedCursor(eventType: string): Promise<void> {
-    if (loadCursor(eventType)) return
+    if (await loadCursor(eventType)) return
     try {
       const head = await this.client.queryEvents({
         query: { MoveEventType: eventType },
@@ -372,7 +372,7 @@ export class DuelIndexer {
       })
       const e = head.data[0]
       if (e) {
-        saveCursor(eventType, { txDigest: e.id.txDigest, eventSeq: e.id.eventSeq })
+        await saveCursor(eventType, { txDigest: e.id.txDigest, eventSeq: e.id.eventSeq })
         log.info(`seed ${eventName(eventType)} @ ${shortId(e.id.txDigest)}/${e.id.eventSeq}`)
       }
     } catch (e) {
@@ -396,7 +396,7 @@ export class DuelIndexer {
       settlementPrice: string | null
     }>,
   ): Promise<void> {
-    let cursor: EventCursor | null = loadCursor(eventType)
+    let cursor: EventCursor | null = await loadCursor(eventType)
     // Soft cap: at most 10 pages per tracker per tick. Prevents one
     // overflowing tracker from starving the others.
     for (let page = 0; page < 10; page++) {
@@ -443,9 +443,9 @@ export class DuelIndexer {
           if (winner) {
             const settlementPrice =
               (p.primary_settlement_price as string | undefined) ?? null
-            const row = (() => {
+            const row = await (async () => {
               try {
-                return getDuel(duelId)
+                return await getDuel(duelId)
               } catch {
                 return null
               }
@@ -465,7 +465,7 @@ export class DuelIndexer {
           txDigest: res.nextCursor.txDigest,
           eventSeq: res.nextCursor.eventSeq,
         }
-        saveCursor(eventType, next)
+        await saveCursor(eventType, next)
         cursor = next
       }
       if (!res.hasNextPage) return
@@ -515,7 +515,7 @@ export class DuelIndexer {
             ? "p0_win"
             : "p1_win"
       try {
-        applyDuelOutcome(f.p0, f.p1, outcome)
+        await applyDuelOutcome(f.p0, f.p1, outcome)
       } catch (e) {
         log.warn(`mmr ${shortId(f.duelId)}: ${describeError(e)}`)
       }
@@ -528,7 +528,7 @@ export class DuelIndexer {
     // Mirror to SQLite so /duels endpoints can serve without re-hitting
     // chain. Best-effort: a DB failure shouldn't block the broadcast.
     try {
-      upsertDuel({
+      await upsertDuel({
         id: d.id,
         status: d.status,
         stakeCoinType: d.stakeCoinType,
@@ -571,7 +571,6 @@ export class DuelIndexer {
   }
 
   async start(): Promise<void> {
-    log.info(`db=${env.dbPath}`)
     for (const t of this.eventTypes) await this.seedCursor(t)
     log.info(`poll every ${env.indexerPollIntervalMs}ms across ${this.eventTypes.length} trackers`)
     const loop = async () => {

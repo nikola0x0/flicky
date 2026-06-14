@@ -46,13 +46,13 @@ import {
 } from "./ws/oracle-stream"
 import { DuelIndexer } from "./indexer"
 import { Keeper } from "./keeper"
-import { closeDb, listCursors } from "./db"
+import { closeDb, listCursors, ready } from "./db"
 
 const log = makeLogger("server")
 
-function safeListCursors(): unknown {
+async function safeListCursors(): Promise<unknown> {
   try {
-    return listCursors().map((c) => ({
+    return (await listCursors()).map((c) => ({
       tracker: c.trackerId.split("::").pop(),
       txDigest: c.txDigest,
       eventSeq: c.eventSeq,
@@ -80,12 +80,19 @@ const server = Bun.serve({
     if (req.method === "OPTIONS") return corsPreflight()
 
     if (url.pathname === "/health") {
+      // Both reads hit Postgres — run them together and degrade
+      // gracefully (null / error payload) so /health still answers even
+      // if the DB is briefly unreachable.
+      const [decks, cursors] = await Promise.all([
+        knownHashCount().catch(() => null),
+        safeListCursors(),
+      ])
       return json({
         ok: true,
         port: env.port,
         network: env.network,
         flickyPackageId: env.flickyPackageId,
-        decks: knownHashCount(),
+        decks,
         ws: {
           connectedAddresses: connectedAddressCount(),
           rooms: roomCount(),
@@ -102,7 +109,7 @@ const server = Bun.serve({
             ? "enabled"
             : "disabled",
         },
-        cursors: safeListCursors(),
+        cursors,
         oracleStream: oracleStreamStats(),
       })
     }
@@ -122,10 +129,10 @@ const server = Bun.serve({
     const oracle = await handleOracleRequest(req, url)
     if (oracle) return oracle
 
-    const duels = handleDuelsRequest(req, url)
+    const duels = await handleDuelsRequest(req, url)
     if (duels) return duels
 
-    const leaderboard = handleLeaderboardRequest(req, url)
+    const leaderboard = await handleLeaderboardRequest(req, url)
     if (leaderboard) return leaderboard
 
     return new Response("Go to /docs for documentation", { status: 200, headers: CORS_HEADERS })
@@ -162,6 +169,15 @@ if (!env.flickyPackageId) {
 // Boot in parallel after the fetch handler is live so a startup hiccup
 // in either subsystem doesn't take down the HTTP/WS server.
 
+// Create the Postgres schema up front so a bad DATABASE_URL surfaces in
+// the logs at boot rather than on the first duel. Non-fatal: the HTTP/WS
+// layer still answers (and /health reports the DB state) if this fails.
+void ready()
+  .then(() => log.info("postgres schema ready"))
+  .catch((e) =>
+    log.error(`postgres init failed: ${e instanceof Error ? e.message : String(e)}`),
+  )
+
 if (env.indexerEnabled && env.flickyPackageId) {
   const indexer = new DuelIndexer(getSuiClient(), env.flickyPackageId)
   void indexer.start()
@@ -193,7 +209,7 @@ if (env.keeperEnabled && env.keeperSecretKey && env.flickyPackageId) {
 // Closing the DB explicitly flushes the WAL and releases the file lock so
 // the next boot doesn't trip the disk-I/O smoke test on a stale handle.
 
-function shutdown(signal: string): void {
+async function shutdown(signal: string): Promise<void> {
   log.info(`received ${signal}, shutting down`)
   stopMatchClock()
   stopOracleStream()
@@ -202,9 +218,11 @@ function shutdown(signal: string): void {
   } catch (e) {
     log.warn(`server.stop failed: ${e instanceof Error ? e.message : String(e)}`)
   }
-  closeDb()
+  // Close the pool so in-flight queries drain and connections are
+  // released cleanly before the process exits.
+  await closeDb()
   process.exit(0)
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"))
-process.on("SIGTERM", () => shutdown("SIGTERM"))
+process.on("SIGINT", () => void shutdown("SIGINT"))
+process.on("SIGTERM", () => void shutdown("SIGTERM"))

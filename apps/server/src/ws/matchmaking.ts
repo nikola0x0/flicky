@@ -65,7 +65,7 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
     nonceHex,
   })
   const deck = await buildAndProbeDeck(client, oracles, seed)
-  rememberDeck(deck.hash, deck.cards, seed)
+  await rememberDeck(deck.hash, deck.cards, seed)
   // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields
   // `0x0x…` which decodes to 33 bytes and trips create_duel's 32-byte
   // assert.
@@ -186,12 +186,12 @@ export async function joinQueue(ws: AnyWs, tier: Tier): Promise<void> {
   // no one in the bucket is close enough yet (the candidate keeps
   // waiting — their window will widen and a future joiner will pair).
   const myRating = ws.data.address
-    ? getPlayerRating(ws.data.address).rating
+    ? (await getPlayerRating(ws.data.address)).rating
     : env.mmrInitialRating
   const candidates = q
     .filter((w) => w.data.address && w.data.address !== ws.data.address)
     .map((w) => ({ ws: w, address: w.data.address!, queuedAtMs: w.data.queuedAt }))
-  const pick = findClosestOpponent(
+  const pick = await findClosestOpponent(
     myRating,
     ws.data.queuedAt,
     candidates.map((c) => ({ address: c.address, queuedAtMs: c.queuedAtMs })),

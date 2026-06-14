@@ -239,7 +239,7 @@ export class Keeper {
       return
     }
     if (duel.status !== "ACTIVE") return
-    const plaintext = fetchDeck(duel.deckHashHex)
+    const plaintext = await fetchDeck(duel.deckHashHex)
     if (!plaintext) return
 
     const tx = new Transaction()

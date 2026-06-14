@@ -85,15 +85,16 @@ export const env = {
   // (1%/99%) are far looser than what makes a fun prediction.
   deckQuoteMinProb: Number(process.env.DECK_QUOTE_MIN_PROB ?? 0.2),
   deckQuoteMaxProb: Number(process.env.DECK_QUOTE_MAX_PROB ?? 0.8),
-  deckmasterStorePath:
-    process.env.DECKMASTER_STORE_PATH ??
-    resolve(import.meta.dir, "../.data/decks.json"),
-
-  // SQLite — single file, shared by indexer cursor + any future
-  // mirror tables. Override per environment via FLICKY_DB_PATH.
-  dbPath:
-    process.env.FLICKY_DB_PATH ??
-    resolve(import.meta.dir, "../.data/flicky.db"),
+  // Postgres (Bun.sql). All persistence — indexer cursors, the duel
+  // mirror, chat, player ratings, and the deckmaster plaintext store —
+  // lives here. On Railway the deployed service reads the private
+  // `DATABASE_URL` (postgres.railway.internal); local dev / tests point
+  // at the public proxy URL. No default: a missing URL fails fast at
+  // first query so a misconfigured deploy doesn't silently lose data.
+  databaseUrl: process.env.DATABASE_URL,
+  // Connection-pool ceiling for Bun.sql. Railway's starter Postgres caps
+  // at a modest max_connections; 10 leaves headroom for psql / migrations.
+  dbPoolMax: Number(process.env.DB_POOL_MAX ?? 10),
 
   // Sponsored gas (Enoki).
   enokiPrivateKey: process.env.ENOKI_PRIVATE_KEY,

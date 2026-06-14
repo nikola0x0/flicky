@@ -1,0 +1,5 @@
+[test]
+# Runs before any test file loads. Maps TEST_DATABASE_URL → DATABASE_URL so
+# DB-backed suites only ever hit an explicit throwaway Postgres, never a real
+# DATABASE_URL that might be sitting in .env.
+preload = ["./test-preload.ts"]

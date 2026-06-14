@@ -35,7 +35,7 @@ type AnyWs = ServerWebSocket<SocketState>
 
 // ─── Chat (global) ──────────────────────────────────────────────────────────
 
-export function handleChatSend(ws: AnyWs, text: unknown): void {
+export async function handleChatSend(ws: AnyWs, text: unknown): Promise<void> {
   if (!ws.data.address) {
     _sendInternal(ws, {
       type: "error",
@@ -56,7 +56,7 @@ export function handleChatSend(ws: AnyWs, text: unknown): void {
   if (trimmed.length === 0) return
 
   try {
-    const row = insertChatMessage(ws.data.address, trimmed)
+    const row = await insertChatMessage(ws.data.address, trimmed)
     broadcastAll({
       type: "chat_message",
       id: row.id,
@@ -75,9 +75,9 @@ export function handleChatSend(ws: AnyWs, text: unknown): void {
   }
 }
 
-export function sendChatHistory(ws: AnyWs): void {
+export async function sendChatHistory(ws: AnyWs): Promise<void> {
   try {
-    const rows = recentChatMessages(env.chatHistoryLimit)
+    const rows = await recentChatMessages(env.chatHistoryLimit)
     _sendInternal(ws, {
       type: "chat_history",
       messages: rows.map((r) => ({
@@ -94,9 +94,9 @@ export function sendChatHistory(ws: AnyWs): void {
 
 /** Periodic prune — keeps the table from growing forever. */
 export function startChatPruneLoop(): void {
-  const tick = () => {
+  const tick = async () => {
     try {
-      const dropped = pruneChatMessages(env.chatRetainCount)
+      const dropped = await pruneChatMessages(env.chatRetainCount)
       if (dropped > 0) log.info(`pruned ${dropped} old messages`)
     } catch (e) {
       log.warn(`prune failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -111,7 +111,11 @@ export function startChatPruneLoop(): void {
 
 // ─── Emoji reactions (room-scoped) ──────────────────────────────────────────
 
-export function handleChatReact(ws: AnyWs, duelId: unknown, emoji: unknown): void {
+export async function handleChatReact(
+  ws: AnyWs,
+  duelId: unknown,
+  emoji: unknown,
+): Promise<void> {
   if (!ws.data.address) {
     _sendInternal(ws, { type: "error", code: "no_address", message: "say hello first" })
     return
@@ -140,7 +144,7 @@ export function handleChatReact(ws: AnyWs, duelId: unknown, emoji: unknown): voi
   // room-broadcast if the duel hasn't been indexed yet (very early
   // PENDING state before the indexer's first sweep) so the reaction
   // still lands somewhere visible.
-  const duel = getDuel(duelId)
+  const duel = await getDuel(duelId)
   if (duel && duel.creator && duel.challenger) {
     const audience = [duel.creator, duel.challenger]
     sendToAddresses(audience, msg)

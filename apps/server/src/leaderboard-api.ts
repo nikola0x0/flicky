@@ -7,13 +7,16 @@
 import { topLeaderboard } from "./mmr"
 import { json } from "./lib/http"
 
-export function handleLeaderboardRequest(req: Request, url: URL): Response | null {
+export async function handleLeaderboardRequest(
+  req: Request,
+  url: URL,
+): Promise<Response | null> {
   if (url.pathname !== "/leaderboard" || req.method !== "GET") return null
   const limitRaw = url.searchParams.get("limit")
   const limit = Math.min(100, Math.max(1, Number(limitRaw ?? 20)))
   try {
     return json({
-      players: topLeaderboard(limit).map((p) => ({
+      players: (await topLeaderboard(limit)).map((p) => ({
         address: p.address,
         rating: p.rating,
         gamesPlayed: p.gamesPlayed,
