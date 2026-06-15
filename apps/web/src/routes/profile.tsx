@@ -2,6 +2,7 @@ import { useState } from "react"
 import type { CSSProperties } from "react"
 import { Navigate, useLocation, useNavigate } from "react-router"
 import { setPendingSwipe } from "@/lib/nav-transition"
+import { DeviceFrame } from "@/components/device-frame"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { BalanceChip } from "@/components/balance-chip"
@@ -66,8 +67,8 @@ export default function Profile() {
   const short = shortAddress(address)
 
   return (
-    <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
-      <div className="pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl bg-[#1b2548] font-pixel text-white sm:max-h-[900px]">
+    <>
+      <DeviceFrame className="bg-[#1b2548]">
         <ProfileHeader
           onBack={() => {
             // Tell the game outlet to swipe in from the left on its next mount.
@@ -204,7 +205,7 @@ export default function Profile() {
             </div>
           </section>
         </main>
-      </div>
+      </DeviceFrame>
 
       <DepositModal
         open={depositOpen}
@@ -216,7 +217,7 @@ export default function Profile() {
         address={address}
         onClose={() => setWithdrawOpen(false)}
       />
-    </div>
+    </>
   )
 }
 

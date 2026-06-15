@@ -29,6 +29,7 @@ import {
   useManagerBalance,
 } from "@/hooks/use-wallet-balances"
 import { clearPendingSwipe, peekPendingSwipe } from "@/lib/nav-transition"
+import { DeviceFrame } from "@/components/device-frame"
 
 const SIGN_IN_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -79,35 +80,31 @@ export default function GameLayout() {
 
   return (
     <>
-      <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
-        <div
-          className={`pixel-frame relative isolate flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl font-pixel text-white sm:max-h-[900px] ${isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}`}
-        >
-          {isPlay && (
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-0 -z-10 bg-cover bg-top bg-no-repeat [image-rendering:pixelated]"
-              style={{
-                backgroundImage:
-                  "linear-gradient(180deg, rgba(10,14,30,0.6) 0%, rgba(16,20,40,0.32) 22%, rgba(16,22,46,0.45) 62%, #10162e 100%), url(/duel/duel-bg.png)",
-              }}
-            />
-          )}
-          <FrameHeader
-            onSignInClick={() => setLoginOpen(true)}
-            onAddClick={() => setDepositOpen(true)}
-            signedOut={!account && !isPublicRoute}
+      <DeviceFrame className={isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}>
+        {isPlay && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10 bg-cover bg-top bg-no-repeat [image-rendering:pixelated]"
+            style={{
+              backgroundImage:
+                "linear-gradient(180deg, rgba(10,14,30,0.6) 0%, rgba(16,20,40,0.32) 22%, rgba(16,22,46,0.45) 62%, #10162e 100%), url(/duel/duel-bg.png)",
+            }}
           />
-          <main className="flex-1 overflow-hidden">
-            {showOutlet ? (
-              <GameOutletTransition context={outletContext} />
-            ) : (
-              <SignedOutPrompt />
-            )}
-          </main>
-          <FrameBottomNav />
-        </div>
-      </div>
+        )}
+        <FrameHeader
+          onSignInClick={() => setLoginOpen(true)}
+          onAddClick={() => setDepositOpen(true)}
+          signedOut={!account && !isPublicRoute}
+        />
+        <main className="flex-1 overflow-hidden">
+          {showOutlet ? (
+            <GameOutletTransition context={outletContext} />
+          ) : (
+            <SignedOutPrompt />
+          )}
+        </main>
+        <FrameBottomNav />
+      </DeviceFrame>
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
       {account && (
