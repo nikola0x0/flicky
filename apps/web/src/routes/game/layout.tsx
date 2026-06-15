@@ -28,6 +28,7 @@ import {
   useDusdcBalance,
   useManagerBalance,
 } from "@/hooks/use-wallet-balances"
+import { clearPendingSwipe, peekPendingSwipe } from "@/lib/nav-transition"
 
 const SIGN_IN_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -144,6 +145,9 @@ function SignedOutPrompt() {
 function GameOutletTransition({ context }: { context: GameOutletContext }) {
   const location = useLocation()
   const prevPathRef = useRef<string | null>(null)
+  // Swipe direction handed over from a sibling top-level route (returning from
+  // /profile), applied only to this component's very first render.
+  const [crossRouteSwipe] = useState(peekPendingSwipe)
 
   const tabIndex = (path: string) => NAV_TABS.findIndex((t) => t.to === path)
   const prevIdx = prevPathRef.current ? tabIndex(prevPathRef.current) : -1
@@ -157,11 +161,22 @@ function GameOutletTransition({ context }: { context: GameOutletContext }) {
         : currIdx < prevIdx
           ? "route-swipe-from-left"
           : ""
+  } else if (!prevPathRef.current && crossRouteSwipe) {
+    // First mount arriving from another route tree (e.g. back from /profile).
+    animClass = crossRouteSwipe
   }
 
   useEffect(() => {
     prevPathRef.current = location.pathname
   }, [location.pathname])
+
+  useEffect(() => {
+    // Retire the cross-route signal after mount so a later game mount (the
+    // landing→game CRT) doesn't inherit it. The delay clears it past React
+    // StrictMode's dev remount, which would otherwise consume it too early.
+    const t = setTimeout(clearPendingSwipe, 500)
+    return () => clearTimeout(t)
+  }, [])
 
   return (
     <div
@@ -236,11 +251,13 @@ function HeaderBalances({
   const { data: dusdc } = useDusdcBalance()
   const { data: managerInfo } = useManagerBalance()
   const managerBalance = managerInfo?.balance ?? 0
+  const location = useLocation()
   return (
     <div className="flex items-center gap-5">
       <Link
         to="/profile"
         aria-label="open profile"
+        state={{ from: location.pathname }}
         className="transition-opacity hover:opacity-85"
       >
         <PlayerAvatar address={address} size={56} />

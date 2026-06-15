@@ -132,7 +132,7 @@ function Hero() {
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-4 2xl:mt-11 2xl:gap-6">
             <PixelButton
-              onClick={() => navigate("/game/home")}
+              onClick={() => navigate("/game/home", { viewTransition: true })}
               className="h-12 px-7 text-base lg:h-14 lg:px-9 lg:text-lg 2xl:h-[68px] 2xl:px-12 2xl:text-2xl"
             >
               ▶ enter the game
