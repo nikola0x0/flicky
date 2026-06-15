@@ -215,7 +215,10 @@ function GameOutletTransition({ context }: { context: GameOutletContext }) {
       key={location.pathname}
       // overflow-x-hidden: a swiped card flies off at translateX(160%); without
       // this the page becomes horizontally scrollable (and shows a scrollbar).
-      className={`h-full overflow-x-hidden overflow-y-auto ${animClass}`}
+      // Scrollbar hidden so a transient content-height bump (e.g. the play
+      // screen's "minting position…" state) doesn't pop a bar that reflows
+      // the whole frame width — content stays scrollable, just no visible bar.
+      className={`h-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${animClass}`}
     >
       <Outlet context={context} />
     </div>
