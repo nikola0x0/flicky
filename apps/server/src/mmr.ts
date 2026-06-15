@@ -16,7 +16,14 @@
  *      has been waiting. New players (no rating row yet) get the default
  *      `MMR_INITIAL_RATING`.
  */
-import { getPlayerRating, leaderboard, upsertPlayerRating } from "./db"
+import {
+  clearPlayerRatings,
+  getPlayerRating,
+  leaderboard,
+  listRecentDuels,
+  upsertPlayerRating,
+  type DuelRow,
+} from "./db"
 import { env } from "./env"
 import { makeLogger, shortId } from "./log"
 
@@ -82,6 +89,67 @@ export function applyDuelOutcome(
     p1Before: b.rating,
     p1After: newB,
   }
+}
+
+/**
+ * Outcome of a finished duel. Prefers the authoritative `winner` recorded
+ * from the on-chain DuelFinalized event; for older rows that predate that
+ * column it falls back to the contract's own rule — the head-to-head net
+ * comparison, i.e. `p0_net` vs `p1_net` (see the duel-table schema note:
+ * "winner determined by (p0_payout + p1_premium) vs (p1_payout +
+ * p0_premium)", which is algebraically the same). NOT the sign of p0's net
+ * alone, which mislabels close duels where both sides netted the same way.
+ */
+function outcomeFromDuel(d: DuelRow): DuelOutcome {
+  if (d.winner === "p0") return "p0_win"
+  if (d.winner === "p1") return "p1_win"
+  if (d.winner === "tie") return "tie"
+  const p0Net = BigInt(d.p0Payout) - BigInt(d.p0Premium)
+  const p1Net = BigInt(d.p1Payout) - BigInt(d.p1Premium)
+  if (p0Net > p1Net) return "p0_win"
+  if (p1Net > p0Net) return "p1_win"
+  return "tie"
+}
+
+/**
+ * Rebuild the entire player_rating table from the duel mirror by replaying
+ * every COMPLETE duel through the ELO step in finalization order.
+ *
+ * Why this exists: live rating updates (`applyDuelOutcome` from the
+ * indexer's `DuelFinalized` handler) are stream-only and not
+ * reconstructable — if the rating DB is reset or the event cursor advances
+ * past a finalization, those ratings are lost even though the duel mirror
+ * still has the COMPLETE rows. This recompute makes the leaderboard a pure
+ * function of the mirror, so it's correct after any reset and safe to
+ * re-run (it wipes first).
+ *
+ * ELO is order-dependent, so we replay oldest → newest by `lastUpdatedMs`
+ * (the mirror's finalization-time proxy). Run with the indexer stopped —
+ * the DB is single-writer and a live finalization mid-replay would be
+ * double-counted.
+ */
+export function recomputeRatingsFromMirror(): {
+  cleared: number
+  applied: number
+  skipped: number
+} {
+  const cleared = clearPlayerRatings()
+  // listRecentDuels returns newest-first; reverse for chronological replay.
+  const complete = listRecentDuels(1_000_000, "COMPLETE").reverse()
+  let applied = 0
+  let skipped = 0
+  for (const d of complete) {
+    if (!d.creator || !d.challenger) {
+      skipped++
+      continue
+    }
+    applyDuelOutcome(d.creator, d.challenger, outcomeFromDuel(d))
+    applied++
+  }
+  log.info(
+    `recompute: cleared ${cleared} row(s), applied ${applied} duel(s), skipped ${skipped}`,
+  )
+  return { cleared, applied, skipped }
 }
 
 // ─── Window-expanding pair selection ────────────────────────────────────────

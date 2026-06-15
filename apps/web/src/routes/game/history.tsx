@@ -3,6 +3,7 @@ import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 import { CONFIG } from "@/lib/config"
 import { fmtPnlPct } from "@/lib/pnl"
+import { playerDuelResult } from "@/lib/duel-result"
 import { PixelButton } from "@/components/pixel-button"
 import type { CSSProperties } from "react"
 
@@ -26,6 +27,7 @@ interface DuelRow {
   p0Premium: string
   p1Payout: string
   p1Premium: string
+  winner?: "p0" | "p1" | "tie" | null
   startedAtMs: number
   lastUpdatedMs: number
 }
@@ -130,12 +132,13 @@ function MatchRow({ duel, address }: { duel: DuelRow; address: string }) {
   const hasOpponent = Boolean(opponent) && opponent !== ZERO_ADDR
 
   // Net settled PnL for my side — the contract's `payout - premium`,
-  // final once the duel is COMPLETE.
+  // final once the duel is COMPLETE. Used for the return % only; the
+  // win/loss chip uses the authoritative head-to-head result below.
   const myPayout = BigInt(myIsP0 ? duel.p0Payout : duel.p1Payout)
   const myPremium = BigInt(myIsP0 ? duel.p0Premium : duel.p1Premium)
   const net = myPayout - myPremium
 
-  const result = duelResult(duel.status, net)
+  const result = duelResult(duel, address)
 
   return (
     <li>
@@ -184,12 +187,11 @@ function MatchRow({ duel, address }: { duel: DuelRow; address: string }) {
 
 type ResultKind = "live" | "win" | "loss" | "push" | "pending"
 
-function duelResult(status: DuelRow["status"], net: bigint): ResultKind {
-  if (status === "ACTIVE") return "live"
-  if (status === "PENDING") return "pending"
-  if (net > 0n) return "win"
-  if (net < 0n) return "loss"
-  return "push"
+function duelResult(duel: DuelRow, address: string): ResultKind {
+  if (duel.status === "ACTIVE") return "live"
+  if (duel.status === "PENDING") return "pending"
+  const r = playerDuelResult(duel, address)
+  return r === "win" ? "win" : r === "loss" ? "loss" : "push"
 }
 
 const CHIP_STYLES: Record<ResultKind, string> = {

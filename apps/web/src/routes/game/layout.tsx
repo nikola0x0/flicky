@@ -16,7 +16,7 @@ export interface GameOutletContext {
 // Routes that render even when signed out — used to showcase features
 // (e.g. the swap) before login. Everything else falls back to the
 // unified <SignedOutPrompt>.
-const PUBLIC_ROUTES = new Set<string>(["/game/shop"])
+const PUBLIC_ROUTES = new Set<string>(["/game/shop", "/game/rank"])
 
 import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"

@@ -57,6 +57,11 @@ export function getDb(): Database {
         p0_premium      TEXT NOT NULL DEFAULT '0',
         p1_payout       TEXT NOT NULL DEFAULT '0',
         p1_premium      TEXT NOT NULL DEFAULT '0',
+        -- Authoritative duel result recorded live from DuelFinalized:
+        -- 'p0' (creator), 'p1' (challenger), or 'tie'. NULL for duels not
+        -- yet finalized, or finalized before this column existed (those
+        -- fall back to the head-to-head net rule documented above).
+        winner          TEXT,
         started_at_ms   INTEGER NOT NULL DEFAULT 0,
         -- JSON array of per-card outcomes (one entry per settled card,
         -- written incrementally by the indexer on CardSettled events).
@@ -83,6 +88,7 @@ export function getDb(): Database {
       `ALTER TABLE duel ADD COLUMN started_at_ms INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE duel ADD COLUMN swipes TEXT NOT NULL DEFAULT '[]'`,
       `ALTER TABLE duel ADD COLUMN cards TEXT NOT NULL DEFAULT '[]'`,
+      `ALTER TABLE duel ADD COLUMN winner TEXT`,
     ]) {
       try {
         _db.exec(stmt)
@@ -253,6 +259,9 @@ export interface CardOutcome {
   p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
 }
 
+/** Which side won a finished duel: creator (p0), challenger (p1), or a tie. */
+export type DuelWinner = "p0" | "p1" | "tie"
+
 export interface DuelRow {
   id: string
   status: "PENDING" | "ACTIVE" | "COMPLETE"
@@ -262,6 +271,13 @@ export interface DuelRow {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
+  /**
+   * Authoritative duel result from the on-chain DuelFinalized event, or
+   * null if not yet finalized / finalized before this was recorded.
+   * Optional in the write type: `upsertDuel` never sets it (so a refresh
+   * can't clobber it) — only `setDuelWinner` does.
+   */
+  winner?: DuelWinner | null
   /** Cumulative real-PnL fields. See contract `Duel.p{0,1}_payout/premium`. */
   p0Payout: string
   p0Premium: string
@@ -340,6 +356,21 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
 }
 
 /**
+ * Record the authoritative winner of a finished duel. Written separately
+ * from `upsertDuel` so the indexer's per-tick refresh (which doesn't know
+ * the winner) can't clobber it. No-op if the duel row isn't mirrored yet.
+ */
+export function setDuelWinner(duelId: string, winner: DuelWinner): void {
+  try {
+    getDb()
+      .query("UPDATE duel SET winner = ? WHERE id = ?")
+      .run(winner, duelId)
+  } catch (e) {
+    log.error(`setDuelWinner(${duelId}): ${describeError(e)}`)
+  }
+}
+
+/**
  * Merge a freshly-emitted CardSettled outcome into the duel's
  * card_outcomes JSON array. Idempotent: if an outcome already exists
  * for this card_idx it's overwritten (later event wins).
@@ -392,6 +423,7 @@ interface DuelRowRaw {
   p0_premium: string
   p1_payout: string
   p1_premium: string
+  winner: string | null
   started_at_ms: number
   card_outcomes: string
   swipes: string
@@ -431,6 +463,7 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
     p0Premium: r.p0_premium,
     p1Payout: r.p1_payout,
     p1Premium: r.p1_premium,
+    winner: (r.winner as DuelWinner | null) ?? null,
     startedAtMs: r.started_at_ms,
     cardOutcomes: outcomes,
     swipes,
@@ -611,6 +644,15 @@ export function upsertPlayerRating(r: PlayerRating): void {
       r.ties,
       r.lastUpdatedMs,
     )
+}
+
+/**
+ * Wipe the entire player_rating table. Used by the ratings backfill,
+ * which recomputes ELO from scratch by replaying COMPLETE duels — the
+ * table must start empty so the replay isn't added on top of stale rows.
+ */
+export function clearPlayerRatings(): number {
+  return getDb().run("DELETE FROM player_rating").changes
 }
 
 export function leaderboard(limit: number): PlayerRating[] {

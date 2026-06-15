@@ -19,6 +19,7 @@ import PlayDuel from "@/routes/game/play.tsx"
 import DuelView from "@/routes/game/duel-view.tsx"
 import GameHistory from "@/routes/game/history.tsx"
 import GameShop from "@/routes/game/shop.tsx"
+import GameRank from "@/routes/game/rank.tsx"
 import GameComingSoon from "@/routes/game/coming-soon.tsx"
 
 const router = createBrowserRouter([
@@ -37,7 +38,7 @@ const router = createBrowserRouter([
       { path: "history", element: <GameHistory /> },
       { path: "practice", element: <GameComingSoon /> },
       { path: "shop", element: <GameShop /> },
-      { path: "rank", element: <GameComingSoon /> },
+      { path: "rank", element: <GameRank /> },
       { path: "inventory", element: <GameComingSoon /> },
     ],
   },
