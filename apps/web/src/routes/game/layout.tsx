@@ -28,6 +28,8 @@ import {
   useDusdcBalance,
   useManagerBalance,
 } from "@/hooks/use-wallet-balances"
+import { clearPendingSwipe, peekPendingSwipe } from "@/lib/nav-transition"
+import { DeviceFrame } from "@/components/device-frame"
 
 const SIGN_IN_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -78,35 +80,36 @@ export default function GameLayout() {
 
   return (
     <>
-      <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
-        <div
-          className={`pixel-frame relative isolate flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl font-pixel text-white sm:max-h-[900px] ${isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}`}
-        >
-          {isPlay && (
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-0 -z-10 bg-cover bg-top bg-no-repeat [image-rendering:pixelated]"
-              style={{
-                backgroundImage:
-                  "linear-gradient(180deg, rgba(10,14,30,0.6) 0%, rgba(16,20,40,0.32) 22%, rgba(16,22,46,0.45) 62%, #10162e 100%), url(/duel/duel-bg.png)",
-              }}
-            />
-          )}
+      <DeviceFrame className={isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}>
+        {isPlay && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10 bg-cover bg-top bg-no-repeat [image-rendering:pixelated]"
+            style={{
+              backgroundImage:
+                "linear-gradient(180deg, rgba(10,14,30,0.6) 0%, rgba(16,20,40,0.32) 22%, rgba(16,22,46,0.45) 62%, #10162e 100%), url(/duel/duel-bg.png)",
+            }}
+          />
+        )}
+        {/* On the signed-out empty state the header's only control is a
+            sign-in button, now redundant with the centered CTA below — so
+            drop the header there and let the prompt own the full area. */}
+        {showOutlet && (
           <FrameHeader
             onSignInClick={() => setLoginOpen(true)}
             onAddClick={() => setDepositOpen(true)}
             signedOut={!account && !isPublicRoute}
           />
-          <main className="flex-1 overflow-hidden">
-            {showOutlet ? (
-              <GameOutletTransition context={outletContext} />
-            ) : (
-              <SignedOutPrompt />
-            )}
-          </main>
-          <FrameBottomNav />
-        </div>
-      </div>
+        )}
+        <main className="flex-1 overflow-hidden">
+          {showOutlet ? (
+            <GameOutletTransition context={outletContext} />
+          ) : (
+            <SignedOutPrompt onSignIn={() => setLoginOpen(true)} />
+          )}
+        </main>
+        <FrameBottomNav />
+      </DeviceFrame>
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
       {account && (
@@ -120,15 +123,45 @@ export default function GameLayout() {
   )
 }
 
-function SignedOutPrompt() {
+/**
+ * Unified empty-state for signed-out, non-public game routes. Instead of
+ * telling the user to hunt for the header button, it shows a pixel-cartoon
+ * hero and a big centered "sign in to play" CTA that opens the same login
+ * modal. The hero image (`/game/sign-in-hero.png`) self-hides if missing,
+ * so a checkout without the art still renders a clean, working prompt.
+ */
+function SignedOutPrompt({ onSignIn }: { onSignIn: () => void }) {
+  const [artFailed, setArtFailed] = useState(false)
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-      <p className="text-base tracking-[0.15em] text-white uppercase">
-        sign in to continue
-      </p>
-      <p className="text-sm text-white/55">
-        use the sign-in button in the header
-      </p>
+    <div className="flex h-full flex-col items-center justify-center gap-8 px-6 pb-32 text-center">
+      <div className="flex flex-col items-center gap-0">
+        {!artFailed && (
+          <img
+            src="/game/sign-in-hero.png"
+            alt=""
+            aria-hidden
+            onError={() => setArtFailed(true)}
+            className="-mb-10 w-72 max-w-[88%] [image-rendering:pixelated] drop-shadow-[0_8px_0_rgba(0,0,0,0.35)]"
+          />
+        )}
+        <p className="text-3xl tracking-[0.15em] text-white uppercase">
+          ready to duel?
+        </p>
+        <p className="text-lg leading-relaxed text-white/60">
+          sign in to swipe, stake, and take the pot.
+        </p>
+      </div>
+      <PixelButton onClick={onSignIn} className="h-16 px-12 text-xl">
+        <span className="flex items-center gap-2.5">
+          <img
+            src="/icons/portrait.png"
+            alt=""
+            aria-hidden
+            className="size-7 [image-rendering:pixelated]"
+          />
+          sign in to play
+        </span>
+      </PixelButton>
     </div>
   )
 }
@@ -144,6 +177,9 @@ function SignedOutPrompt() {
 function GameOutletTransition({ context }: { context: GameOutletContext }) {
   const location = useLocation()
   const prevPathRef = useRef<string | null>(null)
+  // Swipe direction handed over from a sibling top-level route (returning from
+  // /profile), applied only to this component's very first render.
+  const [crossRouteSwipe] = useState(peekPendingSwipe)
 
   const tabIndex = (path: string) => NAV_TABS.findIndex((t) => t.to === path)
   const prevIdx = prevPathRef.current ? tabIndex(prevPathRef.current) : -1
@@ -157,11 +193,22 @@ function GameOutletTransition({ context }: { context: GameOutletContext }) {
         : currIdx < prevIdx
           ? "route-swipe-from-left"
           : ""
+  } else if (!prevPathRef.current && crossRouteSwipe) {
+    // First mount arriving from another route tree (e.g. back from /profile).
+    animClass = crossRouteSwipe
   }
 
   useEffect(() => {
     prevPathRef.current = location.pathname
   }, [location.pathname])
+
+  useEffect(() => {
+    // Retire the cross-route signal after mount so a later game mount (the
+    // landing→game CRT) doesn't inherit it. The delay clears it past React
+    // StrictMode's dev remount, which would otherwise consume it too early.
+    const t = setTimeout(clearPendingSwipe, 500)
+    return () => clearTimeout(t)
+  }, [])
 
   return (
     <div
@@ -236,11 +283,13 @@ function HeaderBalances({
   const { data: dusdc } = useDusdcBalance()
   const { data: managerInfo } = useManagerBalance()
   const managerBalance = managerInfo?.balance ?? 0
+  const location = useLocation()
   return (
     <div className="flex items-center gap-5">
       <Link
         to="/profile"
         aria-label="open profile"
+        state={{ from: location.pathname }}
         className="transition-opacity hover:opacity-85"
       >
         <PlayerAvatar address={address} size={56} />

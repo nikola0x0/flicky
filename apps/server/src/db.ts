@@ -117,6 +117,19 @@ export function getDb(): Database {
     `)
     _db.exec(`CREATE INDEX IF NOT EXISTS player_rating_lb
               ON player_rating (rating DESC)`)
+    // Owner → PredictManager id cache. The manager is a SHARED object with
+    // an internal `owner` field, so it can't be found via getOwnedObjects —
+    // discovery means walking `PredictManagerCreated` events newest-first
+    // (see predict.ts::findManagerFor). That scan is unbounded and grows
+    // with testnet churn, so we memoize the resolved id here: a manager's
+    // owner never changes, making this cache effectively permanent.
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS predict_manager (
+        owner       TEXT PRIMARY KEY,
+        manager_id  TEXT NOT NULL,
+        cached_at   INTEGER NOT NULL
+      )
+    `)
     smokeTest(_db)
     log.info(`opened ${env.dbPath} (WAL)`)
     return _db
@@ -629,6 +642,46 @@ export function leaderboard(limit: number): PlayerRating[] {
     ties: r.ties,
     lastUpdatedMs: r.last_updated_ms,
   }))
+}
+
+// ─── PredictManager cache ───────────────────────────────────────────────────
+
+/**
+ * Resolved manager id for `owner`, or null if we've never cached one.
+ * A cache hit lets `findManagerFor` skip the on-chain event scan entirely.
+ */
+export function getCachedManager(owner: string): string | null {
+  try {
+    const row = getDb()
+      .query<{ manager_id: string }, [string]>(
+        "SELECT manager_id FROM predict_manager WHERE owner = ?",
+      )
+      .get(owner)
+    return row?.manager_id ?? null
+  } catch (e) {
+    log.error(`getCachedManager(${owner}): ${describeError(e)}`)
+    return null
+  }
+}
+
+/**
+ * Memoize `owner → managerId`. Upserts so a re-bootstrapped owner (one who
+ * minted a fresh manager) overwrites the stale id on next discovery.
+ */
+export function cacheManager(owner: string, managerId: string): void {
+  try {
+    getDb()
+      .query(
+        `INSERT INTO predict_manager (owner, manager_id, cached_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(owner) DO UPDATE SET
+           manager_id = excluded.manager_id,
+           cached_at  = excluded.cached_at`,
+      )
+      .run(owner, managerId, Date.now())
+  } catch (e) {
+    log.error(`cacheManager(${owner}): ${describeError(e)}`)
+  }
 }
 
 // ─── Cursors (existing) ─────────────────────────────────────────────────────

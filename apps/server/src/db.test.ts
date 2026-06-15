@@ -112,3 +112,37 @@ describe("close + reopen", () => {
     expect(second).toEqual({ txDigest: "live-thru-reopen", eventSeq: "42" })
   })
 })
+
+describe("predict_manager cache", () => {
+  beforeEach(() => {
+    dbModule.getDb().exec("DELETE FROM predict_manager")
+  })
+
+  test("getCachedManager returns null when no row exists", () => {
+    expect(dbModule.getCachedManager("0xowner")).toBeNull()
+  })
+
+  test("cacheManager inserts; getCachedManager reads it back", () => {
+    dbModule.cacheManager("0xowner", "0xmgr")
+    expect(dbModule.getCachedManager("0xowner")).toBe("0xmgr")
+  })
+
+  test("cacheManager upserts — a re-bootstrapped manager overwrites the old id", () => {
+    dbModule.cacheManager("0xowner", "0xmgr-old")
+    dbModule.cacheManager("0xowner", "0xmgr-new")
+    expect(dbModule.getCachedManager("0xowner")).toBe("0xmgr-new")
+  })
+
+  test("different owners have independent manager ids", () => {
+    dbModule.cacheManager("0xalice", "0xmgr-a")
+    dbModule.cacheManager("0xbob", "0xmgr-b")
+    expect(dbModule.getCachedManager("0xalice")).toBe("0xmgr-a")
+    expect(dbModule.getCachedManager("0xbob")).toBe("0xmgr-b")
+  })
+
+  test("cache survives a closeDb / getDb reopen cycle", () => {
+    dbModule.cacheManager("0xpersist", "0xmgr-persist")
+    dbModule.closeDb()
+    expect(dbModule.getCachedManager("0xpersist")).toBe("0xmgr-persist")
+  })
+})
