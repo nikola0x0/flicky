@@ -12,3 +12,6 @@ dist
 apps/web/dist
 .data
 **/.data
+# Local reference clones — not part of the build.
+temp
+**/temp
