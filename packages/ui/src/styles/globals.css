@@ -636,20 +636,38 @@
 }
 
 /* ─── Landing → game "CRT power-on" transition ──────────────────────
-   Opt-in only: fires for navigations that pass React Router's
-   `viewTransition: true` (currently just the landing "enter the game"
-   CTA). The screen cuts to a black void, the old page blinks out, then
-   the new page snaps open from a bright center scanline and expands
-   vertically with a quick flicker — an old-TV switch-on. The in-frame
-   route-swipe above is class-based (no View Transitions API), so it
-   never triggers these and there's no conflict. */
-::view-transition {
+   Opt-in via `html[data-crt]`, set imperatively by the landing "enter
+   the game" CTA right before it navigates (and self-cleared after the
+   animation). The screen cuts to a black void, the old page blinks out,
+   then the new page snaps open from a bright center scanline and expands
+   vertically — an old-TV switch-on.
+
+   Why the attribute gate rather than relying on `viewTransition: true`
+   alone: React Router re-applies the View Transitions API on browser
+   back/forward for any history entry originally created with
+   `viewTransition: true`. A global `::view-transition(root)` rule would
+   therefore replay the CRT whenever the user pops across the landing↔game
+   boundary. Gating on `[data-crt]` — which only the CTA sets — keeps the
+   CRT to the intentional forward navigation; every other view transition
+   (incl. back/forward) falls through to the instant-cut default below.
+
+   The in-frame route-swipe above is class-based (no View Transitions
+   API), so it never triggers these and there's no conflict. */
+
+/* Default for any non-CRT view transition (e.g. browser back/forward):
+   instant cut, no UA cross-fade. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
+
+html[data-crt]::view-transition {
   background-color: #000; /* the black void the screen powers on from */
 }
-::view-transition-old(root) {
+html[data-crt]::view-transition-old(root) {
   animation: crt-power-off 160ms ease-in both;
 }
-::view-transition-new(root) {
+html[data-crt]::view-transition-new(root) {
   animation: crt-power-on 620ms cubic-bezier(0.16, 1, 0.3, 1) both;
   transform-origin: center;
 }
@@ -678,8 +696,8 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  ::view-transition-old(root),
-  ::view-transition-new(root) {
+  html[data-crt]::view-transition-old(root),
+  html[data-crt]::view-transition-new(root) {
     animation: none;
   }
 }

@@ -158,10 +158,10 @@ export function PlayerHeroCard({ address }: { address: string }) {
       <div className="flex items-center gap-3">
         <PlayerAvatar address={address} size={56} />
         <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="truncate text-sm tracking-[0.18em] uppercase">
+          <span className="truncate text-base tracking-[0.18em] uppercase">
             {shortAddr(address)}
           </span>
-          <div className="flex items-center gap-2 text-xs tracking-[0.18em] uppercase">
+          <div className="flex items-center gap-2 text-sm tracking-[0.18em] uppercase">
             <span
               className={`rounded px-2 py-0.5 ring-1 ring-inset ${tierStyle.ring} ${tierStyle.text}`}
             >
@@ -174,7 +174,7 @@ export function PlayerHeroCard({ address }: { address: string }) {
         </div>
       </div>
 
-      <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs tracking-[0.18em] uppercase">
+      <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm tracking-[0.18em] uppercase">
         <StatChip
           label="wins"
           value={stats ? stats.wins.toString() : "—"}
@@ -208,8 +208,8 @@ function StatChip({
 }) {
   return (
     <div className="flex flex-col gap-0.5 rounded bg-black/25 px-2 py-1.5">
-      <span className="text-[10px] text-white/55">{label}</span>
-      <span className={`text-lg tabular-nums ${valueClass}`}>{value}</span>
+      <span className="text-xs text-white/55">{label}</span>
+      <span className={`text-xl tabular-nums ${valueClass}`}>{value}</span>
     </div>
   )
 }

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { Link, useNavigate } from "react-router"
+import { Link, useNavigate, type NavigateFunction } from "react-router"
 import { PixelButton } from "@/components/pixel-button"
 import { CONFIG } from "@/lib/config"
 
@@ -20,6 +20,19 @@ import { CONFIG } from "@/lib/config"
  * badge/step icons all degrade to styled placeholders if the file is
  * missing, so a fresh checkout without the art never renders broken.
  */
+
+// CSS gates the CRT power-on keyframes behind `html[data-crt]` so the
+// effect fires only for this intentional forward navigation — not when the
+// browser replays the view transition on back/forward across the boundary.
+// Set the flag, navigate, then retire it once the ~620ms animation is done.
+const CRT_DURATION_MS = 800
+function enterGameWithCrt(navigate: NavigateFunction) {
+  document.documentElement.dataset.crt = ""
+  navigate("/game/home", { viewTransition: true })
+  window.setTimeout(() => {
+    delete document.documentElement.dataset.crt
+  }, CRT_DURATION_MS)
+}
 
 const GITHUB_URL = "https://github.com/nikola0x0/flicky"
 const DEEPBOOK_URL = "https://deepbook.tech"
@@ -132,7 +145,7 @@ function Hero() {
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-4 2xl:mt-11 2xl:gap-6">
             <PixelButton
-              onClick={() => navigate("/game/home", { viewTransition: true })}
+              onClick={() => enterGameWithCrt(navigate)}
               className="h-12 px-7 text-base lg:h-14 lg:px-9 lg:text-lg 2xl:h-[68px] 2xl:px-12 2xl:text-2xl"
             >
               ▶ enter the game

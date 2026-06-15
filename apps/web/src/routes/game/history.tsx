@@ -100,7 +100,7 @@ export default function GameHistory() {
       {!address ? (
         <Empty body="connect a wallet to see your matches." />
       ) : sorted === null ? (
-        <p className="px-1 py-6 text-center text-xs tracking-[0.18em] text-white/55 uppercase">
+        <p className="px-1 py-6 text-center text-sm tracking-[0.18em] text-white/55 uppercase">
           loading…
         </p>
       ) : sorted.length === 0 ? (
@@ -146,10 +146,10 @@ function MatchRow({ duel, address }: { duel: DuelRow; address: string }) {
         <div className="flex min-w-0 items-center gap-3">
           <ResultChip kind={result} />
           <div className="flex min-w-0 flex-col">
-            <span className="truncate text-sm tracking-wider uppercase">
+            <span className="truncate text-base tracking-wider uppercase">
               {hasOpponent ? `vs ${shortAddr(opponent)}` : "waiting for opponent"}
             </span>
-            <span className="text-[10px] tracking-[0.18em] text-white/45 uppercase tabular-nums">
+            <span className="text-xs tracking-[0.18em] text-white/45 uppercase tabular-nums">
               {relativeTime(duel.lastUpdatedMs || duel.startedAtMs)}
             </span>
           </div>
@@ -158,18 +158,18 @@ function MatchRow({ duel, address }: { duel: DuelRow; address: string }) {
         <div className="flex shrink-0 flex-col items-end">
           {duel.status === "COMPLETE" ? (
             <span
-              className={`text-base tabular-nums ${pnlColor(net, myPremium)}`}
+              className={`text-lg tabular-nums ${pnlColor(net, myPremium)}`}
             >
               {fmtPnlPct(net, myPremium)}
             </span>
           ) : duel.status === "ACTIVE" ? (
-            <span className="text-base text-white tabular-nums">
+            <span className="text-lg text-white tabular-nums">
               {duel.settledCount}/{duel.cardCount || 5}
             </span>
           ) : (
-            <span className="text-sm text-white/55 uppercase">pending</span>
+            <span className="text-base text-white/55 uppercase">pending</span>
           )}
-          <span className="text-[10px] tracking-[0.18em] text-white/40 uppercase">
+          <span className="text-xs tracking-[0.18em] text-white/40 uppercase">
             {duel.status === "ACTIVE"
               ? "settled"
               : duel.status === "COMPLETE"
@@ -211,7 +211,7 @@ const CHIP_LABEL: Record<ResultKind, string> = {
 function ResultChip({ kind }: { kind: ResultKind }) {
   return (
     <span
-      className={`flex items-center gap-1.5 rounded px-2 py-1 text-[10px] tracking-[0.18em] uppercase ${CHIP_STYLES[kind]}`}
+      className={`flex items-center gap-1.5 rounded px-2 py-1 text-xs tracking-[0.18em] uppercase ${CHIP_STYLES[kind]}`}
     >
       {kind === "live" && (
         <span className="inline-block size-1.5 animate-pulse rounded-full bg-emerald-400" />
@@ -228,15 +228,15 @@ function Empty({ body, cta }: { body: string; cta?: boolean }) {
         src="/icons/swords.png"
         alt=""
         aria-hidden
-        className="size-10 opacity-60 [image-rendering:pixelated]"
+        className="size-12 opacity-60 [image-rendering:pixelated]"
       />
-      <p className="max-w-[28ch] text-xs leading-relaxed tracking-wider text-white/55 uppercase">
+      <p className="max-w-[28ch] text-sm leading-relaxed tracking-wider text-white/55 uppercase">
         {body}
       </p>
       {cta && (
         <Link
           to="/game/pvp"
-          className="mt-1 rounded border border-white/30 bg-white/5 px-3 py-1 text-xs tracking-wider uppercase hover:bg-white/10"
+          className="mt-1 rounded border border-white/30 bg-white/5 px-3 py-1 text-sm tracking-wider uppercase hover:bg-white/10"
         >
           find a duel
         </Link>

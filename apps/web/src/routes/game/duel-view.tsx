@@ -276,7 +276,7 @@ export default function DuelView() {
   const settledCount = Math.max(duel.settledCount, onChainSettled)
 
   return (
-    <div className="relative isolate flex h-full flex-col gap-3 overflow-y-auto px-4 py-4 font-pixel text-white">
+    <div className="relative isolate flex h-full flex-col gap-3 overflow-y-auto px-4 py-4 font-pixel text-white [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {/* Decorative header banner — sits behind the top ~40% of the
           duel view, fading into the page's navy background. Scrolls
           with the content (absolute inside the overflow container)
@@ -300,14 +300,14 @@ export default function DuelView() {
         <StatusBadge status={duel.status} />
       </header>
 
-      <div className="grid grid-cols-2 gap-2 text-sm tracking-wider uppercase">
+      <div className="grid grid-cols-2 gap-2 text-base tracking-wider uppercase">
         <div className="flex flex-col gap-1 rounded bg-black/30 px-3 py-2 backdrop-blur-sm">
-          <span className="text-xs text-white/55">opponent</span>
-          <span className="text-base">{shortAddr(opponent)}</span>
+          <span className="text-sm text-white/55">opponent</span>
+          <span className="text-lg">{shortAddr(opponent)}</span>
         </div>
         <div className="flex flex-col gap-1 rounded bg-black/30 px-3 py-2 backdrop-blur-sm">
-          <span className="text-xs text-white/55">cards</span>
-          <span className="text-base text-white tabular-nums">
+          <span className="text-sm text-white/55">cards</span>
+          <span className="text-lg text-white tabular-nums">
             {settledCount} / {duel.cardCount || 5} settled
           </span>
         </div>
@@ -315,7 +315,7 @@ export default function DuelView() {
 
       <div className="flex flex-col gap-1.5">
         <div className="flex justify-end">
-          <div className="inline-flex overflow-hidden rounded bg-black/35 p-0.5 text-[10px] tracking-[0.18em] uppercase backdrop-blur-sm">
+          <div className="inline-flex overflow-hidden rounded bg-black/35 p-0.5 text-xs tracking-[0.18em] uppercase backdrop-blur-sm">
             <ChartToggleButton
               label="pnl"
               active={chartView === "pnl"}
@@ -348,7 +348,7 @@ export default function DuelView() {
       <CardList duel={duel} myIsP0={Boolean(myIsP0)} ticks={ticks} nowMs={nowMs} />
 
       {!isParticipant && (
-        <div className="rounded bg-amber-900/30 px-3 py-2 text-xs text-amber-200/85">
+        <div className="rounded bg-amber-900/30 px-3 py-2 text-sm text-amber-200/85">
           you're not a participant in this duel — view is read-only.
         </div>
       )}
@@ -362,7 +362,7 @@ export default function DuelView() {
       </footer>
 
       {/* small queue-leave footer note */}
-      <p className="text-center text-[10px] tracking-[0.18em] text-white/40 uppercase">
+      <p className="text-center text-xs tracking-[0.18em] text-white/40 uppercase">
         {isLive
           ? "settlement runs automatically — keeper handles the rest"
           : "this match is final"}
@@ -422,8 +422,8 @@ function ChartToggleButton({
 function Notice({ title, body }: { title: string; body: string }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center font-pixel text-white">
-      <p className="text-sm tracking-[0.18em] uppercase">{title}</p>
-      <p className="text-xs text-white/60">{body}</p>
+      <p className="text-base tracking-[0.18em] uppercase">{title}</p>
+      <p className="text-sm text-white/60">{body}</p>
       <Link to="/game/home" className="block w-full max-w-[200px]">
         <PixelButton style={BLUE_BRAND_STYLE} className="h-12 w-full text-base">
           back
@@ -479,7 +479,7 @@ function CardList({
   }
   return (
     <div className="group/cards relative flex flex-col gap-2">
-      <h3 className="text-[10px] tracking-[0.2em] text-white/55 uppercase">
+      <h3 className="text-xs tracking-[0.2em] text-white/55 uppercase">
         cards
       </h3>
       {/* Horizontal scroll strip — strikes can be 5-6 digits, so we
@@ -517,7 +517,7 @@ function CardList({
                     {(i + 1).toString().padStart(2, "0")}
                   </div>
                   {remainingMs !== null && remainingMs > 0 && (
-                    <div className="text-[10px] tracking-[0.18em] text-cyan-300/85 tabular-nums">
+                    <div className="text-xs tracking-[0.18em] text-cyan-300/85 tabular-nums">
                       {formatRemaining(remainingMs)}
                     </div>
                   )}

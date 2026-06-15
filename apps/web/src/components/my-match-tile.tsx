@@ -191,14 +191,14 @@ export function MyMatchTile() {
     return (
       <section className="w-full rounded-xl border-2 border-black/55 bg-black/35 p-4 font-pixel text-white shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md">
         <header className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm tracking-[0.2em] uppercase">your match</h3>
+          <h3 className="text-base tracking-[0.2em] uppercase">your match</h3>
           <div className="flex items-center gap-2">
-            <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] tracking-[0.18em] text-white/55 uppercase">
+            <span className="rounded bg-white/10 px-2 py-0.5 text-xs tracking-[0.18em] text-white/55 uppercase">
               idle
             </span>
             <Link
               to="/game/history"
-              className="rounded border border-white/25 bg-white/5 px-2 py-1 text-[10px] tracking-[0.18em] text-white/70 uppercase hover:bg-white/10"
+              className="rounded border border-white/25 bg-white/5 px-2 py-1 text-xs tracking-[0.18em] text-white/70 uppercase hover:bg-white/10"
             >
               see all →
             </Link>
@@ -209,17 +209,17 @@ export function MyMatchTile() {
             src="/icons/swords.png"
             alt=""
             aria-hidden
-            className="size-10 opacity-60 [image-rendering:pixelated]"
+            className="size-12 opacity-60 [image-rendering:pixelated]"
           />
-          <p className="text-sm tracking-wider text-white/75 uppercase">
+          <p className="text-base tracking-wider text-white/75 uppercase">
             no active duel
           </p>
-          <p className="max-w-[24ch] text-xs leading-relaxed tracking-wider text-white/50">
+          <p className="max-w-[24ch] text-sm leading-relaxed tracking-wider text-white/50">
             your live pvp match will show up here once you start one
           </p>
           <Link
             to="/game/pvp"
-            className="mt-2 rounded border border-white/30 bg-white/5 px-3 py-1 text-xs tracking-wider uppercase hover:bg-white/10"
+            className="mt-2 rounded border border-white/30 bg-white/5 px-3 py-1 text-sm tracking-wider uppercase hover:bg-white/10"
           >
             find a duel
           </Link>
@@ -241,12 +241,12 @@ export function MyMatchTile() {
   return (
     <section className="w-full rounded-xl border-2 border-black/55 bg-black/35 p-3 font-pixel text-white shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md">
       <header className="mb-2 flex items-center justify-between">
-        <h3 className="text-sm tracking-[0.2em] uppercase">your match</h3>
+        <h3 className="text-base tracking-[0.2em] uppercase">your match</h3>
         <div className="flex items-center gap-2">
           <StatusBadge live={isLive} />
           <Link
             to="/game/history"
-            className="rounded border border-white/25 bg-white/5 px-2 py-1 text-[10px] tracking-[0.18em] text-white/70 uppercase hover:bg-white/10"
+            className="rounded border border-white/25 bg-white/5 px-2 py-1 text-xs tracking-[0.18em] text-white/70 uppercase hover:bg-white/10"
           >
             see all →
           </Link>
@@ -261,7 +261,7 @@ export function MyMatchTile() {
         oppAddress={opponentAddr}
       />
 
-      <footer className="mt-2 flex items-center justify-between text-xs tracking-wider uppercase">
+      <footer className="mt-2 flex items-center justify-between text-sm tracking-wider uppercase">
         <div className="flex flex-col">
           <span className="text-white/55">vs</span>
           <span>{shortAddr(opponentAddr)}</span>
@@ -274,7 +274,7 @@ export function MyMatchTile() {
         </div>
         <Link
           to={`/game/duel/${pick.id}${demo ? "?demoChart=1" : ""}`}
-          className="rounded border border-white/30 bg-white/5 px-3 py-1 text-xs tracking-wider uppercase hover:bg-white/10"
+          className="rounded border border-white/30 bg-white/5 px-3 py-1 text-sm tracking-wider uppercase hover:bg-white/10"
         >
           {isLive ? "open" : "play again"}
         </Link>
@@ -286,14 +286,14 @@ export function MyMatchTile() {
 function StatusBadge({ live }: { live: boolean }) {
   if (live) {
     return (
-      <span className="flex items-center gap-1.5 rounded bg-[#1f3a1f] px-2 py-0.5 text-[10px] tracking-[0.18em] text-emerald-300 uppercase">
+      <span className="flex items-center gap-1.5 rounded bg-[#1f3a1f] px-2 py-0.5 text-xs tracking-[0.18em] text-emerald-300 uppercase">
         <span className="inline-block size-1.5 animate-pulse rounded-full bg-emerald-400" />
         live
       </span>
     )
   }
   return (
-    <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] tracking-[0.18em] text-white/70 uppercase">
+    <span className="rounded bg-white/10 px-2 py-0.5 text-xs tracking-[0.18em] text-white/70 uppercase">
       final
     </span>
   )
