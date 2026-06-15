@@ -41,3 +41,6 @@ apps/server/.data/
 
 # Local Claude Code state
 .claude/
+
+# superpowers brainstorm artifacts (local)
+.superpowers/

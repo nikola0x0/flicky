@@ -310,10 +310,21 @@ export class Keeper {
         if (!(await readOracleSettled(this.client, oid))) return
       }
 
-      const p0Manager = await findManagerFor(this.client, duel.creator)
-      const p1Manager = await findManagerFor(this.client, duel.challenger)
+      let p0Manager: string | null
+      let p1Manager: string | null
+      try {
+        p0Manager = await findManagerFor(this.client, duel.creator)
+        p1Manager = await findManagerFor(this.client, duel.challenger)
+      } catch (e) {
+        // Scan couldn't complete (RPC error) — distinct from "no manager".
+        // Bail and let the next poll retry rather than mis-settling.
+        log.warn(
+          `skip ${shortId(duelId)}: manager lookup failed, will retry: ${e instanceof Error ? e.message : String(e)}`,
+        )
+        return
+      }
       if (!p0Manager || !p1Manager) {
-        log.warn(`skip ${shortId(duelId)}: missing predict manager for p0 or p1`)
+        log.warn(`skip ${shortId(duelId)}: no predict manager for p0 or p1`)
         return
       }
 

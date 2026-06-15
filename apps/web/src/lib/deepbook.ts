@@ -91,17 +91,21 @@ function clearManagerCache(address: string): void {
  *
  * DeepBook publishes `PredictManager` as a **shared** Sui object with an
  * internal `owner: address` field, not an `AddressOwner`-style object.
- * `getOwnedObjects` therefore never returns it. The reliable discovery
- * path is to walk `predict_manager::PredictManagerCreated` events (which
- * carry `{ manager_id, owner }`) and pick the one whose `owner` matches
- * us — but event scans require multiple RPC roundtrips.
+ * `getOwnedObjects` therefore never returns it.
  *
- * Cache layer: manager ids are permanent per address, so we cache them
- * in localStorage and short-circuit subsequent lookups. Cache is
- * validated lazily — we trust the id unless a subsequent `getObject`
- * fails, at which point the swipe path will surface a clear error and
- * the caller can invalidate via `writeManagerCache` again.
+ * Resolution order:
+ *   1. localStorage cache — manager ids are permanent per address.
+ *   2. The Flicky server's `/manager` endpoint — the single source of
+ *      truth. Its lookup is DB-cached AND scans the full event stream, so
+ *      a `null` answer is authoritative ("no manager exists yet"), not a
+ *      truncated miss. This is what lets us decide whether to bootstrap
+ *      without minting a DUPLICATE manager.
+ *   3. Direct event scan — a degraded fallback used only when the server
+ *      is unreachable. Unbounded like the server, so its `null` is also
+ *      authoritative; the page cap is only a runaway-RPC backstop.
  */
+const MANAGER_SCAN_PAGE_CAP = 100 // 5000 events ≈ full testnet history
+
 export async function findPredictManager(
   client: SuiClient,
   address: string,
@@ -109,12 +113,25 @@ export async function findPredictManager(
   const cached = readManagerCache(address)
   if (cached) return { id: cached }
 
-  // Newest first — if a user accidentally has two events for some reason
-  // (shouldn't happen, but be defensive), prefer the most recent.
+  // Primary path: ask the server, which owns the canonical (DB-cached,
+  // unbounded) resolution. A reachable server's answer is final.
+  const resolved = await resolveManagerViaServer(address)
+  if (resolved !== undefined) {
+    if (resolved) {
+      writeManagerCache(address, resolved)
+      return { id: resolved }
+    }
+    return null // server scanned everything and found none
+  }
+
+  // Fallback: server unreachable — scan events directly. Newest first,
+  // and UNBOUNDED (same as the server) so a returned `null` always means
+  // "scanned the whole stream, found none" — never "gave up early". A
+  // truncated null here would let the bootstrap mint a duplicate manager,
+  // which is exactly the failure this whole path exists to prevent. The
+  // page cap below only guards a misbehaving RPC that never ends.
   let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
-  // Walk up to 5 pages (≈ 250 events) before giving up. Plenty for
-  // hackathon testnet; we'd swap to an indexer for production scale.
-  for (let page = 0; page < 5; page++) {
+  for (let page = 0; page < MANAGER_SCAN_PAGE_CAP; page++) {
     const evts = await client.queryEvents({
       query: {
         MoveEventType: `${DEEPBOOK.package}::predict_manager::PredictManagerCreated`,
@@ -135,6 +152,30 @@ export async function findPredictManager(
     cursor = evts.nextCursor
   }
   return null
+}
+
+/**
+ * Resolve a manager id via the Flicky server's `/manager` endpoint.
+ *
+ * Returns:
+ *   - a manager id string  → server found one
+ *   - `null`               → server scanned and found none (authoritative)
+ *   - `undefined`          → server unreachable / errored (caller falls back)
+ */
+async function resolveManagerViaServer(
+  address: string,
+): Promise<string | null | undefined> {
+  try {
+    const res = await fetch(
+      `${CONFIG.serverHttpUrl}/manager?owner=${encodeURIComponent(address)}`,
+    )
+    if (!res.ok) return undefined
+    const body = (await res.json()) as { ok?: boolean; managerId?: string | null }
+    if (!body.ok) return undefined
+    return body.managerId ? normalizeSuiObjectId(body.managerId) : null
+  } catch {
+    return undefined
+  }
 }
 
 /**

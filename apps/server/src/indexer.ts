@@ -28,6 +28,7 @@ import {
   getDuel,
   loadCursor,
   saveCursor,
+  setDuelWinner,
   upsertDuel,
   type CardOutcome,
   type EventCursor,
@@ -514,6 +515,18 @@ export class DuelIndexer {
           : f.winner === f.p0
             ? "p0_win"
             : "p1_win"
+      // Persist the authoritative result onto the duel mirror so read
+      // surfaces (home card, history, leaderboard backfill) classify
+      // win/loss the same way the MMR does — instead of each re-deriving
+      // it from payouts and disagreeing on close duels.
+      try {
+        await setDuelWinner(
+          f.duelId,
+          outcome === "p0_win" ? "p0" : outcome === "p1_win" ? "p1" : "tie",
+        )
+      } catch (e) {
+        log.warn(`setWinner ${shortId(f.duelId)}: ${describeError(e)}`)
+      }
       try {
         await applyDuelOutcome(f.p0, f.p1, outcome)
       } catch (e) {

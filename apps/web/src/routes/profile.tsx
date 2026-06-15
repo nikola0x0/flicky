@@ -1,6 +1,8 @@
 import { useState } from "react"
 import type { CSSProperties } from "react"
-import { Navigate, useNavigate } from "react-router"
+import { Navigate, useLocation, useNavigate } from "react-router"
+import { setPendingSwipe } from "@/lib/nav-transition"
+import { DeviceFrame } from "@/components/device-frame"
 import { useCurrentAccount } from "@mysten/dapp-kit"
 
 import { BalanceChip } from "@/components/balance-chip"
@@ -31,6 +33,11 @@ const BLUE_BRAND_STYLE = {
 export default function Profile() {
   const account = useCurrentAccount()
   const navigate = useNavigate()
+  const location = useLocation()
+  // Where the avatar was clicked from, so "back" returns to that exact tab
+  // (and animates) instead of a bare history pop.
+  const backTo =
+    (location.state as { from?: string } | null)?.from ?? "/game/home"
   const { data: suiBalance = 0 } = useSuiBalance()
   const { data: dusdcBalance = 0 } = useDusdcBalance()
   const { data: managerInfo } = useManagerBalance()
@@ -60,16 +67,20 @@ export default function Profile() {
   const short = shortAddress(address)
 
   return (
-    <div className="bg-checker flex min-h-dvh w-full items-center justify-center px-3 py-1 sm:px-6">
-      <div className="pixel-frame flex h-[calc(100dvh-0.5rem)] w-full max-w-[440px] flex-col overflow-hidden rounded-3xl bg-[#1b2548] font-pixel text-white sm:max-h-[900px]">
+    <>
+      <DeviceFrame className="bg-[#1b2548]">
         <ProfileHeader
-          onBack={() => navigate(-1)}
+          onBack={() => {
+            // Tell the game outlet to swipe in from the left on its next mount.
+            setPendingSwipe("route-swipe-from-left")
+            navigate(backTo)
+          }}
           onAdd={() => setDepositOpen(true)}
           dusdc={dusdcBalance}
           managerDusdc={managerBalance}
         />
 
-        <main className="flex-1 overflow-y-auto px-4 pb-6">
+        <main className="route-swipe-from-right flex-1 overflow-y-auto px-4 pb-6">
           <section className="flex items-start gap-4 pt-2">
             <div className="relative">
               <PlayerAvatar address={address} size={108} />
@@ -194,7 +205,7 @@ export default function Profile() {
             </div>
           </section>
         </main>
-      </div>
+      </DeviceFrame>
 
       <DepositModal
         open={depositOpen}
@@ -206,7 +217,7 @@ export default function Profile() {
         address={address}
         onClose={() => setWithdrawOpen(false)}
       />
-    </div>
+    </>
   )
 }
 

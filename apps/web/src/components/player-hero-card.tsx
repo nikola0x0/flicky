@@ -14,6 +14,8 @@
 import { useEffect, useState } from "react"
 import { CONFIG } from "@/lib/config"
 import { PlayerAvatar } from "@/components/player-avatar"
+import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
+import { playerDuelResult } from "@/lib/duel-result"
 
 interface LeaderboardEntry {
   address: string
@@ -32,49 +34,11 @@ interface DuelLite {
   p0Premium: string
   p1Payout: string
   p1Premium: string
+  winner?: "p0" | "p1" | "tie" | null
   startedAtMs: number
 }
 
 const POLL_MS = 10_000
-
-type Tier = "unranked" | "bronze" | "silver" | "gold" | "platinum"
-
-function ratingToTier(rating: number | null): Tier {
-  if (rating === null) return "unranked"
-  if (rating < 1100) return "bronze"
-  if (rating < 1300) return "silver"
-  if (rating < 1500) return "gold"
-  return "platinum"
-}
-
-const TIER_STYLES: Record<Tier, { label: string; text: string; ring: string }> =
-  {
-    unranked: {
-      label: "unranked",
-      text: "text-white/55",
-      ring: "ring-white/15",
-    },
-    bronze: {
-      label: "bronze",
-      text: "text-amber-600",
-      ring: "ring-amber-700/40",
-    },
-    silver: {
-      label: "silver",
-      text: "text-slate-300",
-      ring: "ring-slate-400/40",
-    },
-    gold: {
-      label: "gold",
-      text: "text-yellow-300",
-      ring: "ring-yellow-400/50",
-    },
-    platinum: {
-      label: "platinum",
-      text: "text-cyan-300",
-      ring: "ring-cyan-400/50",
-    },
-  }
 
 function usePlayerStats(address: string | undefined): LeaderboardEntry | null {
   const [stats, setStats] = useState<LeaderboardEntry | null>(null)
@@ -109,8 +73,25 @@ function usePlayerStats(address: string | undefined): LeaderboardEntry | null {
   return stats
 }
 
-function usePlayerStreak(address: string | undefined): number | null {
-  const [streak, setStreak] = useState<number | null>(null)
+interface PlayerRecord {
+  wins: number
+  losses: number
+  ties: number
+  /** Consecutive wins counted from the most recent finished duel. */
+  streak: number
+}
+
+/**
+ * W/L/T record + current win-streak derived from the player's COMPLETE
+ * duels in the indexer's duel mirror — the same source the history list
+ * reads. Deliberately NOT the `/leaderboard` (player_rating) table: that
+ * is only written live from `DuelFinalized` events and is not
+ * reconstructable, so after any rating-DB reset it can be empty even when
+ * the player has finished duels. Deriving from the mirror keeps the home
+ * card consistent with what history shows.
+ */
+function usePlayerRecord(address: string | undefined): PlayerRecord | null {
+  const [record, setRecord] = useState<PlayerRecord | null>(null)
   useEffect(() => {
     if (!address) return
     let cancelled = false
@@ -118,20 +99,30 @@ function usePlayerStreak(address: string | undefined): number | null {
     const tick = async () => {
       try {
         const res = await fetch(
-          `${CONFIG.serverHttpUrl}/duels/recent?player=${encodeURIComponent(address)}&limit=20&status=COMPLETE`,
+          `${CONFIG.serverHttpUrl}/duels/recent?player=${encodeURIComponent(address)}&limit=100&status=COMPLETE`,
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { duels: DuelLite[] }
-        // Walk newest → oldest, count consecutive wins until a loss/tie.
-        let count = 0
+        // Server returns newest → oldest. Tally W/L/T over all finished
+        // duels; the streak counts consecutive wins from the newest until
+        // the first non-win. `playerDuelResult` uses the same win rule as
+        // the leaderboard so the two surfaces always agree.
+        let wins = 0
+        let losses = 0
+        let ties = 0
+        let streak = 0
+        let streakOpen = true
         for (const d of body.duels) {
-          const myIsP0 = d.creator.toLowerCase() === address.toLowerCase()
-          const payout = BigInt(myIsP0 ? d.p0Payout : d.p1Payout)
-          const premium = BigInt(myIsP0 ? d.p0Premium : d.p1Premium)
-          if (payout > premium) count++
-          else break
+          const result = playerDuelResult(d, address)
+          if (result === "win") wins++
+          else if (result === "loss") losses++
+          else ties++
+          if (streakOpen) {
+            if (result === "win") streak++
+            else streakOpen = false
+          }
         }
-        if (!cancelled) setStreak(count)
+        if (!cancelled) setRecord({ wins, losses, ties, streak })
       } catch {
         // Silent — next poll retries.
       } finally {
@@ -144,12 +135,12 @@ function usePlayerStreak(address: string | undefined): number | null {
       if (timer) clearTimeout(timer)
     }
   }, [address])
-  return streak
+  return record
 }
 
 export function PlayerHeroCard({ address }: { address: string }) {
   const stats = usePlayerStats(address)
-  const streak = usePlayerStreak(address)
+  const record = usePlayerRecord(address)
   const tier = ratingToTier(stats?.rating ?? null)
   const tierStyle = TIER_STYLES[tier]
 
@@ -158,10 +149,10 @@ export function PlayerHeroCard({ address }: { address: string }) {
       <div className="flex items-center gap-3">
         <PlayerAvatar address={address} size={56} />
         <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="truncate text-sm tracking-[0.18em] uppercase">
+          <span className="truncate text-base tracking-[0.18em] uppercase">
             {shortAddr(address)}
           </span>
-          <div className="flex items-center gap-2 text-xs tracking-[0.18em] uppercase">
+          <div className="flex items-center gap-2 text-sm tracking-[0.18em] uppercase">
             <span
               className={`rounded px-2 py-0.5 ring-1 ring-inset ${tierStyle.ring} ${tierStyle.text}`}
             >
@@ -174,22 +165,22 @@ export function PlayerHeroCard({ address }: { address: string }) {
         </div>
       </div>
 
-      <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs tracking-[0.18em] uppercase">
+      <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm tracking-[0.18em] uppercase">
         <StatChip
           label="wins"
-          value={stats ? stats.wins.toString() : "—"}
+          value={record ? record.wins.toString() : "—"}
           valueClass="text-emerald-300"
         />
         <StatChip
           label="losses"
-          value={stats ? stats.losses.toString() : "—"}
+          value={record ? record.losses.toString() : "—"}
           valueClass="text-rose-300"
         />
         <StatChip
           label="streak"
-          value={streak === null ? "—" : streak.toString()}
+          value={record ? record.streak.toString() : "—"}
           valueClass={
-            streak && streak > 0 ? "text-amber-300" : "text-white/60"
+            record && record.streak > 0 ? "text-amber-300" : "text-white/60"
           }
         />
       </div>
@@ -208,8 +199,8 @@ function StatChip({
 }) {
   return (
     <div className="flex flex-col gap-0.5 rounded bg-black/25 px-2 py-1.5">
-      <span className="text-[10px] text-white/55">{label}</span>
-      <span className={`text-lg tabular-nums ${valueClass}`}>{value}</span>
+      <span className="text-xs text-white/55">{label}</span>
+      <span className={`text-xl tabular-nums ${valueClass}`}>{value}</span>
     </div>
   )
 }

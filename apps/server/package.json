@@ -15,7 +15,8 @@
     "deepbook:discover": "bun run src/scripts/deepbook-discover.ts",
     "demo:duel": "bun run src/scripts/demo-duel.ts",
     "probe:oracles": "bun run src/scripts/probe-oracles.ts",
-    "clear:duels": "bun run src/scripts/clear-duels.ts"
+    "clear:duels": "bun run src/scripts/clear-duels.ts",
+    "backfill:ratings": "bun run src/scripts/backfill-ratings.ts"
   },
   "dependencies": {
     "@mysten/enoki": "^1.0.8",

@@ -13,7 +13,8 @@ export async function resetTables(): Promise<void> {
   if (!HAS_TEST_DB) return
   await ready()
   await getSql()`
-    TRUNCATE event_cursor, duel, chat_message, player_rating, deck
+    TRUNCATE event_cursor, duel, chat_message, player_rating, deck,
+             predict_manager
     RESTART IDENTITY
   `
 }

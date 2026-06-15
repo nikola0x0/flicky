@@ -26,6 +26,7 @@ function toWire(d: DuelRow) {
     p0Premium: d.p0Premium,
     p1Payout: d.p1Payout,
     p1Premium: d.p1Premium,
+    winner: d.winner ?? null,
     startedAtMs: d.startedAtMs,
     cardOutcomes: d.cardOutcomes,
     swipes: d.swipes,

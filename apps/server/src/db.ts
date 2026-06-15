@@ -87,6 +87,11 @@ async function ensureSchema(): Promise<void> {
       p0_premium      TEXT    NOT NULL DEFAULT '0',
       p1_payout       TEXT    NOT NULL DEFAULT '0',
       p1_premium      TEXT    NOT NULL DEFAULT '0',
+      -- Authoritative duel result recorded live from DuelFinalized:
+      -- 'p0' (creator), 'p1' (challenger), or 'tie'. NULL until finalized,
+      -- or for rows finalized before this column existed (those fall back
+      -- to the head-to-head net rule documented above).
+      winner          TEXT,
       started_at_ms   BIGINT  NOT NULL DEFAULT 0,
       -- JSON blobs (kept as TEXT, mirroring the old SQLite layout — we
       -- never query inside them, only round-trip whole arrays).
@@ -96,6 +101,8 @@ async function ensureSchema(): Promise<void> {
       last_updated_ms BIGINT  NOT NULL
     )
   `
+  // Idempotent add for tables created before the winner column existed.
+  await sql`ALTER TABLE duel ADD COLUMN IF NOT EXISTS winner TEXT`
   await sql`CREATE INDEX IF NOT EXISTS duel_status_updated
             ON duel (status, last_updated_ms DESC)`
   await sql`CREATE INDEX IF NOT EXISTS duel_creator
@@ -129,6 +136,18 @@ async function ensureSchema(): Promise<void> {
       cards      TEXT   NOT NULL,    -- JSON [{oracle_id, strike: string}]
       seed_hex   TEXT,
       created_at BIGINT NOT NULL
+    )
+  `
+  // Owner → PredictManager id cache. The manager is a SHARED object with an
+  // internal `owner` field, so it can't be found via getOwnedObjects —
+  // discovery means an unbounded `PredictManagerCreated` event scan
+  // (predict.ts::findManagerFor). We memoize the resolved id here: a
+  // manager's owner never changes, so a hit is permanent and skips the scan.
+  await sql`
+    CREATE TABLE IF NOT EXISTS predict_manager (
+      owner      TEXT PRIMARY KEY,
+      manager_id TEXT   NOT NULL,
+      cached_at  BIGINT NOT NULL
     )
   `
   log.info(`schema ready on ${redactUrl(env.databaseUrl ?? "")}`)
@@ -247,6 +266,9 @@ export interface CardOutcome {
   p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
 }
 
+/** Which side won a finished duel: creator (p0), challenger (p1), or a tie. */
+export type DuelWinner = "p0" | "p1" | "tie"
+
 export interface DuelRow {
   id: string
   status: "PENDING" | "ACTIVE" | "COMPLETE"
@@ -256,6 +278,13 @@ export interface DuelRow {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
+  /**
+   * Authoritative duel result from the on-chain DuelFinalized event, or
+   * null if not yet finalized / finalized before this was recorded.
+   * Optional in the write type: `upsertDuel` never sets it (so a refresh
+   * can't clobber it) — only `setDuelWinner` does.
+   */
+  winner?: DuelWinner | null
   /** Cumulative real-PnL fields. See contract `Duel.p{0,1}_payout/premium`. */
   p0Payout: string
   p0Premium: string
@@ -321,6 +350,24 @@ export async function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): Promise<voi
 }
 
 /**
+ * Record the authoritative winner of a finished duel. Written separately
+ * from `upsertDuel` so the indexer's per-tick refresh (which doesn't know
+ * the winner) can't clobber it. No-op if the duel row isn't mirrored yet.
+ */
+export async function setDuelWinner(
+  duelId: string,
+  winner: DuelWinner,
+): Promise<void> {
+  await ready()
+  const sql = getSql()
+  try {
+    await sql`UPDATE duel SET winner = ${winner} WHERE id = ${duelId}`
+  } catch (e) {
+    log.error(`setDuelWinner(${duelId}): ${describeError(e)}`)
+  }
+}
+
+/**
  * Merge a freshly-emitted CardSettled outcome into the duel's
  * card_outcomes JSON array. Idempotent: if an outcome already exists
  * for this card_idx it's overwritten (later event wins). Runs in a
@@ -378,6 +425,7 @@ interface DuelRowRaw {
   p0_premium: string
   p1_payout: string
   p1_premium: string
+  winner: string | null
   started_at_ms: number | string | bigint
   card_outcomes: string
   swipes: string
@@ -417,6 +465,7 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
     p0Premium: r.p0_premium,
     p1Payout: r.p1_payout,
     p1Premium: r.p1_premium,
+    winner: (r.winner as DuelWinner | null) ?? null,
     startedAtMs: Number(r.started_at_ms),
     cardOutcomes: outcomes,
     swipes,
@@ -618,6 +667,21 @@ export async function leaderboard(limit: number): Promise<PlayerRating[]> {
   return rows.map(rowToRating)
 }
 
+/**
+ * Wipe the entire player_rating table. Used by the ratings backfill,
+ * which recomputes ELO from scratch by replaying COMPLETE duels — the
+ * table must start empty so the replay isn't added on top of stale rows.
+ */
+export async function clearPlayerRatings(): Promise<number> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    WITH deleted AS (DELETE FROM player_rating RETURNING address)
+    SELECT COUNT(*)::int AS c FROM deleted
+  `) as Array<{ c: number }>
+  return rows[0]?.c ?? 0
+}
+
 // ─── Deckmaster plaintext store (commit-reveal) ──────────────────────────────
 //
 // Was apps/server/.data/decks.json. Each row stores the revealed card
@@ -670,4 +734,47 @@ export async function countDecks(): Promise<number> {
     c: number
   }>
   return rows[0]?.c ?? 0
+}
+
+// ─── PredictManager cache ───────────────────────────────────────────────────
+
+/**
+ * Resolved manager id for `owner`, or null if we've never cached one.
+ * A cache hit lets `findManagerFor` skip the on-chain event scan entirely.
+ */
+export async function getCachedManager(owner: string): Promise<string | null> {
+  await ready()
+  const sql = getSql()
+  try {
+    const rows = (await sql`
+      SELECT manager_id FROM predict_manager WHERE owner = ${owner}
+    `) as Array<{ manager_id: string }>
+    return rows[0]?.manager_id ?? null
+  } catch (e) {
+    log.error(`getCachedManager(${owner}): ${describeError(e)}`)
+    return null
+  }
+}
+
+/**
+ * Memoize `owner → managerId`. Upserts so a re-bootstrapped owner (one who
+ * minted a fresh manager) overwrites the stale id on next discovery.
+ */
+export async function cacheManager(
+  owner: string,
+  managerId: string,
+): Promise<void> {
+  await ready()
+  const sql = getSql()
+  try {
+    await sql`
+      INSERT INTO predict_manager (owner, manager_id, cached_at)
+      VALUES (${owner}, ${managerId}, ${Date.now()})
+      ON CONFLICT (owner) DO UPDATE SET
+        manager_id = EXCLUDED.manager_id,
+        cached_at  = EXCLUDED.cached_at
+    `
+  } catch (e) {
+    log.error(`cacheManager(${owner}): ${describeError(e)}`)
+  }
 }

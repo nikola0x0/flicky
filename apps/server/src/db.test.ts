@@ -84,3 +84,42 @@ describe.skipIf(!HAS_TEST_DB)("db (Postgres)", () => {
     })
   })
 })
+
+describe.skipIf(!HAS_TEST_DB)("predict_manager cache", () => {
+  beforeEach(async () => {
+    await resetTables()
+  })
+
+  afterAll(async () => {
+    await db.closeDb()
+  })
+
+  test("getCachedManager returns null when no row exists", async () => {
+    expect(await db.getCachedManager("0xowner")).toBeNull()
+  })
+
+  test("cacheManager inserts; getCachedManager reads it back", async () => {
+    await db.cacheManager("0xowner", "0xmgr")
+    expect(await db.getCachedManager("0xowner")).toBe("0xmgr")
+  })
+
+  test("cacheManager upserts — a re-bootstrapped manager overwrites the old id", async () => {
+    await db.cacheManager("0xowner", "0xmgr-old")
+    await db.cacheManager("0xowner", "0xmgr-new")
+    expect(await db.getCachedManager("0xowner")).toBe("0xmgr-new")
+  })
+
+  test("different owners have independent manager ids", async () => {
+    await db.cacheManager("0xalice", "0xmgr-a")
+    await db.cacheManager("0xbob", "0xmgr-b")
+    expect(await db.getCachedManager("0xalice")).toBe("0xmgr-a")
+    expect(await db.getCachedManager("0xbob")).toBe("0xmgr-b")
+  })
+
+  test("cache survives a closeDb / re-open cycle", async () => {
+    await db.cacheManager("0xpersist", "0xmgr-persist")
+    await db.closeDb()
+    // Next call re-creates the pool against the same DB — data persists.
+    expect(await db.getCachedManager("0xpersist")).toBe("0xmgr-persist")
+  })
+})

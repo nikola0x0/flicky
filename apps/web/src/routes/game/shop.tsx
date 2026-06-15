@@ -161,7 +161,12 @@ export default function GameShop() {
   return (
     <div className="flex flex-col gap-4 px-4 py-4">
       <header className="flex items-center justify-between">
-        <h2 className="text-4xl tracking-[0.2em] text-white uppercase">swap</h2>
+        <h2 className="flex items-baseline gap-2 text-4xl tracking-[0.2em] text-white uppercase">
+          swap
+          <span className="text-sm tracking-[0.12em] text-white/45 normal-case">
+            (for testnet)
+          </span>
+        </h2>
         <button
           type="button"
           onClick={() => {
