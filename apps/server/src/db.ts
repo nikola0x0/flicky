@@ -36,7 +36,7 @@ export function getSql(): SQL {
   if (!env.databaseUrl) {
     throw new Error(
       "DATABASE_URL is not set — point it at the Railway Postgres " +
-        "(private DATABASE_URL when deployed, DATABASE_PUBLIC_URL locally)",
+        "(set it to the private URL when deployed, the public proxy URL locally)",
     )
   }
   _sql = new SQL({ url: env.databaseUrl, max: env.dbPoolMax })

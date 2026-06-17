@@ -26,13 +26,17 @@ const [{ c: before }] = (await sql`SELECT COUNT(*)::int AS c FROM duel`) as Arra
 }>
 
 if (onlyId) {
-  const deleted = (await sql`DELETE FROM duel WHERE id = ${onlyId} RETURNING id`) as Array<{
-    id: string
-  }>
-  console.log(`deleted ${deleted.length} duel(s) matching ${onlyId}`)
+  const [{ c: deleted }] = (await sql`
+    WITH deleted AS (DELETE FROM duel WHERE id = ${onlyId} RETURNING 1)
+    SELECT COUNT(*)::int AS c FROM deleted
+  `) as Array<{ c: number }>
+  console.log(`deleted ${deleted} duel(s) matching ${onlyId}`)
 } else {
-  const deleted = (await sql`DELETE FROM duel RETURNING id`) as Array<{ id: string }>
-  console.log(`deleted ${deleted.length} duel(s) (was ${before} total)`)
+  const [{ c: deleted }] = (await sql`
+    WITH deleted AS (DELETE FROM duel RETURNING 1)
+    SELECT COUNT(*)::int AS c FROM deleted
+  `) as Array<{ c: number }>
+  console.log(`deleted ${deleted} duel(s) (was ${before} total)`)
 }
 
 const [{ c: after }] = (await sql`SELECT COUNT(*)::int AS c FROM duel`) as Array<{
