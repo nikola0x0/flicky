@@ -1,63 +1,112 @@
-# Flicky
+# Flicky — The Prediction Arena
 
-> Swipe YES/NO on a 5-card binary-prediction deck; face off against another player; on-chain escrow pays the winner.
+> Swipe YES/NO on a binary-prediction deck, face off against another player, and on-chain escrow pays the winner. A Tinder-style PvP prediction duel on **Sui**, powered by **DeepBook Predict**.
 
-A Tinder-style PvP prediction duel built on Sui, powered by DeepBook Predict. Two players swipe through a 5-card deck of binary digitals; the on-chain `Duel` shared object escrows both stakes and releases the dUSDC side-pot to whoever ends with the higher total PnL across their 5 Predict positions.
+[![Demo](https://img.shields.io/badge/▶_Watch_the_demo-4_min-FF0000)](https://youtu.be/sKIKsmdRs9U)
+&nbsp;·&nbsp; **Live on Sui testnet** &nbsp;·&nbsp; Built for **Sui Overflow 2026**
 
-## What Problem It Solves
+| | |
+| --- | --- |
+| 🎬 **Demo video** | https://youtu.be/sKIKsmdRs9U |
+| 📦 **Package (testnet)** | [`0xe1b1853ab66c44dbe00a4b64238a3f64e226dfcd50c331d095fb38599bdc1854`](https://suiscan.xyz/testnet/object/0xe1b1853ab66c44dbe00a4b64238a3f64e226dfcd50c331d095fb38599bdc1854) |
+| 🔗 **On-chain primitive** | DeepBook Predict (binary digitals) |
+| 🔑 **Identity / gas** | zkLogin via Enoki · sponsored gas end-to-end |
 
-Prediction markets today feel like trading terminals — order books and surfaces intimidate non-quants, and there is no head-to-head social loop. Meanwhile, swipe-based mobile betting apps (Pulse on Solana, Rush's $500M-in-a-week sub-hour BTC binaries) have proven enormous retail demand for "feel-based" prediction UX — but they're shallow and have no real PvP layer. Flicky combines DeepBook Predict's real on-chain binary-digital primitive with a Tinder-style swipe deck **and** a 1v1 escrow layer on top, so two players can put real stakes on "who reads BTC better."
+---
 
-## Core Features
+## 30-second pitch
 
-- **Swipe-deck UI** — each card is one binary digital (YES/NO at strike X, expiry T). Swipe right = mint YES via `predict::mint`; swipe left = mint NO. Real on-chain Predict positions, not synthetic.
-- **Duel escrow** — Move shared `Duel` object holds both players' dUSDC side-pots. Each player keeps and redeems their own Predict positions; the Duel only adjudicates the side-pot.
-- **Two modes**:
-  - **Practice** — solo vs. a bot with virtual swipes against the real oracle. No stake, no `predict::mint`. On-ramp for the swipe loop.
-  - **Staked PvP** — 1v1 duels with real dUSDC side-pots at fixed tiers (**1 / 3 / 5 / 10 dUSDC**) and ranked MMR.
-- **Commit-reveal deck** — deck cards are hashed at duel creation and revealed at match start, so neither player can front-run with parallel positions.
-- **PnL-based scoring** — winner is the player with higher total redeem PnL across all 5 Predict positions. No UI multipliers, no synthetic odds-weighting — Predict's premium math is the scoring engine.
-- **In-app SUI ↔ dUSDC swap** — fixed 1:10 rate inside the Deposit screen so a player whose only asset is SUI can fund a stake without leaving Flicky.
+Prediction markets are powerful but look like a Bloomberg terminal — order books, Greeks, vol surfaces. Meanwhile swipe-betting apps have proven retail *loves* feel-based prediction UX (Pulse on Solana, Rush's $500M-in-a-week sub-hour BTC binaries) — but they're shallow, custodial, and have **no real opponent**.
 
-## End-to-end player flow
+**Flicky is both.** Two players swipe YES/NO through the same deck of binary-digital cards. Every swipe mints a *real* on-chain DeepBook Predict position — not a synthetic bet — and a Move `Duel` shared object escrows both stakes and pays the dUSDC side-pot to whoever reads the market better. zkLogin + sponsored gas mean it feels like a mobile game: no seed phrase, no wallet popups, no SUI required.
 
-1. Sign in (zkLogin via Enoki).
-2. Predict Manager created on first sign-in, **sponsored by Flicky**.
-3. Practice Mode (optional) — solo vs. bot, virtual positions, learn the swipe loop.
-4. Deposit dUSDC (or swap SUI → dUSDC at 1:10 in-app) to enter matching.
-5. Pick a stake tier (**1 / 3 / 5 / 10 dUSDC**) and queue. Entry gated on `PredictManager` balance **≥ 5 dUSDC** (max per-card mint × 5 cards).
-6. Play (up to 10 min). Five cards = the 5 nearest oracle resolutions strictly **>10 min out**, each with its own expiry. Each swipe is a single player-signed PTB: `predict::mint` + `duel::record_swipe`. Five swipes → five real Predict positions.
-7. Per-card settlement at each card's own oracle tick. `player_score = Σ (redeem − premium)` across the 5 cards.
-8. **Winner** takes the dUSDC Duel Pot and may redeem their 5 Predict positions whenever they want.
-9. **Loser** keeps no side-pot but still owns their Predict positions — anything that settled in their favor is redeemable.
+> **Two players. One deck. One question — who reads the market better?**
 
-## Match Anatomy
+---
+
+## Watch the demo (4 min)
+
+▶️ **https://youtu.be/sKIKsmdRs9U**
+
+What to look for — these are the things that separate Flicky from a generic Predict front-end:
+
+1. **Real on-chain positions** — swipe right = `predict::mint` YES on testnet, not a synthetic toggle.
+2. **No wallet popups** — the *absence* of signing prompts is the magic. zkLogin + sponsored gas make every swipe a one-tap, gasless transaction.
+3. **One atomic swipe PTB** — a single transaction does `predict::mint` (player's own manager) **and** `record_swipe` (shared `Duel`) in the same block. See it on Suiscan in the demo.
+4. **Commit-reveal deck** — cards are hashed at duel creation, revealed only at match start → provably fair, no front-running.
+5. **On-chain settlement** — the oracle resolves each card 0/1; a keeper redeems and finalizes; the winner takes the pot. The full lifecycle closes on-chain.
+
+---
+
+## How a duel works — the player walkthrough
 
 ```
-t = 0s               t ≤ 10 min            per-card oracle tick    after final card settles
-┌────────────────┐   ┌────────────────┐    ┌────────────────┐      ┌────────────────┐
-│  Swipe phase   │ → │ Watch / wait   │  → │  Per-card      │  →   │  Settle duel   │
-│  reveal deck;  │   │  live oracle   │    │  settlement    │      │  pot → winner; │
-│  5 cards each  │   │  ticks; spot   │    │  PnL locks per │      │  players redeem│
-│  mint a Predict│   │  vs. strikes;  │    │  card at its   │      │  their own     │
-│  position      │   │  emoji reacts  │    │  expiry        │      │  positions     │
-└────────────────┘   └────────────────┘    └────────────────┘      └────────────────┘
+ sign in        deposit / stake      swipe phase (≤10 min)      lockup / watch        settle + payout
+┌──────────┐   ┌───────────────┐    ┌──────────────────┐      ┌──────────────┐      ┌────────────────┐
+│ zkLogin  │ → │ pick a tier   │ →  │ reveal deck;     │  →   │ live oracle  │  →   │ per-card 0/1;  │
+│ (Google) │   │ 1/3/5/10 dUSDC│    │ swipe YES/NO →   │      │ ticks; spot  │      │ higher PnL     │
+│ no seed  │   │ + queue       │    │ each = a real    │      │ vs strike;   │      │ takes the pot; │
+│ phrase   │   │               │    │ Predict position │      │ emoji reacts │      │ both redeem    │
+└──────────┘   └───────────────┘    └──────────────────┘      └──────────────┘      └────────────────┘
 ```
 
-1. **Stake** — at duel creation each player escrows a stake (1 / 3 / 5 / 10 dUSDC) into the shared `Duel` object and binds their `PredictManager` ID to their player slot.
-2. **Swipe phase (≤10 min)** — both players swipe YES/NO on each of 5 cards. Each swipe is a single **player-signed PTB** that atomically calls `predict::mint` on the player's own `PredictManager` and `duel::record_swipe` on the shared `Duel`. The PTB is gas-sponsored by the app — the player's zkLogin wallet only needs dUSDC, never SUI. Atomicity is forced by Predict's `sender == manager.owner()` invariant.
-3. **Watch / wait** — once both players have swiped or the 10-min clock expires, the UI streams live oracle ticks, marks, and emoji reactions until each card's expiry.
-4. **Per-card settlement** — each binary resolves at its own oracle tick. Cards in one deck can settle at different times because they are drawn from the 5 nearest oracles >10 min out.
-5. **Payout** — once all 5 cards have settled, the indexer triggers `duel::settle_duel`. The contract reads each player's per-card PnL, sums it, and releases the dUSDC side-pot to whoever has the higher total. Tie → side-pot split. Each player redeems their own Predict positions independently via `predict::redeem_permissionless`.
+1. **Sign in** — zkLogin via Enoki (Google/Apple OAuth → Sui address). No seed phrase, no extension. On first sign-in, a `PredictManager` is created for you, **sponsored by Flicky**. Your wallet only ever holds dUSDC.
+2. **Fund & queue** — deposit dUSDC (or swap SUI → dUSDC at a fixed 1:10 rate inside the app), pick a stake tier (**1 / 3 / 5 / 10 dUSDC**), and enter matchmaking. Entry is gated on the manager holding **≥ 5 dUSDC** (worst-case premium across a full 5-card deck).
+3. **Match & reveal** — matchmaking pairs two players into a Move `Duel` shared object that escrows both stakes. The deck is **commit-reveal**: hashed at `create_duel`, revealed only at match start, so neither player can pre-stage trades.
+4. **Swipe (≤ 10 min)** — swipe right = YES, left = NO, through every card in the deck. Each swipe fires a **single atomic PTB** that calls `predict::mint` on *your own* `PredictManager` (opening a real Predict position) and `record_swipe` on the shared `Duel` (logging your direction and snapshotting the probability you swiped at). No wallet popup — the PTB is gas-sponsored.
+5. **Lockup / watch** — once both players finish swiping (or the 10-min clock expires), the duel enters a shared live view of spot vs. strike, ticking toward each card's expiry, with emoji reactions. Dead waiting time becomes the ritual.
+6. **Settle** — each binary resolves to 0/1 at its own oracle tick. The settled-redeem keeper calls `settle_card` per card (and `redeem_permissionless` on each player's manager), then `finalize` releases the dUSDC side-pot to the higher total PnL.
+7. **Payout & keep** — the **winner** takes the entire side-pot; **both** players keep and can redeem their own Predict positions whenever they want. A tie splits the pot.
 
-### Scoring rule (real PnL)
+### Adaptive deck size
+
+The deck isn't a fixed 5 — it's **sized to live oracle supply** at duel creation: `deckSize = min(liveOracles, 5)`, clamped to a **3–5 band**, and built from the **soonest-settling** eligible oracles (expiry > 10 min and within a ~3h horizon). On testnet, short-dated oracle supply fluctuates between 3 and 5, so the deck flexes to whatever's live instead of failing — and always picks the fastest-resolving cards so a duel finalizes as soon as possible.
+
+### Scoring — real PnL, no UI multipliers
 
 ```
 card_pnl     = predict_redeem(player, card) − premium_paid(player, card)
-player_score = Σ card_pnl across the 5 cards
+player_score = Σ card_pnl  across the deck
 ```
 
-Highest total PnL wins the entire dUSDC side-pot. Tie → side-pot split. Predict's own premium math already rewards skill: a correct call on a 0.28 implied YES pays out ~3× a correct call on a 0.88 YES — no extra UI multiplier needed. The Duel side-pot and a player's individual Predict PnL are independent ledgers: a player can lose the Duel and still net-positive on a hot pick, or win the Duel with flat individual PnL.
+Highest total PnL wins the entire dUSDC side-pot; a tie splits it. **Predict's own premium math is the scoring engine** — a correct call on a 0.28-implied YES pays out ~3× a correct call on a 0.88 YES, so a contrarian read scores more than following the crowd. No synthetic odds-weighting, no UI multiplier. The Duel side-pot and a player's individual Predict PnL are independent ledgers: you can lose the Duel but still net-positive on a hot pick, or win the Duel with flat individual PnL.
+
+### Two tiers, one engine
+
+- **Practice** — solo vs. a bot with virtual swipes against the *real* oracle. No stake, no `predict::mint`. The on-ramp for the swipe loop.
+- **Staked PvP** — 1v1 duels with real dUSDC side-pots at fixed tiers (1 / 3 / 5 / 10 dUSDC) and ranked MMR.
+
+Both run the exact same swipe → lockup → settle flow (the contract exposes `*_free` entrypoints that mirror the staked path); only the money flow is gated.
+
+---
+
+## What's actually on-chain
+
+Flicky is not a Predict front-end with a database behind it — the duel lifecycle lives on Sui.
+
+### DeepBook Predict touchpoints
+
+| #   | Primitive                        | Role in Flicky |
+| --- | -------------------------------- | -------------- |
+| 1   | `predict::mint`                  | Called in the **player-signed swipe PTB** on the player's own `PredictManager`. Sized per-card from a stake-tier budget (≤ 1 dUSDC/card). |
+| 2   | `predict::redeem_permissionless` | Each player redeems their own positions after a card settles; the keeper may call opportunistically. Payouts deposit into the player's own manager. |
+| 3   | `OracleSVI` reads                | Powers the live mark view, calibrates deck difficulty, snapshots `p_swiped` at swipe time, and supplies each card's 0/1 settlement. |
+| 4   | Predict indexer / settlement     | Backend detects per-card settlement → drives the keeper through `settle_card` × N then `finalize`. Also drives the lockup view. |
+
+### Flicky's Move package (`apps/contracts/`)
+
+- **`Duel` shared object** — escrows the dUSDC side-pot and records every swipe (card index, direction, position reference, premium paid). At settle, reads per-player PnL and releases the side-pot to the higher total. It does **not** hold Predict positions — each player owns their own manager.
+- **`swap` module** — fixed-rate 1 SUI ↔ 10 dUSDC, backing the in-app Deposit/Swap screen so a SUI-only player can fund a stake without leaving Flicky.
+- **`pricing` (SVI binary-digital)**, `math`, `i64` — supporting modules.
+- Lifecycle entrypoints: `create_duel` / `join_duel` / `reveal_deck` / `record_swipe` / `settle_card` / `finalize`, each with a `*_free` practice-tier variant, plus `refund_duel` / `claim_reveal_timeout` safety paths. Covered by a Move unit-test suite (`tests/duel_tests.move`).
+
+### Why these design decisions
+
+- **Swipe PTBs are player-signed and atomic** — Predict requires `sender == manager.owner()`, so the player *must* be the signer. zkLogin + sponsored gas are what make that invisible. The mint and the `record_swipe` land in the same block, so a position can never exist without its duel record.
+- **The Duel escrows the side-pot, not the positions** — players keep full custody of their Predict positions; the contract only adjudicates the side-pot from recorded PnL.
+- **Commit-reveal deck** — hashing the deck at creation and revealing at match start makes it provably fair and impossible to front-run.
+
+---
 
 ## Architecture
 
@@ -65,126 +114,45 @@ Highest total PnL wins the entire dUSDC side-pot. Tie → side-pot split. Predic
 flicky/
 ├── apps/
 │   ├── web        # Vite + React 19 — swipe UI, lockup view, share card
-│   ├── server     # Bun — WebSocket relay, settled-redeem keeper, AI Deckmaster
+│   ├── server     # Bun — WebSocket relay, indexer, settled-redeem keeper,
+│   │              #       sponsored-gas service, AI Deckmaster
 │   └── contracts  # Move package + TS deploy/upgrade/codegen scripts
 └── packages/
     └── ui         # shared shadcn/ui components
 ```
 
-`apps/contracts/` contains:
+| Layer | Tech |
+| --- | --- |
+| **Web** | Vite, React 19, Tailwind v4, shadcn/ui, `@mysten/sui` v2 + `@mysten/dapp-kit` v1 |
+| **Server** | Bun (TypeScript strict) — card-generation API, WebSocket matchmaking + game-room relay, `Duel` indexer, PnL/settle tracker, settled-redeem keeper, sponsored-gas service |
+| **Chain** | Sui testnet, Move 2024, DeepBook Predict |
+| **Contracts** | Move package (`duel`, `swap`, `pricing`) + `@mysten/codegen` typed bindings |
+| **Identity** | zkLogin via **Enoki** (Google/Apple OAuth → Sui address) |
+| **Gas** | sponsored end-to-end — player wallets only ever hold dUSDC |
+| **Realtime** | WebSocket relay (`Bun.serve`); the match clock is authoritative on the server |
 
-- `sources/` — flicky Move modules: `duel` (escrow + PnL settle), `swap` (fixed 1:10 SUI ↔ dUSDC), `pricing` (SVI binary-digital), `math`, `i64`
-- `deepbook_predict_min/`, `deepbook_min/`, `token_min/` — local stub packages that bind the on-chain DeepBook addresses for the Move compiler; see `apps/contracts/README.md` for why
-- `scripts/` — `publish.ts`, `upgrade.ts` (writes `deployed.json` + mirrors `packageId` into `apps/web/.env.local`)
-- `tests/duel_tests.move` — Move unit tests covering lifecycle, PnL settlement, ordering guards
-
-Current testnet deployment lives in [`apps/contracts/deployed.json`](apps/contracts/deployed.json) — the file is the source of truth, regenerated by `bun --filter @flicky/contracts publish` / `upgrade`.
-
-### DeepBook Predict touchpoints (MVP)
-
-| #   | Primitive                        | Purpose                                                                                                                       |
-| --- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `predict::mint`                  | Called in the player-signed swipe PTB on the player's own `PredictManager`. Sized per-card from a stake-tier budget (≤1 dUSDC/card). |
-| 2   | `predict::redeem_permissionless` | Each player redeems their own positions after card settle; keeper may call opportunistically. Payouts deposit into the player's own manager. |
-| 3   | `OracleSVI` reads                | Powers the live mark view, calibrates deck difficulty, and supplies each card's 0/1 settlement.                                |
-| 4   | `predict-server` indexer         | Backend detects per-card settlement → triggers `duel::settle_duel` once all 5 cards have resolved. Also drives the lockup view. |
-
-Plus, on our side:
-
-- **`Duel` shared object** — escrows the dUSDC side-pot, records every swipe (card index, direction, position reference, premium paid). At settle, reads per-player PnL from the recorded positions and releases the side-pot to the higher total. Does **not** hold Predict positions itself.
-- **`Swap` module** — fixed-rate 1 SUI ↔ 10 dUSDC, backing the in-app Deposit/Swap screen.
-- **`PredictManager`-per-user** — created on first sign-in, **sponsored by Flicky**, reused across all duels.
-- **Player-signed swipe PTBs** — `predict::mint` + `duel::record_swipe`, atomic.
-- **Keeper PTBs** — `duel::settle_duel` (and opportunistic `predict::redeem_permissionless`).
-- **zkLogin (Enoki) + sponsored gas** — MVP-required. zkLogin = wallet identity. Sponsored gas covers every PTB (manager creation, create_duel, join_duel, per-swipe, settle, redeem), so the zkLogin wallet only ever needs dUSDC.
-
-## Funding the Wallet
-
-The zkLogin address **is** the wallet. There is no separate in-app balance.
-
-- **Practice** — no funding required. Solo vs. bot with virtual positions.
-- **Staked PvP** — the zkLogin address must hold dUSDC to stake, and the `PredictManager` must hold **≥5 dUSDC** to cover up to 5 dUSDC of per-card Predict premium across the deck. The in-app **Deposit / Swap screen** shows the player's Sui address + QR + copy button, and includes a **SUI → dUSDC swap at a fixed 1:10 rate** so a player whose only on-chain asset is SUI can fund a stake without leaving Flicky. Users can also top up by sending dUSDC from any external wallet (Suiet, Sui Wallet, CEX withdrawal). No external on-ramp in MVP.
-
-## Tech Stack
-
-- **Monorepo** — Bun workspaces + Turborepo
-- **Web** — Vite, React 19, Tailwind v4, shadcn/ui, `@mysten/sui` v2 + `@mysten/dapp-kit` v1
-- **Server** — Bun runtime, TypeScript strict — hosts the card-generation API, WebSocket matchmaking + game-room relay, `Duel` indexer, PnL/settle tracker, settled-redeem keeper, and sponsored-gas service
-- **Chain** — Sui testnet, Move 2024, DeepBook Predict
-- **Contracts** — Move package (`duel`, `swap`, `pricing`) + `@mysten/codegen` typed bindings auto-generated into `apps/web/src/sui/gen/`
-- **Identity** — zkLogin via **Enoki** (Google/Apple OAuth → Sui address)
-- **Gas** — sponsored end-to-end (player wallets only ever hold dUSDC)
-- **Realtime** — WebSocket relay (`Bun.serve`); match clock is authoritative on the server
-
-## Getting Started
-
-Requires [Bun](https://bun.sh) ≥ 1.3 and the [Sui CLI](https://docs.sui.io/guides/developer/getting-started/sui-install) (for `sui move build` / `test` / `publish`).
-
-```bash
-bun install                          # install all workspace deps
-bun dev                              # turbo dev — runs web + server in parallel
-```
-
-Individual apps:
-
-```bash
-bun --filter web dev                 # Vite dev server (default :5173)
-bun --filter server dev              # Bun --hot server (default :3001)
-bun --filter @flicky/contracts test  # sui move test (Move unit tests)
-```
-
-Working with the Move package (first-time setup or after any Move change):
-
-```bash
-# inside apps/contracts/
-bun run test                         # sui move test --gas-limit 100000000000
-bun run build                        # sui move build
-bun run publish                      # first deploy to testnet (writes deployed.json)
-bun run upgrade                      # subsequent upgrades (preserves originalPackageId)
-bun run codegen                      # regenerate TS bindings → apps/web/src/sui/gen/
-```
-
-Once published, `apps/web/src/sui/gen/` holds typed `moveCall` builders for both the flicky package and DeepBook Predict. **The directory is gitignored — every developer regenerates locally after `bun install`.**
-
-Other workspace tasks:
-
-```bash
-bun typecheck      # turbo typecheck across all workspaces
-bun test           # bun-test in each app (server + web) — see each app README
-bun lint
-bun format
-bun build
-```
-
-### First-time developer onboarding
-
-1. `bun install`
-2. `cd apps/contracts && cp .env.example .env.local && cp .env.example .env` — fill `SUI_DEPLOYER_PRIVATE_KEY` only if you intend to publish/upgrade. For read-only dev, you can skip.
-3. `bun --filter @flicky/contracts codegen` — generates `apps/web/src/sui/gen/` against the currently-deployed package id from `deployed.json`. Required before `bun --filter web dev` typechecks.
-4. `bun dev` to spin up web + server.
-
-## Adding shadcn Components
-
-```bash
-bunx --bun shadcn@latest add button -c apps/web
-```
-
-Components land in `packages/ui/src/components` and are imported as:
-
-```tsx
-import { Button } from "@workspace/ui/components/button"
-```
+---
 
 ## Status
 
-Hackathon MVP in progress.
+**Shipped — live on Sui testnet.** The full duel lifecycle works end-to-end: zkLogin sign-in, sponsored `PredictManager` bootstrap, matchmaking, commit-reveal decks (AI Deckmaster, adaptive 3–5 sizing), atomic player-signed swipe PTBs, the live lockup view, two-phase on-chain settlement (`settle_card` → `finalize`), the settled-redeem keeper, ranked MMR + leaderboard, and the in-app SUI → dUSDC swap. Both the staked and free/practice tiers run on the same engine.
 
-- **Phase 1 (done)** — Move package shipped to testnet (`apps/contracts/deployed.json` for the live id), Move test suite, server cleanup, web rewired around generated codegen bindings, end-to-end typecheck + tests green.
-- **Phase 2 (next)** — PRD-spec UI (Practice on-ramp → 4 stake tiers → matchmaking → swipe + watch → settle + redeem → share card), WebSocket matchmaking + game-room relay, sponsored-gas service, `Duel` indexer + PnL/settle tracker, settled-redeem keeper.
-- **Phase 3** — AI Deckmaster (5-nearest-oracle generation, commit-reveal) and `swap` module wiring on the Deposit page.
-- **Phase 4** — zkLogin via Enoki + sponsored Predict Manager bootstrap + Deposit/Swap screen.
+The deployed package id lives in [`apps/contracts/deployed.json`](apps/contracts/deployed.json) (source of truth). Design docs: [`docs/prd.md`](docs/prd.md) and [`docs/deepbook-oracle-architecture.md`](docs/deepbook-oracle-architecture.md).
 
-Design docs live in [`docs/prd.md`](docs/prd.md) and [`docs/deepbook-oracle-architecture.md`](docs/deepbook-oracle-architecture.md).
+**What's next** — the duel is the first mode. The same engine opens up battle royales, daily solo gauntlets, tournaments, live events, and streak rewards. The bigger idea: **DeFi on DeepBook can be a game** — make it feel like one and you onboard everyone, not just traders.
+
+---
+
+## Run it locally
+
+Developer setup, local commands, and conventions live in **[`CONTRIBUTING.md`](CONTRIBUTING.md)**. The short version:
+
+```bash
+bun install   # install all workspaces (requires Bun ≥ 1.3 + Sui CLI)
+bun dev       # turbo dev — runs web (:5173) + server (:3001) in parallel
+```
+
+> First run needs a one-time `bun --filter @flicky/contracts codegen` to generate the gitignored Sui bindings — see [`CONTRIBUTING.md`](CONTRIBUTING.md#first-time-developer-onboarding).
 
 ## License
 
