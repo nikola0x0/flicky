@@ -5,40 +5,20 @@
  * can't masquerade as a missing manager (which would make the web mint a
  * duplicate PredictManager). See predict.ts for the contract.
  *
- * We point FLICKY_DB_PATH at a temp file BEFORE importing so the cache
- * lookups inside findManagerFor hit an isolated DB, then drive a fake
- * SuiClient whose queryEvents we script per test.
+ * findManagerFor is cache-first, so every call touches the Postgres
+ * `predict_manager` table — the suite runs only against a throwaway
+ * TEST_DATABASE_URL (see test-preload.ts) and skips otherwise.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { afterAll, beforeEach, describe, expect, test } from "bun:test"
 import type { SuiClient } from "@mysten/sui/client"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
+import * as predict from "./predict"
+import * as db from "./db"
+import { HAS_TEST_DB, resetTables } from "./test-db"
 
 /** Mirror the id normalization findManagerFor applies before returning. */
 const mgr = (owner: string, i: number) =>
   normalizeSuiObjectId(`0xmgr_${owner}_${i}`)
-
-let predict: typeof import("./predict")
-let db: typeof import("./db")
-let tmpDir: string
-
-beforeAll(async () => {
-  tmpDir = mkdtempSync(join(tmpdir(), "flicky-predict-test-"))
-  process.env.FLICKY_DB_PATH = resolve(tmpDir, "test.db")
-  predict = await import("./predict")
-  db = await import("./db")
-})
-
-afterAll(() => {
-  db?.closeDb()
-  rmSync(tmpDir, { recursive: true, force: true })
-})
-
-beforeEach(() => {
-  db.getDb().exec("DELETE FROM predict_manager")
-})
 
 /** A page of PredictManagerCreated events as the RPC would return them. */
 function page(owners: string[], hasNextPage: boolean) {
@@ -71,7 +51,15 @@ function throwingClient(): SuiClient {
   } as unknown as SuiClient
 }
 
-describe("findManagerFor return contract", () => {
+describe.skipIf(!HAS_TEST_DB)("findManagerFor return contract", () => {
+  beforeEach(async () => {
+    await resetTables()
+  })
+
+  afterAll(async () => {
+    await db.closeDb()
+  })
+
   test("returns the manager id when the owner is on the first page", async () => {
     const c = clientFromPages([page(["0xalice", "0xbob"], false)])
     expect(await predict.findManagerFor(c, "0xbob")).toBe(mgr("0xbob", 1))
@@ -101,7 +89,7 @@ describe("findManagerFor return contract", () => {
   })
 
   test("a cache hit short-circuits without touching the client", async () => {
-    db.cacheManager("0xcached", "0xmgr_cached")
+    await db.cacheManager("0xcached", "0xmgr_cached")
     // A throwing client would blow up if the scan ran; the cache must win.
     expect(await predict.findManagerFor(throwingClient(), "0xcached")).toBe(
       "0xmgr_cached",
@@ -111,6 +99,6 @@ describe("findManagerFor return contract", () => {
   test("memoizes a freshly-resolved manager into the cache", async () => {
     const c = clientFromPages([page(["0xfresh"], false)])
     await predict.findManagerFor(c, "0xfresh")
-    expect(db.getCachedManager("0xfresh")).toBe(mgr("0xfresh", 0))
+    expect(await db.getCachedManager("0xfresh")).toBe(mgr("0xfresh", 0))
   })
 })

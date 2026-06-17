@@ -35,7 +35,10 @@ function toWire(d: DuelRow) {
   }
 }
 
-export function handleDuelsRequest(req: Request, url: URL): Response | null {
+export async function handleDuelsRequest(
+  req: Request,
+  url: URL,
+): Promise<Response | null> {
   if (url.pathname === "/duels/recent" && req.method === "GET") {
     const limitRaw = url.searchParams.get("limit")
     const limit = Math.min(100, Math.max(1, Number(limitRaw ?? 20)))
@@ -51,7 +54,7 @@ export function handleDuelsRequest(req: Request, url: URL): Response | null {
     const player =
       playerRaw && playerRaw.startsWith("0x") ? playerRaw : undefined
     try {
-      const duels = listRecentDuels(limit, status, player).map(toWire)
+      const duels = (await listRecentDuels(limit, status, player)).map(toWire)
       return json({ duels })
     } catch (e) {
       return json(
@@ -65,7 +68,7 @@ export function handleDuelsRequest(req: Request, url: URL): Response | null {
     const id = decodeURIComponent(url.pathname.slice("/duels/".length))
     if (!id.startsWith("0x")) return json({ error: "bad duel id" }, 400)
     try {
-      const d = getDuel(id)
+      const d = await getDuel(id)
       if (!d) return json({ error: "duel not mirrored yet" }, 404)
       return json(toWire(d))
     } catch (e) {

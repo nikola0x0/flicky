@@ -56,7 +56,7 @@ export async function findManagerFor(
   client: SuiClient,
   owner: string,
 ): Promise<string | null> {
-  const cached = getCachedManager(owner)
+  const cached = await getCachedManager(owner)
   if (cached) return cached
   let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
   // No try/catch: a queryEvents rejection propagates so the caller can tell
@@ -74,7 +74,7 @@ export async function findManagerFor(
       const p = e.parsedJson as { manager_id: string; owner: string }
       if (p.owner === owner) {
         const id = normalizeSuiObjectId(p.manager_id)
-        cacheManager(owner, id)
+        await cacheManager(owner, id)
         return id
       }
     }

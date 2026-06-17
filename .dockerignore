@@ -1,0 +1,19 @@
+# Build context is the monorepo ROOT (see apps/server/Dockerfile), so the
+# ignore rules that matter live here, not in apps/server/.dockerignore.
+# Critically, never bake local .env secrets into the image — env is
+# injected at runtime via Railway service variables.
+**/.env
+**/.env.local
+**/.env.*.local
+
+node_modules
+**/node_modules
+dist
+**/dist
+.turbo
+**/.turbo
+.git
+*.log
+apps/web/dist
+.data
+**/.data

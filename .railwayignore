@@ -1,0 +1,17 @@
+# Keep the upload to Railway small + let the Dockerfile re-resolve deps.
+node_modules
+**/node_modules
+.git
+dist
+**/dist
+.turbo
+**/.turbo
+*.log
+**/.env
+**/.env.local
+apps/web/dist
+.data
+**/.data
+# Local reference clones — not part of the build.
+temp
+**/temp

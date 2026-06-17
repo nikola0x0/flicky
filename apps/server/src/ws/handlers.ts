@@ -57,7 +57,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           return
         }
         registerAddress(ws, msg.address)
-        sendChatHistory(ws)
+        await sendChatHistory(ws)
         log.info(`hello ${shortId(msg.address)}`)
         return
       }
@@ -192,7 +192,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           })
           return
         }
-        handleChatSend(ws, msg.text)
+        await handleChatSend(ws, msg.text)
         return
       }
       case "chat_react": {
@@ -206,7 +206,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           })
           return
         }
-        handleChatReact(ws, msg.duelId, msg.emoji)
+        await handleChatReact(ws, msg.duelId, msg.emoji)
         return
       }
       case "oracle_subscribe": {

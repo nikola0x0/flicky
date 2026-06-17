@@ -1,0 +1,41 @@
+# Auto-deploy the `staging` branch to Railway.
+#
+# Why CI instead of Railway's native GitHub integration: connecting a repo in
+# Railway needs the Railway GitHub App installed on `nikola0x0/flicky`, which
+# only the repo owner can authorize. This path uses a project-scoped
+# RAILWAY_TOKEN (repo secret) + `railway up`, so no GitHub App is required.
+#
+# Each service builds server-side on Railway from its own Dockerfile — selected
+# per service via the RAILWAY_DOCKERFILE_PATH service variable (already set:
+# apps/server/Dockerfile, apps/web/Dockerfile). `railway up` just uploads the
+# repo (root `.railwayignore` keeps node_modules/.env out); the build happens
+# on Railway's builders, so CI needs only the Railway CLI.
+name: Deploy staging → Railway
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [flicky-server, flicky-web]
+    # Per-service group so server + web deploy in parallel, but a newer push
+    # supersedes an in-flight deploy of the same service.
+    concurrency:
+      group: railway-staging-${{ matrix.service }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy ${{ matrix.service }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service ${{ matrix.service }} --ci

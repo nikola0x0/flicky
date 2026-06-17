@@ -17,14 +17,15 @@
  *   bun run backfill:ratings
  */
 import { recomputeRatingsFromMirror, topLeaderboard } from "../mmr"
+import { closeDb } from "../db"
 
-const { cleared, applied, skipped } = recomputeRatingsFromMirror()
+const { cleared, applied, skipped } = await recomputeRatingsFromMirror()
 console.log(
   `backfill: cleared ${cleared} rating row(s), replayed ${applied} duel(s)` +
     (skipped ? `, skipped ${skipped} (missing players)` : ""),
 )
 
-const top = topLeaderboard(20)
+const top = await topLeaderboard(20)
 if (top.length === 0) {
   console.log("leaderboard is empty — no COMPLETE duels in the mirror.")
 } else {
@@ -36,3 +37,6 @@ if (top.length === 0) {
     )
   }
 }
+
+// Close the pool so the script exits instead of hanging on an open connection.
+await closeDb()

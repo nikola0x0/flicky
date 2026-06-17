@@ -1,192 +1,173 @@
 /**
- * SQLite layer (bun:sqlite) — opened lazily at first use, single file
- * under `apps/server/.data/flicky.db` by default. We use bun:sqlite
- * directly rather than an ORM to keep the dep surface zero — Bun ships
- * with it built-in.
+ * Postgres layer (Bun.sql) — every async, backed by a single connection
+ * pool created from `DATABASE_URL`. We use Bun's built-in `Bun.sql`
+ * rather than an ORM or a third-party driver to keep the dep surface at
+ * zero (the server still ships no runtime deps beyond @mysten/*).
  *
- * Tables:
- *   event_cursor   one row per (event-type tracker) with the last
- *                  Sui EventId we successfully consumed. The indexer
- *                  resumes from this on next tick / restart.
+ * Tables (created on first use by `ensureSchema`):
+ *   event_cursor   one row per (event-type tracker) with the last Sui
+ *                  EventId we consumed. The indexer resumes from this.
+ *   duel           mirror of recent duel state for /duels reads.
+ *   chat_message   global chat backlog, auto-pruned.
+ *   player_rating  ELO ratings + W/L/T counters.
+ *   deck           deckmaster commit-reveal plaintext (was decks.json).
  *
- * WAL mode is enabled so the keeper / indexer running in the same
- * process don't block each other on writes (and so an ungraceful exit
- * doesn't corrupt the file). The DB is single-writer by design — fine
- * for one Bun process; if we ever want to fan out across workers,
- * switch to Postgres (the schema is portable).
+ * Postgres replaces the old single-file bun:sqlite DB so the backend can
+ * run as a normal stateless container on Railway (no volume) and, later,
+ * fan out across workers — the schema was always written to be portable.
+ *
+ * Connection: the deployed service uses the private `DATABASE_URL`
+ * (postgres.railway.internal); local dev / tests use the public proxy
+ * URL. A missing URL throws at first query, not at import, so unit tests
+ * that never touch the DB still load this module.
  */
-import { Database } from "bun:sqlite"
-import { mkdirSync } from "node:fs"
-import { dirname } from "node:path"
+import { SQL } from "bun"
 import { env } from "./env"
 import { makeLogger } from "./log"
 
 const log = makeLogger("db")
 
-let _db: Database | null = null
+let _sql: SQL | null = null
+let _ready: Promise<void> | null = null
 
-export function getDb(): Database {
-  if (_db) return _db
-  try {
-    mkdirSync(dirname(env.dbPath), { recursive: true })
-    _db = new Database(env.dbPath, { create: true })
-    _db.exec("PRAGMA journal_mode = WAL")
-    _db.exec("PRAGMA synchronous = NORMAL")
-    _db.exec("PRAGMA busy_timeout = 2000")
-    _db.exec(`
-      CREATE TABLE IF NOT EXISTS event_cursor (
-        tracker_id TEXT PRIMARY KEY,
-        tx_digest  TEXT NOT NULL,
-        event_seq  TEXT NOT NULL,
-        updated_at INTEGER NOT NULL
-      )
-    `)
-    _db.exec(`
-      CREATE TABLE IF NOT EXISTS duel (
-        id              TEXT PRIMARY KEY,
-        status          TEXT NOT NULL,           -- PENDING | ACTIVE | COMPLETE
-        stake_coin_type TEXT NOT NULL,
-        creator         TEXT NOT NULL,
-        challenger      TEXT NOT NULL,
-        cards_revealed  INTEGER NOT NULL,        -- 0 / 1
-        card_count      INTEGER NOT NULL,
-        settled_count   INTEGER NOT NULL,
-        -- Cumulative real-PnL fields per the new contract:
-        --   winner determined by (p0_payout + p1_premium) vs (p1_payout + p0_premium).
-        p0_payout       TEXT NOT NULL DEFAULT '0',
-        p0_premium      TEXT NOT NULL DEFAULT '0',
-        p1_payout       TEXT NOT NULL DEFAULT '0',
-        p1_premium      TEXT NOT NULL DEFAULT '0',
-        -- Authoritative duel result recorded live from DuelFinalized:
-        -- 'p0' (creator), 'p1' (challenger), or 'tie'. NULL for duels not
-        -- yet finalized, or finalized before this column existed (those
-        -- fall back to the head-to-head net rule documented above).
-        winner          TEXT,
-        started_at_ms   INTEGER NOT NULL DEFAULT 0,
-        -- JSON array of per-card outcomes (one entry per settled card,
-        -- written incrementally by the indexer on CardSettled events).
-        card_outcomes   TEXT NOT NULL DEFAULT '[]',
-        -- JSON array of per-card swipes (settled or not). Populated by
-        -- the indexer's refreshDuel pass so the UI can render running
-        -- PnL and recover state after F5 from the mirror alone.
-        swipes          TEXT NOT NULL DEFAULT '[]',
-        -- JSON array of {oracle_id, strike} per card. Needed so the UI
-        -- can resolve live oracle prices for mark-to-market PnL after
-        -- recovering a duel from the mirror without an active socket.
-        cards           TEXT NOT NULL DEFAULT '[]',
-        last_updated_ms INTEGER NOT NULL
-      )
-    `)
-    // Backfill schema for older DB files. ALTER fails silently if the
-    // column already exists, which is the success case here.
-    for (const stmt of [
-      `ALTER TABLE duel ADD COLUMN card_outcomes TEXT NOT NULL DEFAULT '[]'`,
-      `ALTER TABLE duel ADD COLUMN p0_payout TEXT NOT NULL DEFAULT '0'`,
-      `ALTER TABLE duel ADD COLUMN p0_premium TEXT NOT NULL DEFAULT '0'`,
-      `ALTER TABLE duel ADD COLUMN p1_payout TEXT NOT NULL DEFAULT '0'`,
-      `ALTER TABLE duel ADD COLUMN p1_premium TEXT NOT NULL DEFAULT '0'`,
-      `ALTER TABLE duel ADD COLUMN started_at_ms INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE duel ADD COLUMN swipes TEXT NOT NULL DEFAULT '[]'`,
-      `ALTER TABLE duel ADD COLUMN cards TEXT NOT NULL DEFAULT '[]'`,
-      `ALTER TABLE duel ADD COLUMN winner TEXT`,
-    ]) {
-      try {
-        _db.exec(stmt)
-      } catch {
-        /* already present */
-      }
-    }
-    _db.exec(`CREATE INDEX IF NOT EXISTS duel_status_updated
-              ON duel (status, last_updated_ms DESC)`)
-    _db.exec(`CREATE INDEX IF NOT EXISTS duel_creator
-              ON duel (creator, last_updated_ms DESC)`)
-    _db.exec(`
-      CREATE TABLE IF NOT EXISTS chat_message (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_address TEXT NOT NULL,
-        text         TEXT NOT NULL,
-        timestamp_ms INTEGER NOT NULL
-      )
-    `)
-    _db.exec(`CREATE INDEX IF NOT EXISTS chat_message_ts
-              ON chat_message (timestamp_ms DESC)`)
-    _db.exec(`
-      CREATE TABLE IF NOT EXISTS player_rating (
-        address         TEXT PRIMARY KEY,
-        rating          INTEGER NOT NULL,
-        games_played    INTEGER NOT NULL,
-        wins            INTEGER NOT NULL DEFAULT 0,
-        losses          INTEGER NOT NULL DEFAULT 0,
-        ties            INTEGER NOT NULL DEFAULT 0,
-        last_updated_ms INTEGER NOT NULL
-      )
-    `)
-    _db.exec(`CREATE INDEX IF NOT EXISTS player_rating_lb
-              ON player_rating (rating DESC)`)
-    // Owner → PredictManager id cache. The manager is a SHARED object with
-    // an internal `owner` field, so it can't be found via getOwnedObjects —
-    // discovery means walking `PredictManagerCreated` events newest-first
-    // (see predict.ts::findManagerFor). That scan is unbounded and grows
-    // with testnet churn, so we memoize the resolved id here: a manager's
-    // owner never changes, making this cache effectively permanent.
-    _db.exec(`
-      CREATE TABLE IF NOT EXISTS predict_manager (
-        owner       TEXT PRIMARY KEY,
-        manager_id  TEXT NOT NULL,
-        cached_at   INTEGER NOT NULL
-      )
-    `)
-    smokeTest(_db)
-    log.info(`opened ${env.dbPath} (WAL)`)
-    return _db
-  } catch (e) {
-    const msg = describeError(e)
-    log.error(`failed to open ${env.dbPath}: ${msg}`)
-    log.error(
-      `hint: if you ran 'bun --hot', a stale process may still hold the file. ` +
-        `Check with 'lsof ${env.dbPath}' and kill the PID, then 'rm ${env.dbPath}-shm ${env.dbPath}-wal'.`,
+/** Lazily build the shared pool. Throws if DATABASE_URL is unset. */
+export function getSql(): SQL {
+  if (_sql) return _sql
+  if (!env.databaseUrl) {
+    throw new Error(
+      "DATABASE_URL is not set — point it at the Railway Postgres " +
+        "(set it to the private URL when deployed, the public proxy URL locally)",
     )
-    throw e
   }
+  _sql = new SQL({ url: env.databaseUrl, max: env.dbPoolMax })
+  return _sql
 }
 
 /**
- * Write + read a sentinel so a broken DB fails at boot, not in the
- * middle of an indexer tick. Common causes the smoke test catches:
- * file locked by another process, deleted out from under us, disk full,
- * permission changed.
+ * Create every table + index if missing. Memoized so concurrent callers
+ * share one round of DDL. Each exported function awaits this first, so
+ * the schema is guaranteed present before the first read/write regardless
+ * of which entry point runs first (indexer tick, WS handler, /health…).
  */
-function smokeTest(db: Database): void {
-  db.exec(
-    "CREATE TABLE IF NOT EXISTS _smoketest (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-  )
-  // Fixed key — every boot overwrites the same row, so this table never
-  // grows past one entry regardless of how many times we restart.
-  const key = "boot"
-  const value = `${process.pid}@${Date.now()}`
-  db.query(
-    `INSERT INTO _smoketest (key, value) VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  ).run(key, value)
-  const row = db
-    .query<{ value: string }, [string]>(
-      "SELECT value FROM _smoketest WHERE key = ?",
-    )
-    .get(key)
-  if (row?.value !== value) {
-    throw new Error("smoke test mismatch: write succeeded but read returned wrong value")
-  }
+export function ready(): Promise<void> {
+  if (_ready) return _ready
+  _ready = ensureSchema().catch((e) => {
+    // Reset so a transient failure (DB still booting) can be retried on
+    // the next call rather than poisoning the singleton forever.
+    _ready = null
+    throw e
+  })
+  return _ready
 }
 
-export function closeDb(): void {
-  if (_db) {
+async function ensureSchema(): Promise<void> {
+  const sql = getSql()
+  await sql`
+    CREATE TABLE IF NOT EXISTS event_cursor (
+      tracker_id TEXT PRIMARY KEY,
+      tx_digest  TEXT   NOT NULL,
+      event_seq  TEXT   NOT NULL,
+      updated_at BIGINT NOT NULL
+    )
+  `
+  await sql`
+    CREATE TABLE IF NOT EXISTS duel (
+      id              TEXT PRIMARY KEY,
+      status          TEXT    NOT NULL,            -- PENDING | ACTIVE | COMPLETE
+      stake_coin_type TEXT    NOT NULL,
+      creator         TEXT    NOT NULL,
+      challenger      TEXT    NOT NULL,
+      cards_revealed  BOOLEAN NOT NULL DEFAULT FALSE,
+      card_count      INTEGER NOT NULL,
+      settled_count   INTEGER NOT NULL,
+      -- Cumulative real-PnL fields per the contract; winner determined by
+      -- (p0_payout + p1_premium) vs (p1_payout + p0_premium). Stored as
+      -- TEXT because these are u64 values that can exceed 2^53.
+      p0_payout       TEXT    NOT NULL DEFAULT '0',
+      p0_premium      TEXT    NOT NULL DEFAULT '0',
+      p1_payout       TEXT    NOT NULL DEFAULT '0',
+      p1_premium      TEXT    NOT NULL DEFAULT '0',
+      -- Authoritative duel result recorded live from DuelFinalized:
+      -- 'p0' (creator), 'p1' (challenger), or 'tie'. NULL until finalized,
+      -- or for rows finalized before this column existed (those fall back
+      -- to the head-to-head net rule documented above).
+      winner          TEXT,
+      started_at_ms   BIGINT  NOT NULL DEFAULT 0,
+      -- JSON blobs (kept as TEXT, mirroring the old SQLite layout — we
+      -- never query inside them, only round-trip whole arrays).
+      card_outcomes   TEXT    NOT NULL DEFAULT '[]',
+      swipes          TEXT    NOT NULL DEFAULT '[]',
+      cards           TEXT    NOT NULL DEFAULT '[]',
+      last_updated_ms BIGINT  NOT NULL
+    )
+  `
+  // Idempotent add for tables created before the winner column existed.
+  await sql`ALTER TABLE duel ADD COLUMN IF NOT EXISTS winner TEXT`
+  await sql`CREATE INDEX IF NOT EXISTS duel_status_updated
+            ON duel (status, last_updated_ms DESC)`
+  await sql`CREATE INDEX IF NOT EXISTS duel_creator
+            ON duel (creator, last_updated_ms DESC)`
+  await sql`
+    CREATE TABLE IF NOT EXISTS chat_message (
+      id           BIGSERIAL PRIMARY KEY,
+      from_address TEXT   NOT NULL,
+      text         TEXT   NOT NULL,
+      timestamp_ms BIGINT NOT NULL
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS chat_message_ts
+            ON chat_message (timestamp_ms DESC)`
+  await sql`
+    CREATE TABLE IF NOT EXISTS player_rating (
+      address         TEXT PRIMARY KEY,
+      rating          INTEGER NOT NULL,
+      games_played    INTEGER NOT NULL,
+      wins            INTEGER NOT NULL DEFAULT 0,
+      losses          INTEGER NOT NULL DEFAULT 0,
+      ties            INTEGER NOT NULL DEFAULT 0,
+      last_updated_ms BIGINT  NOT NULL
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS player_rating_lb
+            ON player_rating (rating DESC)`
+  await sql`
+    CREATE TABLE IF NOT EXISTS deck (
+      hash_hex   TEXT PRIMARY KEY,   -- lowercased 0x… sha2-256 commitment
+      cards      TEXT   NOT NULL,    -- JSON [{oracle_id, strike: string}]
+      seed_hex   TEXT,
+      created_at BIGINT NOT NULL
+    )
+  `
+  // Owner → PredictManager id cache. The manager is a SHARED object with an
+  // internal `owner` field, so it can't be found via getOwnedObjects —
+  // discovery means an unbounded `PredictManagerCreated` event scan
+  // (predict.ts::findManagerFor). We memoize the resolved id here: a
+  // manager's owner never changes, so a hit is permanent and skips the scan.
+  await sql`
+    CREATE TABLE IF NOT EXISTS predict_manager (
+      owner      TEXT PRIMARY KEY,
+      manager_id TEXT   NOT NULL,
+      cached_at  BIGINT NOT NULL
+    )
+  `
+  log.info(`schema ready on ${redactUrl(env.databaseUrl ?? "")}`)
+}
+
+/** Strip credentials from a connection URL for safe logging. */
+function redactUrl(url: string): string {
+  return url.replace(/:\/\/([^:]+):([^@]+)@/, "://$1:****@")
+}
+
+export async function closeDb(): Promise<void> {
+  if (_sql) {
     try {
-      _db.close()
-      log.info(`closed ${env.dbPath}`)
+      await _sql.end()
+      log.info("closed pool")
     } catch (e) {
       log.warn(`close failed: ${describeError(e)}`)
     } finally {
-      _db = null
+      _sql = null
+      _ready = null
     }
   }
 }
@@ -199,19 +180,21 @@ function describeError(e: unknown): string {
   return String(e)
 }
 
+// ─── Cursors ──────────────────────────────────────────────────────────────────
+
 export interface EventCursor {
   txDigest: string
   eventSeq: string
 }
 
-export function loadCursor(trackerId: string): EventCursor | null {
+export async function loadCursor(trackerId: string): Promise<EventCursor | null> {
+  await ready()
+  const sql = getSql()
   try {
-    const row = getDb()
-      .query<
-        { tx_digest: string; event_seq: string },
-        [string]
-      >("SELECT tx_digest, event_seq FROM event_cursor WHERE tracker_id = ?")
-      .get(trackerId)
+    const rows = (await sql`
+      SELECT tx_digest, event_seq FROM event_cursor WHERE tracker_id = ${trackerId}
+    `) as Array<{ tx_digest: string; event_seq: string }>
+    const row = rows[0]
     if (!row) return null
     return { txDigest: row.tx_digest, eventSeq: row.event_seq }
   } catch (e) {
@@ -220,22 +203,46 @@ export function loadCursor(trackerId: string): EventCursor | null {
   }
 }
 
-export function saveCursor(trackerId: string, cursor: EventCursor): void {
+export async function saveCursor(
+  trackerId: string,
+  cursor: EventCursor,
+): Promise<void> {
+  await ready()
+  const sql = getSql()
   try {
-    getDb()
-      .query(
-        `INSERT INTO event_cursor (tracker_id, tx_digest, event_seq, updated_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(tracker_id) DO UPDATE SET
-           tx_digest = excluded.tx_digest,
-           event_seq = excluded.event_seq,
-           updated_at = excluded.updated_at`,
-      )
-      .run(trackerId, cursor.txDigest, cursor.eventSeq, Date.now())
+    await sql`
+      INSERT INTO event_cursor (tracker_id, tx_digest, event_seq, updated_at)
+      VALUES (${trackerId}, ${cursor.txDigest}, ${cursor.eventSeq}, ${Date.now()})
+      ON CONFLICT (tracker_id) DO UPDATE SET
+        tx_digest  = EXCLUDED.tx_digest,
+        event_seq  = EXCLUDED.event_seq,
+        updated_at = EXCLUDED.updated_at
+    `
   } catch (e) {
     log.error(`saveCursor(${trackerId}): ${describeError(e)}`)
     throw e
   }
+}
+
+export async function listCursors(): Promise<
+  Array<EventCursor & { trackerId: string; updatedAt: number }>
+> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    SELECT tracker_id, tx_digest, event_seq, updated_at FROM event_cursor
+  `) as Array<{
+    tracker_id: string
+    tx_digest: string
+    event_seq: string
+    updated_at: number | string | bigint
+  }>
+  return rows.map((r) => ({
+    trackerId: r.tracker_id,
+    txDigest: r.tx_digest,
+    eventSeq: r.event_seq,
+    updatedAt: Number(r.updated_at),
+  }))
 }
 
 // ─── Duel mirror ────────────────────────────────────────────────────────────
@@ -302,53 +309,40 @@ export interface PendingSwipe {
   p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
 }
 
-export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
+export async function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): Promise<void> {
+  await ready()
+  const sql = getSql()
   try {
-    getDb()
-      .query(
-        `INSERT INTO duel (id, status, stake_coin_type, creator, challenger,
-                           cards_revealed, card_count, settled_count,
-                           p0_payout, p0_premium, p1_payout, p1_premium,
-                           started_at_ms, card_outcomes, swipes, cards,
-                           last_updated_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           status          = excluded.status,
-           stake_coin_type = excluded.stake_coin_type,
-           creator         = excluded.creator,
-           challenger      = excluded.challenger,
-           cards_revealed  = excluded.cards_revealed,
-           card_count      = excluded.card_count,
-           settled_count   = excluded.settled_count,
-           p0_payout       = excluded.p0_payout,
-           p0_premium      = excluded.p0_premium,
-           p1_payout       = excluded.p1_payout,
-           p1_premium      = excluded.p1_premium,
-           started_at_ms   = excluded.started_at_ms,
-           card_outcomes   = excluded.card_outcomes,
-           swipes          = excluded.swipes,
-           cards           = excluded.cards,
-           last_updated_ms = excluded.last_updated_ms`,
-      )
-      .run(
-        d.id,
-        d.status,
-        d.stakeCoinType,
-        d.creator,
-        d.challenger,
-        d.cardsRevealed ? 1 : 0,
-        d.cardCount,
-        d.settledCount,
-        d.p0Payout,
-        d.p0Premium,
-        d.p1Payout,
-        d.p1Premium,
-        d.startedAtMs,
-        JSON.stringify(d.cardOutcomes),
-        JSON.stringify(d.swipes),
-        JSON.stringify(d.cards),
-        Date.now(),
-      )
+    await sql`
+      INSERT INTO duel (id, status, stake_coin_type, creator, challenger,
+                        cards_revealed, card_count, settled_count,
+                        p0_payout, p0_premium, p1_payout, p1_premium,
+                        started_at_ms, card_outcomes, swipes, cards,
+                        last_updated_ms)
+      VALUES (${d.id}, ${d.status}, ${d.stakeCoinType}, ${d.creator},
+              ${d.challenger}, ${d.cardsRevealed}, ${d.cardCount},
+              ${d.settledCount}, ${d.p0Payout}, ${d.p0Premium},
+              ${d.p1Payout}, ${d.p1Premium}, ${d.startedAtMs},
+              ${JSON.stringify(d.cardOutcomes)}, ${JSON.stringify(d.swipes)},
+              ${JSON.stringify(d.cards)}, ${Date.now()})
+      ON CONFLICT (id) DO UPDATE SET
+        status          = EXCLUDED.status,
+        stake_coin_type = EXCLUDED.stake_coin_type,
+        creator         = EXCLUDED.creator,
+        challenger      = EXCLUDED.challenger,
+        cards_revealed  = EXCLUDED.cards_revealed,
+        card_count      = EXCLUDED.card_count,
+        settled_count   = EXCLUDED.settled_count,
+        p0_payout       = EXCLUDED.p0_payout,
+        p0_premium      = EXCLUDED.p0_premium,
+        p1_payout       = EXCLUDED.p1_payout,
+        p1_premium      = EXCLUDED.p1_premium,
+        started_at_ms   = EXCLUDED.started_at_ms,
+        card_outcomes   = EXCLUDED.card_outcomes,
+        swipes          = EXCLUDED.swipes,
+        cards           = EXCLUDED.cards,
+        last_updated_ms = EXCLUDED.last_updated_ms
+    `
   } catch (e) {
     log.error(`upsertDuel(${d.id}): ${describeError(e)}`)
     throw e
@@ -360,11 +354,14 @@ export function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): void {
  * from `upsertDuel` so the indexer's per-tick refresh (which doesn't know
  * the winner) can't clobber it. No-op if the duel row isn't mirrored yet.
  */
-export function setDuelWinner(duelId: string, winner: DuelWinner): void {
+export async function setDuelWinner(
+  duelId: string,
+  winner: DuelWinner,
+): Promise<void> {
+  await ready()
+  const sql = getSql()
   try {
-    getDb()
-      .query("UPDATE duel SET winner = ? WHERE id = ?")
-      .run(winner, duelId)
+    await sql`UPDATE duel SET winner = ${winner} WHERE id = ${duelId}`
   } catch (e) {
     log.error(`setDuelWinner(${duelId}): ${describeError(e)}`)
   }
@@ -373,37 +370,42 @@ export function setDuelWinner(duelId: string, winner: DuelWinner): void {
 /**
  * Merge a freshly-emitted CardSettled outcome into the duel's
  * card_outcomes JSON array. Idempotent: if an outcome already exists
- * for this card_idx it's overwritten (later event wins).
+ * for this card_idx it's overwritten (later event wins). Runs in a
+ * transaction with `SELECT … FOR UPDATE` so a concurrent indexer/keeper
+ * write can't clobber the read-modify-write.
  */
-export function mergeCardOutcome(duelId: string, outcome: CardOutcome): void {
+export async function mergeCardOutcome(
+  duelId: string,
+  outcome: CardOutcome,
+): Promise<void> {
+  await ready()
+  const sql = getSql()
   try {
-    const row = getDb()
-      .query<{ card_outcomes: string }, [string]>(
-        "SELECT card_outcomes FROM duel WHERE id = ?",
-      )
-      .get(duelId)
-    let arr: CardOutcome[] = []
-    if (row) {
+    await sql.begin(async (tx) => {
+      const rows = (await tx`
+        SELECT card_outcomes FROM duel WHERE id = ${duelId} FOR UPDATE
+      `) as Array<{ card_outcomes: string }>
+      const row = rows[0]
+      // If the duel hasn't been mirrored yet the next upsertDuel from the
+      // indexer's refresh path will include this outcome via a re-read
+      // from chain, so we just no-op here.
+      if (!row) return
+      let arr: CardOutcome[] = []
       try {
         arr = JSON.parse(row.card_outcomes) as CardOutcome[]
       } catch {
         arr = []
       }
-    }
-    const i = arr.findIndex((o) => o.cardIdx === outcome.cardIdx)
-    if (i >= 0) arr[i] = outcome
-    else arr.push(outcome)
-    arr.sort((a, b) => a.cardIdx - b.cardIdx)
-    if (row) {
-      getDb()
-        .query<unknown, [string, number, string]>(
-          "UPDATE duel SET card_outcomes = ?, last_updated_ms = ? WHERE id = ?",
-        )
-        .run(JSON.stringify(arr), Date.now(), duelId)
-    }
-    // If `row` is null the duel hasn't been mirrored yet — the next
-    // `upsertDuel` from the indexer's refresh path will include this
-    // outcome via a re-read from chain, so we just no-op here.
+      const i = arr.findIndex((o) => o.cardIdx === outcome.cardIdx)
+      if (i >= 0) arr[i] = outcome
+      else arr.push(outcome)
+      arr.sort((a, b) => a.cardIdx - b.cardIdx)
+      await tx`
+        UPDATE duel SET card_outcomes = ${JSON.stringify(arr)},
+                        last_updated_ms = ${Date.now()}
+        WHERE id = ${duelId}
+      `
+    })
   } catch (e) {
     log.error(`mergeCardOutcome(${duelId}): ${describeError(e)}`)
     throw e
@@ -416,7 +418,7 @@ interface DuelRowRaw {
   stake_coin_type: string
   creator: string
   challenger: string
-  cards_revealed: number
+  cards_revealed: boolean
   card_count: number
   settled_count: number
   p0_payout: string
@@ -424,11 +426,11 @@ interface DuelRowRaw {
   p1_payout: string
   p1_premium: string
   winner: string | null
-  started_at_ms: number
+  started_at_ms: number | string | bigint
   card_outcomes: string
   swipes: string
   cards: string
-  last_updated_ms: number
+  last_updated_ms: number | string | bigint
 }
 
 function rowToDuel(r: DuelRowRaw): DuelRow {
@@ -456,7 +458,7 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
     stakeCoinType: r.stake_coin_type,
     creator: r.creator,
     challenger: r.challenger,
-    cardsRevealed: r.cards_revealed === 1,
+    cardsRevealed: Boolean(r.cards_revealed),
     cardCount: r.card_count,
     settledCount: r.settled_count,
     p0Payout: r.p0_payout,
@@ -464,55 +466,56 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
     p1Payout: r.p1_payout,
     p1Premium: r.p1_premium,
     winner: (r.winner as DuelWinner | null) ?? null,
-    startedAtMs: r.started_at_ms,
+    startedAtMs: Number(r.started_at_ms),
     cardOutcomes: outcomes,
     swipes,
     cards,
-    lastUpdatedMs: r.last_updated_ms,
+    lastUpdatedMs: Number(r.last_updated_ms),
   }
 }
 
-export function getDuel(id: string): DuelRow | null {
-  const row = getDb()
-    .query<DuelRowRaw, [string]>("SELECT * FROM duel WHERE id = ?")
-    .get(id)
-  return row ? rowToDuel(row) : null
+export async function getDuel(id: string): Promise<DuelRow | null> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`SELECT * FROM duel WHERE id = ${id}`) as DuelRowRaw[]
+  return rows[0] ? rowToDuel(rows[0]) : null
 }
 
-export function listRecentDuels(
+export async function listRecentDuels(
   limit: number,
   status?: DuelRow["status"],
   player?: string,
-): DuelRow[] {
-  const db = getDb()
+): Promise<DuelRow[]> {
+  await ready()
+  const sql = getSql()
   // Build the WHERE clause dynamically — both filters are optional and
   // composable. `player` matches either side (creator OR challenger).
+  // `sql.unsafe` takes positional ($1…) params; values are still bound,
+  // never interpolated, so this stays injection-safe.
   const where: string[] = []
   const params: Array<string | number> = []
   if (status) {
-    where.push("status = ?")
     params.push(status)
+    where.push(`status = $${params.length}`)
   }
   if (player) {
-    where.push("(creator = ? OR challenger = ?)")
     params.push(player, player)
+    where.push(`(creator = $${params.length - 1} OR challenger = $${params.length})`)
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")} ` : ""
   params.push(limit)
-  const rows = db
-    .query<DuelRowRaw, Array<string | number>>(
-      `SELECT * FROM duel ${whereSql}ORDER BY last_updated_ms DESC LIMIT ?`,
-    )
-    .all(...params)
+  const query = `SELECT * FROM duel ${whereSql}ORDER BY last_updated_ms DESC LIMIT $${params.length}`
+  const rows = (await sql.unsafe(query, params)) as DuelRowRaw[]
   return rows.map(rowToDuel)
 }
 
-export function countDuels(): number {
-  return (
-    getDb()
-      .query<{ c: number }, []>("SELECT COUNT(*) AS c FROM duel")
-      .get()?.c ?? 0
-  )
+export async function countDuels(): Promise<number> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`SELECT COUNT(*)::int AS c FROM duel`) as Array<{
+    c: number
+  }>
+  return rows[0]?.c ?? 0
 }
 
 // ─── Chat ───────────────────────────────────────────────────────────────────
@@ -524,47 +527,57 @@ export interface ChatMessage {
   timestampMs: number
 }
 
-export function insertChatMessage(fromAddress: string, text: string): ChatMessage {
+export async function insertChatMessage(
+  fromAddress: string,
+  text: string,
+): Promise<ChatMessage> {
+  await ready()
+  const sql = getSql()
   const now = Date.now()
-  const res = getDb()
-    .query<{ id: number }, [string, string, number]>(
-      `INSERT INTO chat_message (from_address, text, timestamp_ms)
-       VALUES (?, ?, ?) RETURNING id`,
-    )
-    .get(fromAddress, text, now)
-  return { id: res?.id ?? 0, fromAddress, text, timestampMs: now }
+  const rows = (await sql`
+    INSERT INTO chat_message (from_address, text, timestamp_ms)
+    VALUES (${fromAddress}, ${text}, ${now})
+    RETURNING id
+  `) as Array<{ id: number | string | bigint }>
+  return { id: Number(rows[0]?.id ?? 0), fromAddress, text, timestampMs: now }
 }
 
-export function recentChatMessages(limit: number): ChatMessage[] {
-  const rows = getDb()
-    .query<
-      { id: number; from_address: string; text: string; timestamp_ms: number },
-      [number]
-    >(
-      `SELECT id, from_address, text, timestamp_ms FROM chat_message
-       ORDER BY id DESC LIMIT ?`,
-    )
-    .all(limit)
+export async function recentChatMessages(limit: number): Promise<ChatMessage[]> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    SELECT id, from_address, text, timestamp_ms FROM chat_message
+    ORDER BY id DESC LIMIT ${limit}
+  `) as Array<{
+    id: number | string | bigint
+    from_address: string
+    text: string
+    timestamp_ms: number | string | bigint
+  }>
   // Reverse so the caller can render in chronological order.
   return rows.reverse().map((r) => ({
-    id: r.id,
+    id: Number(r.id),
     fromAddress: r.from_address,
     text: r.text,
-    timestampMs: r.timestamp_ms,
+    timestampMs: Number(r.timestamp_ms),
   }))
 }
 
 /** Drop everything but the newest `keep` rows. Called periodically. */
-export function pruneChatMessages(keep: number): number {
-  const res = getDb()
-    .query<{ changes: number }, [number]>(
-      `DELETE FROM chat_message
-       WHERE id NOT IN (
-         SELECT id FROM chat_message ORDER BY id DESC LIMIT ?
-       )`,
+export async function pruneChatMessages(keep: number): Promise<number> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    WITH deleted AS (
+      DELETE FROM chat_message
+      WHERE id NOT IN (
+        SELECT id FROM chat_message ORDER BY id DESC LIMIT ${keep}
+      )
+      RETURNING id
     )
-    .run(keep)
-  return res.changes
+    SELECT COUNT(*)::int AS c FROM deleted
+  `) as Array<{ c: number }>
+  return rows[0]?.c ?? 0
 }
 
 // ─── Player ratings (MMR) ───────────────────────────────────────────────────
@@ -581,25 +594,36 @@ export interface PlayerRating {
 
 const DEFAULT_RATING = 1000
 
-export function getPlayerRating(address: string): PlayerRating {
-  const row = getDb()
-    .query<
-      {
-        address: string
-        rating: number
-        games_played: number
-        wins: number
-        losses: number
-        ties: number
-        last_updated_ms: number
-      },
-      [string]
-    >(
-      `SELECT address, rating, games_played, wins, losses, ties, last_updated_ms
-       FROM player_rating WHERE address = ?`,
-    )
-    .get(address)
-  if (!row) {
+interface PlayerRatingRaw {
+  address: string
+  rating: number
+  games_played: number
+  wins: number
+  losses: number
+  ties: number
+  last_updated_ms: number | string | bigint
+}
+
+function rowToRating(r: PlayerRatingRaw): PlayerRating {
+  return {
+    address: r.address,
+    rating: r.rating,
+    gamesPlayed: r.games_played,
+    wins: r.wins,
+    losses: r.losses,
+    ties: r.ties,
+    lastUpdatedMs: Number(r.last_updated_ms),
+  }
+}
+
+export async function getPlayerRating(address: string): Promise<PlayerRating> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    SELECT address, rating, games_played, wins, losses, ties, last_updated_ms
+    FROM player_rating WHERE address = ${address}
+  `) as PlayerRatingRaw[]
+  if (!rows[0]) {
     return {
       address,
       rating: DEFAULT_RATING,
@@ -610,40 +634,37 @@ export function getPlayerRating(address: string): PlayerRating {
       lastUpdatedMs: 0,
     }
   }
-  return {
-    address: row.address,
-    rating: row.rating,
-    gamesPlayed: row.games_played,
-    wins: row.wins,
-    losses: row.losses,
-    ties: row.ties,
-    lastUpdatedMs: row.last_updated_ms,
-  }
+  return rowToRating(rows[0])
 }
 
-export function upsertPlayerRating(r: PlayerRating): void {
-  getDb()
-    .query(
-      `INSERT INTO player_rating
-         (address, rating, games_played, wins, losses, ties, last_updated_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(address) DO UPDATE SET
-         rating = excluded.rating,
-         games_played = excluded.games_played,
-         wins = excluded.wins,
-         losses = excluded.losses,
-         ties = excluded.ties,
-         last_updated_ms = excluded.last_updated_ms`,
-    )
-    .run(
-      r.address,
-      r.rating,
-      r.gamesPlayed,
-      r.wins,
-      r.losses,
-      r.ties,
-      r.lastUpdatedMs,
-    )
+export async function upsertPlayerRating(r: PlayerRating): Promise<void> {
+  await ready()
+  const sql = getSql()
+  await sql`
+    INSERT INTO player_rating
+      (address, rating, games_played, wins, losses, ties, last_updated_ms)
+    VALUES (${r.address}, ${r.rating}, ${r.gamesPlayed}, ${r.wins},
+            ${r.losses}, ${r.ties}, ${r.lastUpdatedMs})
+    ON CONFLICT (address) DO UPDATE SET
+      rating          = EXCLUDED.rating,
+      games_played    = EXCLUDED.games_played,
+      wins            = EXCLUDED.wins,
+      losses          = EXCLUDED.losses,
+      ties            = EXCLUDED.ties,
+      last_updated_ms = EXCLUDED.last_updated_ms
+  `
+}
+
+export async function leaderboard(limit: number): Promise<PlayerRating[]> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    SELECT address, rating, games_played, wins, losses, ties, last_updated_ms
+    FROM player_rating
+    WHERE games_played > 0
+    ORDER BY rating DESC LIMIT ${limit}
+  `) as PlayerRatingRaw[]
+  return rows.map(rowToRating)
 }
 
 /**
@@ -651,39 +672,68 @@ export function upsertPlayerRating(r: PlayerRating): void {
  * which recomputes ELO from scratch by replaying COMPLETE duels — the
  * table must start empty so the replay isn't added on top of stale rows.
  */
-export function clearPlayerRatings(): number {
-  return getDb().run("DELETE FROM player_rating").changes
+export async function clearPlayerRatings(): Promise<number> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    WITH deleted AS (DELETE FROM player_rating RETURNING address)
+    SELECT COUNT(*)::int AS c FROM deleted
+  `) as Array<{ c: number }>
+  return rows[0]?.c ?? 0
 }
 
-export function leaderboard(limit: number): PlayerRating[] {
-  const rows = getDb()
-    .query<
-      {
-        address: string
-        rating: number
-        games_played: number
-        wins: number
-        losses: number
-        ties: number
-        last_updated_ms: number
-      },
-      [number]
-    >(
-      `SELECT address, rating, games_played, wins, losses, ties, last_updated_ms
-       FROM player_rating
-       WHERE games_played > 0
-       ORDER BY rating DESC LIMIT ?`,
-    )
-    .all(limit)
-  return rows.map((r) => ({
-    address: r.address,
-    rating: r.rating,
-    gamesPlayed: r.games_played,
-    wins: r.wins,
-    losses: r.losses,
-    ties: r.ties,
-    lastUpdatedMs: r.last_updated_ms,
-  }))
+// ─── Deckmaster plaintext store (commit-reveal) ──────────────────────────────
+//
+// Was apps/server/.data/decks.json. Each row stores the revealed card
+// vector (+ the seed used to derive the strikes) keyed by the lowercased
+// "0x…" sha2-256 commitment. deckmaster.ts wraps these with its bigint
+// (strike) (de)serialization.
+
+export interface DeckStoreRow {
+  /** JSON of [{ oracle_id, strike: string }]. */
+  cardsJson: string
+  seedHex: string | null
+}
+
+export async function upsertDeck(
+  hashHex: string,
+  cardsJson: string,
+  seedHex: string | null,
+): Promise<void> {
+  await ready()
+  const sql = getSql()
+  await sql`
+    INSERT INTO deck (hash_hex, cards, seed_hex, created_at)
+    VALUES (${hashHex.toLowerCase()}, ${cardsJson}, ${seedHex}, ${Date.now()})
+    ON CONFLICT (hash_hex) DO UPDATE SET
+      cards    = EXCLUDED.cards,
+      seed_hex = EXCLUDED.seed_hex
+  `
+}
+
+export async function getDeck(hashHex: string): Promise<DeckStoreRow | null> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    SELECT cards, seed_hex FROM deck WHERE hash_hex = ${hashHex.toLowerCase()}
+  `) as Array<{ cards: string; seed_hex: string | null }>
+  const row = rows[0]
+  return row ? { cardsJson: row.cards, seedHex: row.seed_hex } : null
+}
+
+export async function deleteDeck(hashHex: string): Promise<void> {
+  await ready()
+  const sql = getSql()
+  await sql`DELETE FROM deck WHERE hash_hex = ${hashHex.toLowerCase()}`
+}
+
+export async function countDecks(): Promise<number> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`SELECT COUNT(*)::int AS c FROM deck`) as Array<{
+    c: number
+  }>
+  return rows[0]?.c ?? 0
 }
 
 // ─── PredictManager cache ───────────────────────────────────────────────────
@@ -692,14 +742,14 @@ export function leaderboard(limit: number): PlayerRating[] {
  * Resolved manager id for `owner`, or null if we've never cached one.
  * A cache hit lets `findManagerFor` skip the on-chain event scan entirely.
  */
-export function getCachedManager(owner: string): string | null {
+export async function getCachedManager(owner: string): Promise<string | null> {
+  await ready()
+  const sql = getSql()
   try {
-    const row = getDb()
-      .query<{ manager_id: string }, [string]>(
-        "SELECT manager_id FROM predict_manager WHERE owner = ?",
-      )
-      .get(owner)
-    return row?.manager_id ?? null
+    const rows = (await sql`
+      SELECT manager_id FROM predict_manager WHERE owner = ${owner}
+    `) as Array<{ manager_id: string }>
+    return rows[0]?.manager_id ?? null
   } catch (e) {
     log.error(`getCachedManager(${owner}): ${describeError(e)}`)
     return null
@@ -710,35 +760,21 @@ export function getCachedManager(owner: string): string | null {
  * Memoize `owner → managerId`. Upserts so a re-bootstrapped owner (one who
  * minted a fresh manager) overwrites the stale id on next discovery.
  */
-export function cacheManager(owner: string, managerId: string): void {
+export async function cacheManager(
+  owner: string,
+  managerId: string,
+): Promise<void> {
+  await ready()
+  const sql = getSql()
   try {
-    getDb()
-      .query(
-        `INSERT INTO predict_manager (owner, manager_id, cached_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(owner) DO UPDATE SET
-           manager_id = excluded.manager_id,
-           cached_at  = excluded.cached_at`,
-      )
-      .run(owner, managerId, Date.now())
+    await sql`
+      INSERT INTO predict_manager (owner, manager_id, cached_at)
+      VALUES (${owner}, ${managerId}, ${Date.now()})
+      ON CONFLICT (owner) DO UPDATE SET
+        manager_id = EXCLUDED.manager_id,
+        cached_at  = EXCLUDED.cached_at
+    `
   } catch (e) {
     log.error(`cacheManager(${owner}): ${describeError(e)}`)
   }
-}
-
-// ─── Cursors (existing) ─────────────────────────────────────────────────────
-
-export function listCursors(): Array<EventCursor & { trackerId: string; updatedAt: number }> {
-  return getDb()
-    .query<
-      { tracker_id: string; tx_digest: string; event_seq: string; updated_at: number },
-      []
-    >("SELECT tracker_id, tx_digest, event_seq, updated_at FROM event_cursor")
-    .all()
-    .map((r) => ({
-      trackerId: r.tracker_id,
-      txDigest: r.tx_digest,
-      eventSeq: r.event_seq,
-      updatedAt: r.updated_at,
-    }))
 }

@@ -12,14 +12,9 @@
  * Sui RPC to be reachable.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
 
 // Disable everything that talks to chain BEFORE importing the server
 // module — env.ts captures these at module-load time.
-const tmpDir = mkdtempSync(join(tmpdir(), "flicky-e2e-test-"))
-process.env.FLICKY_DB_PATH = resolve(tmpDir, "test.db")
 process.env.PORT = "0" // ask Bun.serve for any free port
 process.env.KEEPER_ENABLED = "false"
 process.env.INDEXER_ENABLED = "false"
@@ -41,11 +36,13 @@ import { CORS_HEADERS, corsPreflight, json } from "./lib/http"
 import { websocketHandler } from "./ws/handlers"
 import { newSocketState } from "./ws/matchmaking"
 import { closeDb, upsertDuel } from "./db"
+import { HAS_TEST_DB, resetTables } from "./test-db"
 
 let server: ReturnType<typeof Bun.serve> | null = null
 let baseUrl = ""
 
-beforeAll(() => {
+beforeAll(async () => {
+  if (HAS_TEST_DB) await resetTables()
   server = Bun.serve({
     port: 0,
     async fetch(req, srv) {
@@ -65,9 +62,9 @@ beforeAll(() => {
       if (docs) return docs
       const oracle = await handleOracleRequest(req, url)
       if (oracle) return oracle
-      const duels = handleDuelsRequest(req, url)
+      const duels = await handleDuelsRequest(req, url)
       if (duels) return duels
-      const leaderboard = handleLeaderboardRequest(req, url)
+      const leaderboard = await handleLeaderboardRequest(req, url)
       if (leaderboard) return leaderboard
       return new Response("flicky e2e", { status: 200, headers: CORS_HEADERS })
     },
@@ -80,10 +77,9 @@ beforeAll(() => {
   void serverModule
 })
 
-afterAll(() => {
+afterAll(async () => {
   server?.stop()
-  closeDb()
-  rmSync(tmpDir, { recursive: true, force: true })
+  await closeDb()
 })
 
 // ─── tiny WS client helper ──────────────────────────────────────────────────
@@ -159,7 +155,7 @@ function flushTick(): Promise<void> {
 
 // ─── tests ──────────────────────────────────────────────────────────────────
 
-describe("WS end-to-end", () => {
+describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
   test("hello → ack + chat_history", async () => {
     const c = new WSClient(baseUrl)
     await c.open()
@@ -225,7 +221,7 @@ describe("WS end-to-end", () => {
     // Seed a duel into the mirror so the chat handler knows who the
     // two players are. (Indexer is disabled, so we write directly.)
     const DUEL_ID = "0xduel0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e"
-    upsertDuel({
+    await upsertDuel({
       id: DUEL_ID,
       status: "ACTIVE",
       stakeCoinType: "0x2::sui::SUI",

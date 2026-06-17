@@ -38,13 +38,18 @@ function expectedScore(self: number, opp: number): number {
 export type DuelOutcome = "p0_win" | "p1_win" | "tie"
 
 /** Update both players' ratings + record win/loss/tie counts. */
-export function applyDuelOutcome(
+export async function applyDuelOutcome(
   p0: string,
   p1: string,
   outcome: DuelOutcome,
-): { p0Before: number; p0After: number; p1Before: number; p1After: number } {
-  const a = getPlayerRating(p0)
-  const b = getPlayerRating(p1)
+): Promise<{
+  p0Before: number
+  p0After: number
+  p1Before: number
+  p1After: number
+}> {
+  const a = await getPlayerRating(p0)
+  const b = await getPlayerRating(p1)
   const ea = expectedScore(a.rating, b.rating)
   const eb = 1 - ea
   let sa: number
@@ -62,7 +67,7 @@ export function applyDuelOutcome(
   const newA = Math.round(a.rating + env.mmrKFactor * (sa - ea))
   const newB = Math.round(b.rating + env.mmrKFactor * (sb - eb))
   const now = Date.now()
-  upsertPlayerRating({
+  await upsertPlayerRating({
     address: a.address,
     rating: newA,
     gamesPlayed: a.gamesPlayed + 1,
@@ -71,7 +76,7 @@ export function applyDuelOutcome(
     ties: a.ties + (outcome === "tie" ? 1 : 0),
     lastUpdatedMs: now,
   })
-  upsertPlayerRating({
+  await upsertPlayerRating({
     address: b.address,
     rating: newB,
     gamesPlayed: b.gamesPlayed + 1,
@@ -128,14 +133,14 @@ function outcomeFromDuel(d: DuelRow): DuelOutcome {
  * the DB is single-writer and a live finalization mid-replay would be
  * double-counted.
  */
-export function recomputeRatingsFromMirror(): {
+export async function recomputeRatingsFromMirror(): Promise<{
   cleared: number
   applied: number
   skipped: number
-} {
-  const cleared = clearPlayerRatings()
+}> {
+  const cleared = await clearPlayerRatings()
   // listRecentDuels returns newest-first; reverse for chronological replay.
-  const complete = listRecentDuels(1_000_000, "COMPLETE").reverse()
+  const complete = (await listRecentDuels(1_000_000, "COMPLETE")).reverse()
   let applied = 0
   let skipped = 0
   for (const d of complete) {
@@ -143,7 +148,9 @@ export function recomputeRatingsFromMirror(): {
       skipped++
       continue
     }
-    applyDuelOutcome(d.creator, d.challenger, outcomeFromDuel(d))
+    // Serialized on purpose: ELO is order-dependent, each step reads the
+    // ratings the previous one wrote.
+    await applyDuelOutcome(d.creator, d.challenger, outcomeFromDuel(d))
     applied++
   }
   log.info(
@@ -170,16 +177,20 @@ export interface Candidate {
  * We use the wider of the two so neither party is "stuck waiting" for
  * a closer rating than they'd accept themselves.
  */
-export function findClosestOpponent(
+export async function findClosestOpponent(
   myRating: number,
   myQueuedAtMs: number,
   pool: Candidate[],
-): Candidate | null {
+): Promise<Candidate | null> {
   if (pool.length === 0) return null
   const now = Date.now()
+  // Pre-fetch every candidate's rating in parallel (one row each) so the
+  // selection loop stays synchronous and we don't serialize N round-trips.
+  const ratings = await Promise.all(pool.map((c) => getPlayerRating(c.address)))
   let best: { c: Candidate; gap: number } | null = null
-  for (const c of pool) {
-    const candRating = getPlayerRating(c.address).rating
+  for (let i = 0; i < pool.length; i++) {
+    const c = pool[i]
+    const candRating = ratings[i].rating
     const gap = Math.abs(candRating - myRating)
     const candWindow = matchWindow(now - c.queuedAtMs)
     const myWindow = matchWindow(now - myQueuedAtMs)
@@ -197,6 +208,6 @@ function matchWindow(waitMs: number): number {
 
 // ─── Leaderboard read ───────────────────────────────────────────────────────
 
-export function topLeaderboard(limit: number) {
+export async function topLeaderboard(limit: number) {
   return leaderboard(limit)
 }

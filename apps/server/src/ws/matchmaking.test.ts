@@ -1,5 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
 import type { ServerWebSocket } from "bun"
+import { closeDb } from "../db"
+import { HAS_TEST_DB, resetTables } from "../test-db"
 import {
   __resetForTests,
   broadcastRoom,
@@ -23,6 +25,12 @@ import {
 setDeckHashProvider(async () =>
   "0x" + "a".repeat(64),
 )
+
+// `joinQueue` now reads player ratings from Postgres for MMR pairing, so
+// the queue-mechanics suites need a TEST_DATABASE_URL (see test-preload.ts)
+// and skip without one. The DB-free suites (registerAddress, room
+// broadcast) always run.
+const queueSuite = HAS_TEST_DB ? describe : describe.skip
 
 type FakeWs = ServerWebSocket<SocketState> & { _sent: string[] }
 
@@ -48,12 +56,19 @@ function allMsgs(ws: FakeWs): unknown[] {
   return ws._sent.map((s) => JSON.parse(s))
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Clear player_rating so every fresh address defaults to 1000 → MMR
+  // pairing is deterministic regardless of what other suites wrote.
+  if (HAS_TEST_DB) await resetTables()
   __resetForTests()
 })
 
 afterEach(() => {
   __resetForTests()
+})
+
+afterAll(async () => {
+  await closeDb()
 })
 
 describe("registerAddress", () => {
@@ -74,25 +89,25 @@ describe("registerAddress", () => {
   })
 })
 
-describe("joinQueue", () => {
-  test("rejects when socket has no address", () => {
+queueSuite("joinQueue", () => {
+  test("rejects when socket has no address", async () => {
     const ws = makeWs()
-    joinQueue(ws, "casual")
+    await joinQueue(ws, "casual")
     expect(lastMsg(ws)).toMatchObject({ type: "error", code: "no_address" })
     expect(queueStats().casual).toBe(0)
   })
 
-  test("rejects practice tier (solo-vs-bot, not queued)", () => {
+  test("rejects practice tier (solo-vs-bot, not queued)", async () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
-    joinQueue(ws, "practice")
+    await joinQueue(ws, "practice")
     expect(lastMsg(ws)).toMatchObject({ type: "error", code: "practice_no_queue" })
   })
 
-  test("a single waiting socket gets queue_status with size 1", () => {
+  test("a single waiting socket gets queue_status with size 1", async () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
-    joinQueue(ws, "casual")
+    await joinQueue(ws, "casual")
     expect(lastMsg(ws)).toMatchObject({ type: "queue_status", tier: "casual", size: 1 })
     expect(queueStats().casual).toBe(1)
   })
@@ -125,31 +140,31 @@ describe("joinQueue", () => {
     expect((aMsgs.at(-1) as { deckHash?: string }).deckHash).toMatch(/^0x[0-9a-f]+$/i)
   })
 
-  test("two sockets in DIFFERENT tiers do not pair", () => {
+  test("two sockets in DIFFERENT tiers do not pair", async () => {
     const alice = makeWs()
     const bob = makeWs()
     registerAddress(alice, "0xalice")
     registerAddress(bob, "0xbob")
-    joinQueue(alice, "casual")
-    joinQueue(bob, "standard")
+    await joinQueue(alice, "casual")
+    await joinQueue(bob, "standard")
     expect(queueStats().casual).toBe(1)
     expect(queueStats().standard).toBe(1)
   })
 
-  test("same address joining twice in a row does not pair with itself", () => {
+  test("same address joining twice in a row does not pair with itself", async () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
-    joinQueue(ws, "casual")
-    joinQueue(ws, "casual") // idempotent re-queue
+    await joinQueue(ws, "casual")
+    await joinQueue(ws, "casual") // idempotent re-queue
     expect(queueStats().casual).toBe(1) // still alone
   })
 })
 
-describe("leaveQueue", () => {
-  test("removes the socket from its tier queue + emits queue_left", () => {
+queueSuite("leaveQueue", () => {
+  test("removes the socket from its tier queue + emits queue_left", async () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
-    joinQueue(ws, "casual")
+    await joinQueue(ws, "casual")
     expect(queueStats().casual).toBe(1)
     leaveQueue(ws)
     expect(queueStats().casual).toBe(0)
@@ -190,11 +205,13 @@ describe("rooms", () => {
     broadcastRoom("0xduel1", { type: "pong" })
     expect(ws._sent).toHaveLength(0)
   })
+})
 
-  test("onSocketClose cleans up queue + room subscriptions", () => {
+queueSuite("rooms + queue cleanup", () => {
+  test("onSocketClose cleans up queue + room subscriptions", async () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
-    joinQueue(ws, "casual")
+    await joinQueue(ws, "casual")
     subscribeRoom(ws, "0xduel1")
     subscribeRoom(ws, "0xduel2")
     expect(queueStats().casual).toBe(1)
@@ -206,11 +223,11 @@ describe("rooms", () => {
   })
 })
 
-describe("sync-only queue (no bot-fill — Practice Mode is the only bot path)", () => {
+queueSuite("sync-only queue (no bot-fill — Practice Mode is the only bot path)", () => {
   test("a lone socket waits indefinitely with no auto-match", async () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
-    joinQueue(ws, "casual")
+    await joinQueue(ws, "casual")
     // Wait longer than the OLD bot-fill window would have fired — no extra
     // messages should arrive.
     await new Promise((r) => setTimeout(r, 100))
@@ -233,10 +250,10 @@ describe("sync-only queue (no bot-fill — Practice Mode is the only bot path)",
     expect(["creator", "challenger"]).toContain(ack.role as string) // not "bot_target"
   })
 
-  test("practice tier never enters the queue — directs to practice_start instead", () => {
+  test("practice tier never enters the queue — directs to practice_start instead", async () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
-    joinQueue(ws, "practice")
+    await joinQueue(ws, "practice")
     const err = lastMsg(ws) as Record<string, unknown>
     expect(err.type).toBe("error")
     expect(err.code).toBe("practice_no_queue")
@@ -252,8 +269,8 @@ describe("sync-only queue (no bot-fill — Practice Mode is the only bot path)",
     registerAddress(a, "0xa")
     registerAddress(b, "0xb")
     // Both queue in DIFFERENT tiers so they don't pair each other.
-    joinQueue(a, "casual")
-    joinQueue(b, "standard")
+    await joinQueue(a, "casual")
+    await joinQueue(b, "standard")
     await new Promise((r) => setTimeout(r, 200))
     // Each should have hello + queue_status only — no match_found from a bot.
     expect(allMsgs(a)).toHaveLength(2)
