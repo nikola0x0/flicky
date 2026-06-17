@@ -137,7 +137,7 @@ flicky/
 
 **Shipped — live on Sui testnet.** The full duel lifecycle works end-to-end: zkLogin sign-in, sponsored `PredictManager` bootstrap, matchmaking, commit-reveal decks (AI Deckmaster, adaptive 3–5 sizing), atomic player-signed swipe PTBs, the live lockup view, two-phase on-chain settlement (`settle_card` → `finalize`), the settled-redeem keeper, ranked MMR + leaderboard, and the in-app SUI → dUSDC swap. Both the staked and free/practice tiers run on the same engine.
 
-The deployed package id lives in [`apps/contracts/deployed.json`](apps/contracts/deployed.json) (source of truth). Design docs: [`docs/prd.md`](docs/prd.md) and [`docs/deepbook-oracle-architecture.md`](docs/deepbook-oracle-architecture.md).
+The deployed package id lives in [`apps/contracts/deployed.json`](apps/contracts/deployed.json) (source of truth).
 
 **What's next** — the duel is the first mode. The same engine opens up battle royales, daily solo gauntlets, tournaments, live events, and streak rewards. The bigger idea: **DeFi on DeepBook can be a game** — make it feel like one and you onboard everyone, not just traders.
 
