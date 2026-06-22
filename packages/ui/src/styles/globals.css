@@ -742,3 +742,30 @@ html[data-crt]::view-transition-new(root) {
 .border-glow {
   animation: border-glow 2.4s ease-in-out infinite;
 }
+
+/* Swipe-window HUD urgency pulse (final 60s). box-shadow + filter only — no
+   transform, so it never clobbers the chip's Tailwind -translate-x-1/2. */
+@keyframes countdown-urgent {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 2px 0 rgba(255, 255, 255, 0.06),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.5);
+    filter: brightness(1);
+  }
+  50% {
+    box-shadow:
+      inset 0 2px 0 rgba(255, 255, 255, 0.06),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.5),
+      0 0 12px 2px rgba(240, 133, 133, 0.7);
+    filter: brightness(1.2);
+  }
+}
+.countdown-urgent {
+  animation: countdown-urgent 0.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .countdown-urgent {
+    animation: none;
+  }
+}

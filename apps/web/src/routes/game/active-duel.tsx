@@ -24,6 +24,7 @@ import {
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import { liveCardPnl, fmtDusdcSigned, fmtPnlPct } from "@/lib/pnl"
+import { SWIPE_WINDOW_MS, swipeWindowRemainingMs } from "@/lib/swipe-window"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
 import { WsErrorBanner } from "@/components/ws-error-banner"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
@@ -171,6 +172,10 @@ export function ActiveDuel({
       : { kind: "ENTRY", reason: "Setting up the match…" },
   )
   const [roomState, setRoomState] = useState<RoomState | null>(null)
+  // serverNowMs - Date.now() from the latest match_tick. Corrects the local
+  // clock so the swipe-window countdown tracks the chain-enforced deadline
+  // even when the player's system clock is skewed. 0 until the first tick.
+  const [serverClockOffsetMs, setServerClockOffsetMs] = useState(0)
   // Live oracle prices, keyed by oracle id. Powers mark-to-market PnL.
   const [ticks, setTicks] = useState<
     Record<string, { spot: string; forward: string }>
@@ -235,6 +240,14 @@ export function ActiveDuel({
         ...prev,
         [msg.oracleId]: { spot: msg.spot, forward: msg.forward },
       }))
+    })
+  }, [onMessage])
+
+  // Track the server clock so the swipe-window countdown is drift-free.
+  useEffect(() => {
+    return onMessage((msg) => {
+      if (msg.type !== "match_tick") return
+      setServerClockOffsetMs(msg.serverNowMs - Date.now())
     })
   }, [onMessage])
 
@@ -384,6 +397,7 @@ export function ActiveDuel({
           expiries={expiries}
           ticks={ticks}
           myAddress={account.address}
+          serverClockOffsetMs={serverClockOffsetMs}
           sign={sign}
           onSwipeDone={() =>
             setPhase((p) =>
@@ -438,6 +452,7 @@ function PhaseSwiping({
   expiries,
   ticks,
   myAddress,
+  serverClockOffsetMs,
   sign,
   onSwipeDone,
 }: {
@@ -448,6 +463,7 @@ function PhaseSwiping({
   expiries: Record<string, bigint>
   ticks: Record<string, { spot: string; forward: string }>
   myAddress: string
+  serverClockOffsetMs: number
   sign: ReturnType<typeof useFlickySign>
   onSwipeDone: () => void
 }) {
@@ -474,6 +490,27 @@ function PhaseSwiping({
     const id = setInterval(() => setNowMs(Date.now()), 1000)
     return () => clearInterval(id)
   }, [])
+
+  // Match-wide swipe window (10 min, chain-enforced). Render the HUD only once
+  // the duel is live (startedAtMs is set on join). Ramps amber → red and locks
+  // the deck at zero so the player never fires a swipe that aborts on-chain.
+  const windowRemainingMs =
+    roomState.startedAtMs > 0
+      ? swipeWindowRemainingMs({
+          startedAtMs: roomState.startedAtMs,
+          serverClockOffsetMs,
+          nowMs,
+        })
+      : null
+  const isWindowExpired = windowRemainingMs !== null && windowRemainingMs <= 0
+  const isWindowUrgent =
+    windowRemainingMs !== null &&
+    windowRemainingMs > 0 &&
+    windowRemainingMs <= 60_000
+  const windowFrac =
+    windowRemainingMs === null
+      ? 0
+      : Math.max(0, Math.min(1, windowRemainingMs / SWIPE_WINDOW_MS))
 
   // ── drag-to-swipe state ──────────────────────────────────────────
   const cardRef = useRef<HTMLDivElement>(null)
@@ -554,6 +591,7 @@ function PhaseSwiping({
   const tick = ticks[card.oracle_id]
 
   const doSwipe = async (isUp: boolean) => {
+    if (isWindowExpired) return
     setBusy(true)
     setError(null)
     try {
@@ -580,7 +618,7 @@ function PhaseSwiping({
   // Swipe RIGHT = YES (BTC settles above the strike) → mint UP.
   // Swipe LEFT  = NO  (it won't)                     → mint DOWN.
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
-    if (busy || drag.flying) return
+    if (busy || drag.flying || isWindowExpired) return
     cardWidth.current = cardRef.current?.offsetWidth ?? 320
     dragStartX.current = e.clientX
     setDrag({ x: 0, active: true, flying: null })
@@ -649,12 +687,51 @@ function PhaseSwiping({
 
   return (
     <div className="flex flex-1 flex-col">
-      {/* top bar — card count + chart toggles (charts live in modals so the
-          card owns the screen) */}
-      <div className="flex items-center justify-between pb-2">
+      {/* top bar — card count (left) + swipe-window HUD (center) + chart
+          toggles (right). The card owns the rest of the screen. */}
+      <div className="relative flex items-center justify-between pb-2">
         <span className="font-pixel text-base tracking-[0.2em] text-white/55 uppercase">
           card {cardIdx + 1} / {roomState.cards.length}
         </span>
+        {windowRemainingMs !== null && (
+          <div
+            className={`absolute left-1/2 top-0 flex -translate-x-1/2 flex-col items-center gap-1 border-2 px-2.5 py-1 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.5)] ${
+              isWindowExpired || isWindowUrgent
+                ? "border-rose-500/70 bg-[#3a1717]"
+                : "border-black/60 bg-[#0a0f1f]"
+            } ${isWindowUrgent ? "countdown-urgent" : ""}`}
+          >
+            <span
+              className={`font-pixel flex items-center gap-1.5 text-sm tracking-[0.2em] uppercase tabular-nums ${
+                isWindowExpired || isWindowUrgent
+                  ? "text-rose-300"
+                  : "text-amber-300"
+              }`}
+            >
+              <img
+                src="/icons/clock.png"
+                alt=""
+                aria-hidden
+                className="size-3.5 [image-rendering:pixelated]"
+              />
+              {isWindowExpired ? "time's up" : fmtCountdown(windowRemainingMs)}
+            </span>
+            <div className="flex w-16 gap-0.5">
+              {[0, 1, 2].map((i) => (
+                <div
+                  key={i}
+                  className={`h-1.5 flex-1 border border-black/70 ${
+                    windowFrac > i / 3
+                      ? isWindowExpired || isWindowUrgent
+                        ? "bg-rose-400"
+                        : "bg-amber-400"
+                      : "bg-black/40"
+                  }`}
+                />
+              ))}
+            </div>
+          </div>
+        )}
         <div className="flex gap-2">
           <ChartChip
             label="btc"
