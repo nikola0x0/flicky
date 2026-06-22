@@ -367,6 +367,35 @@ export function ActiveDuel({
     })
   }, [role, onMessage, account, client, sign, tier, send, onDuelReady])
 
+  // 1 Hz wall-clock driving the match-wide swipe-window countdown.
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // Match-wide swipe window (10 min, chain-enforced). Meaningful only once the
+  // duel is live (startedAtMs is set on join). `windowFrac` drives the smooth
+  // depletion bar; `isWindowExpired` locks the deck so the player never fires a
+  // swipe that aborts on-chain.
+  const windowRemainingMs =
+    roomState && roomState.startedAtMs > 0
+      ? swipeWindowRemainingMs({
+          startedAtMs: roomState.startedAtMs,
+          serverClockOffsetMs,
+          nowMs,
+        })
+      : null
+  const isWindowExpired = windowRemainingMs !== null && windowRemainingMs <= 0
+  const isWindowUrgent =
+    windowRemainingMs !== null &&
+    windowRemainingMs > 0 &&
+    windowRemainingMs <= 60_000
+  const windowFrac =
+    windowRemainingMs === null
+      ? 0
+      : Math.max(0, Math.min(1, windowRemainingMs / SWIPE_WINDOW_MS))
+
   return (
     <div className="flex h-full flex-col gap-4 px-4 py-4 text-white">
       <WsErrorBanner onMessage={onMessage} />
@@ -380,9 +409,20 @@ export function ActiveDuel({
           Exit
         </button>
       </div>
-      <div className="text-base tracking-wider text-white/55 uppercase">
-        {tier ? `stake ${Number(STAKE_TIERS[tier]) / 1e6} dUSDC` : "staked duel"}
-      </div>
+      {phase.kind === "SWIPING" && windowRemainingMs !== null ? (
+        <SwipeWindowBar
+          remainingMs={windowRemainingMs}
+          frac={windowFrac}
+          urgent={isWindowUrgent}
+          expired={isWindowExpired}
+        />
+      ) : (
+        <div className="text-base tracking-wider text-white/55 uppercase">
+          {tier
+            ? `stake ${Number(STAKE_TIERS[tier]) / 1e6} dUSDC`
+            : "staked duel"}
+        </div>
+      )}
 
       {phase.kind === "ENTRY" && <PhaseEntry reason={phase.reason} />}
       {phase.kind === "AWAIT_REVEAL" && (
@@ -397,7 +437,7 @@ export function ActiveDuel({
           expiries={expiries}
           ticks={ticks}
           myAddress={account.address}
-          serverClockOffsetMs={serverClockOffsetMs}
+          isWindowExpired={isWindowExpired}
           sign={sign}
           onSwipeDone={() =>
             setPhase((p) =>
@@ -417,6 +457,51 @@ export function ActiveDuel({
       {phase.kind === "ERROR" && (
         <p className="text-base text-red-400">{phase.message}</p>
       )}
+    </div>
+  )
+}
+
+/** Full-width swipe-window countdown. Smooth depletion bar (creeps down every
+ *  1 Hz tick) + mono mm:ss, ramping amber → red with a pulse in the final 60s.
+ *  Match-wide and time-based — it tracks the chain-enforced 10-min window, not
+ *  per-swipe progress. */
+function SwipeWindowBar({
+  remainingMs,
+  frac,
+  urgent,
+  expired,
+}: {
+  remainingMs: number
+  frac: number
+  urgent: boolean
+  expired: boolean
+}) {
+  const danger = expired || urgent
+  return (
+    <div
+      className={`flex items-center gap-2.5 border-2 px-3 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.5)] ${
+        danger ? "border-rose-500/70 bg-[#3a1717]" : "border-black/60 bg-[#0a0f1f]"
+      } ${urgent ? "countdown-urgent" : ""}`}
+    >
+      <img
+        src="/icons/clock.png"
+        alt=""
+        aria-hidden
+        className="size-4 shrink-0 [image-rendering:pixelated]"
+      />
+      <span
+        className={`font-pixel shrink-0 text-base tracking-[0.2em] uppercase tabular-nums ${
+          danger ? "text-rose-300" : "text-amber-300"
+        }`}
+      >
+        {expired ? "time's up" : fmtCountdown(remainingMs)}
+      </span>
+      <div className="relative h-2.5 flex-1 border border-black/70 bg-black/40">
+        <div
+          className={`h-full ${danger ? "bg-rose-400" : "bg-amber-400"}`}
+          style={{ width: `${frac * 100}%`, transition: "width 1s linear" }}
+        />
+      </div>
     </div>
   )
 }
@@ -452,7 +537,7 @@ function PhaseSwiping({
   expiries,
   ticks,
   myAddress,
-  serverClockOffsetMs,
+  isWindowExpired,
   sign,
   onSwipeDone,
 }: {
@@ -463,7 +548,7 @@ function PhaseSwiping({
   expiries: Record<string, bigint>
   ticks: Record<string, { spot: string; forward: string }>
   myAddress: string
-  serverClockOffsetMs: number
+  isWindowExpired: boolean
   sign: ReturnType<typeof useFlickySign>
   onSwipeDone: () => void
 }) {
@@ -490,27 +575,6 @@ function PhaseSwiping({
     const id = setInterval(() => setNowMs(Date.now()), 1000)
     return () => clearInterval(id)
   }, [])
-
-  // Match-wide swipe window (10 min, chain-enforced). Render the HUD only once
-  // the duel is live (startedAtMs is set on join). Ramps amber → red and locks
-  // the deck at zero so the player never fires a swipe that aborts on-chain.
-  const windowRemainingMs =
-    roomState.startedAtMs > 0
-      ? swipeWindowRemainingMs({
-          startedAtMs: roomState.startedAtMs,
-          serverClockOffsetMs,
-          nowMs,
-        })
-      : null
-  const isWindowExpired = windowRemainingMs !== null && windowRemainingMs <= 0
-  const isWindowUrgent =
-    windowRemainingMs !== null &&
-    windowRemainingMs > 0 &&
-    windowRemainingMs <= 60_000
-  const windowFrac =
-    windowRemainingMs === null
-      ? 0
-      : Math.max(0, Math.min(1, windowRemainingMs / SWIPE_WINDOW_MS))
 
   // ── drag-to-swipe state ──────────────────────────────────────────
   const cardRef = useRef<HTMLDivElement>(null)
@@ -687,51 +751,12 @@ function PhaseSwiping({
 
   return (
     <div className="flex flex-1 flex-col">
-      {/* top bar — card count (left) + swipe-window HUD (center) + chart
-          toggles (right). The card owns the rest of the screen. */}
-      <div className="relative flex items-center justify-between pb-2">
+      {/* top bar — card count + chart toggles (charts live in modals so the
+          card owns the screen) */}
+      <div className="flex items-center justify-between pb-2">
         <span className="font-pixel text-base tracking-[0.2em] text-white/55 uppercase">
           card {cardIdx + 1} / {roomState.cards.length}
         </span>
-        {windowRemainingMs !== null && (
-          <div
-            className={`absolute left-1/2 top-0 flex -translate-x-1/2 flex-col items-center gap-1 border-2 px-2.5 py-1 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.5)] ${
-              isWindowExpired || isWindowUrgent
-                ? "border-rose-500/70 bg-[#3a1717]"
-                : "border-black/60 bg-[#0a0f1f]"
-            } ${isWindowUrgent ? "countdown-urgent" : ""}`}
-          >
-            <span
-              className={`font-pixel flex items-center gap-1.5 text-sm tracking-[0.2em] uppercase tabular-nums ${
-                isWindowExpired || isWindowUrgent
-                  ? "text-rose-300"
-                  : "text-amber-300"
-              }`}
-            >
-              <img
-                src="/icons/clock.png"
-                alt=""
-                aria-hidden
-                className="size-3.5 [image-rendering:pixelated]"
-              />
-              {isWindowExpired ? "time's up" : fmtCountdown(windowRemainingMs)}
-            </span>
-            <div className="flex w-16 gap-0.5">
-              {[0, 1, 2].map((i) => (
-                <div
-                  key={i}
-                  className={`h-1.5 flex-1 border border-black/70 ${
-                    windowFrac > i / 3
-                      ? isWindowExpired || isWindowUrgent
-                        ? "bg-rose-400"
-                        : "bg-amber-400"
-                      : "bg-black/40"
-                  }`}
-                />
-              ))}
-            </div>
-          </div>
-        )}
         <div className="flex gap-2">
           <ChartChip
             label="btc"
