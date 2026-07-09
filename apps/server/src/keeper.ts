@@ -23,7 +23,7 @@
  */
 import { Transaction } from "@mysten/sui/transactions"
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { fetchDeck } from "./deckmaster"
@@ -105,7 +105,7 @@ export function parseSwipe(raw: RawSwipe | null): SwipeLite | null {
 
 /**
  * Pure parser — extract a DuelLite from `obj.data.type` + `obj.data.content.fields`
- * as returned by `SuiClient.getObject({ showContent: true, showType: true })`.
+ * as returned by `SuiGrpcClient.getObject({ showContent: true, showType: true })`.
  * Returns null if the input isn't a moveObject of the expected shape.
  * Exposed so the keeper tests can exercise it without mocking the
  * full client.
@@ -156,7 +156,7 @@ export function parseDuelFromObject(
   }
 }
 
-async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null> {
+async function fetchDuel(client: SuiGrpcClient, id: string): Promise<DuelLite | null> {
   const obj = await client.getObject({
     id,
     options: { showContent: true, showType: true },
@@ -168,7 +168,7 @@ async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null
 export { type DuelLite, type SwipeLite }
 
 async function readOracleExpiry(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracleId: string,
 ): Promise<bigint | null> {
   try {
@@ -193,7 +193,7 @@ async function readOracleExpiry(
  * this into an event tracker in `indexer.ts` instead.
  */
 async function readOracleSettled(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracleId: string,
 ): Promise<boolean> {
   try {
@@ -216,7 +216,7 @@ async function readOracleSettled(
 }
 
 export class Keeper {
-  readonly client: SuiClient
+  readonly client: SuiGrpcClient
   readonly keypair: Ed25519Keypair
   readonly packageId: string
   readonly address: string
@@ -225,7 +225,7 @@ export class Keeper {
   readonly inFlight = new Set<string>()
   private stopped = false
 
-  constructor(client: SuiClient, keypair: Ed25519Keypair, packageId: string) {
+  constructor(client: SuiGrpcClient, keypair: Ed25519Keypair, packageId: string) {
     this.client = client
     this.keypair = keypair
     this.packageId = packageId

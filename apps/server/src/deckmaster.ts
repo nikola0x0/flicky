@@ -21,7 +21,7 @@
 import { bcs } from "@mysten/sui/bcs"
 import { Transaction } from "@mysten/sui/transactions"
 import { normalizeSuiAddress, normalizeSuiObjectId } from "@mysten/sui/utils"
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { createHash } from "node:crypto"
 import { countDecks, deleteDeck, getDeck, upsertDeck } from "./db"
 import { env } from "./env"
@@ -109,7 +109,7 @@ const gridCache = new Map<string, { minStrike: bigint; tickSize: bigint }>()
  * scan fall back to `DEFAULT_BTC_GRID` at the call site.
  */
 async function resolveGrids(
-  client: SuiClient,
+  client: SuiGrpcClient,
   pkg: string,
   wanted: Set<string>,
   maxPages = 8,
@@ -218,7 +218,7 @@ export function selectDeckOracleRows(
 }
 
 export async function findDeckOracles(
-  client: SuiClient,
+  client: SuiGrpcClient,
   asset = "BTC",
   count = 5,
   maxHorizonMs = env.deckCardMaxHorizonMs,
@@ -447,7 +447,7 @@ function readU64LE(bytes: number[]): bigint {
  * returns the raw ask price directly.
  */
 export async function probeCard(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracle: OracleSnapshot,
   strike: bigint,
 ): Promise<ProbeResult> {
@@ -543,7 +543,7 @@ const NOT_VIABLE: ProbeResult = { viable: false, askUp: 0n, askDown: 0n }
 
 /**
  * Probe function shape — `(oracle, strike) → ProbeResult`. Defaults to the
- * real `probeCard` against a `SuiClient`; tests inject a synthetic
+ * real `probeCard` against a `SuiGrpcClient`; tests inject a synthetic
  * function so the algorithm can be exercised without RPC.
  */
 export type ProbeFn = (
@@ -1013,7 +1013,7 @@ export function atmStrike(o: OracleSnapshot): bigint {
  * limiter (a no-op for synthetic test probes).
  */
 export async function selectViableOracles(
-  client: SuiClient,
+  client: SuiGrpcClient,
   candidates: OracleSnapshot[],
   max: number,
   /** Override the probe — defaults to the real `probeCard`. Tests inject a
@@ -1031,7 +1031,7 @@ export async function selectViableOracles(
 }
 
 export async function buildAndProbeDeck(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracles: OracleSnapshot[],
   seed: Uint8Array,
   /** Override the per-strike probe — defaults to the real `probeCard`

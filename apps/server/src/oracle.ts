@@ -11,7 +11,7 @@
  *   GET  /oracle/:id
  *     → { id, expiry, spot, forward, active, settled }
  */
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { json } from "./lib/http"
@@ -58,7 +58,7 @@ function toView(id: string, f: OracleFields): OracleView {
 }
 
 async function readOracle(
-  client: SuiClient,
+  client: SuiGrpcClient,
   id: string,
 ): Promise<OracleView | null> {
   const obj = await client.getObject({ id, options: { showContent: true } })
@@ -67,7 +67,7 @@ async function readOracle(
 }
 
 async function listEligibleOracles(
-  client: SuiClient,
+  client: SuiGrpcClient,
   asset: string,
   minHeadroomMs: number,
 ): Promise<OracleView[]> {

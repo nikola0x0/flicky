@@ -19,8 +19,8 @@
     "backfill:ratings": "bun run src/scripts/backfill-ratings.ts"
   },
   "dependencies": {
-    "@mysten/enoki": "^1.0.8",
-    "@mysten/sui": "^1.30"
+    "@mysten/enoki": "^1.2.2",
+    "@mysten/sui": "2.20.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",

@@ -8,7 +8,7 @@
  * `PredictManagerCreated` events newest-first and match the `owner`
  * field. Mirrors the web client's `findPredictManager`.
  */
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { Transaction } from "@mysten/sui/transactions"
 import { bcs } from "@mysten/sui/bcs"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
@@ -53,7 +53,7 @@ export const MIN_BALANCE_FOR_QUEUE = 5_000_000n // 5 dUSDC, 6 decimals
  *               with). Surface a retryable error instead.
  */
 export async function findManagerFor(
-  client: SuiClient,
+  client: SuiGrpcClient,
   owner: string,
 ): Promise<string | null> {
   const cached = await getCachedManager(owner)
@@ -98,7 +98,7 @@ export async function findManagerFor(
  * to fail open or closed.
  */
 export async function readManagerBalance(
-  client: SuiClient,
+  client: SuiGrpcClient,
   address: string,
   managerId: string,
 ): Promise<bigint | null> {
@@ -129,7 +129,7 @@ export type BalanceGateResult =
   | { ok: false; reason: "rpc_failed"; managerId?: string }
 
 export async function checkQueueBalanceGate(
-  client: SuiClient,
+  client: SuiGrpcClient,
   owner: string,
 ): Promise<BalanceGateResult> {
   let managerId: string | null

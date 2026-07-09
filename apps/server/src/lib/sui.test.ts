@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { SuiClient } from "@mysten/sui/client"
+import { SuiGrpcClient } from "@mysten/sui/grpc"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { getAdminKeypair, getSuiClient, requireEnv } from "./sui"
 
@@ -34,15 +34,15 @@ describe("requireEnv", () => {
 describe("getSuiClient", () => {
   test("defaults to testnet when SUI_NETWORK is unset", () => {
     delete process.env.SUI_NETWORK
-    delete process.env.SUI_RPC_URL
+    delete process.env.SUI_GRPC_URL
     const c = getSuiClient()
-    expect(c).toBeInstanceOf(SuiClient)
+    expect(c).toBeInstanceOf(SuiGrpcClient)
   })
 
-  test("honors explicit SUI_RPC_URL", () => {
-    process.env.SUI_RPC_URL = "https://example.invalid"
+  test("honors explicit SUI_GRPC_URL", () => {
+    process.env.SUI_GRPC_URL = "https://example.invalid"
     const c = getSuiClient()
-    expect(c).toBeInstanceOf(SuiClient)
+    expect(c).toBeInstanceOf(SuiGrpcClient)
   })
 })
 

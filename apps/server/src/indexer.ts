@@ -21,7 +21,7 @@
  * cadence below is the canonical Sui pattern (see
  * MystenLabs/sui/examples/trading/api/indexer/event-indexer.ts).
  */
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import {
@@ -194,7 +194,7 @@ export function computeCardOutcomes(input: CardOutcomeInput): CardOutcome[] {
  * string in case a future RPC version unwraps it) defensively.
  */
 async function readOracleSettlements(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracleIds: string[],
 ): Promise<Map<string, string>> {
   const unique = Array.from(new Set(oracleIds.filter((x) => !!x)))
@@ -241,7 +241,7 @@ async function readOracleSettlements(
  * already computed so the per-card breakdown isn't blanked.
  */
 async function fetchDuel(
-  client: SuiClient,
+  client: SuiGrpcClient,
   id: string,
 ): Promise<DuelLite | null> {
   const obj = await client.getObject({
@@ -332,12 +332,12 @@ async function fetchDuel(
 }
 
 export class DuelIndexer {
-  private readonly client: SuiClient
+  private readonly client: SuiGrpcClient
   private readonly packageId: string
   private readonly eventTypes: string[]
   private stopped = false
 
-  constructor(client: SuiClient, packageId: string) {
+  constructor(client: SuiGrpcClient, packageId: string) {
     this.client = client
     this.packageId = packageId
     this.eventTypes = [
