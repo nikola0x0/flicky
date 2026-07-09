@@ -79,6 +79,15 @@ export const env = {
   deckCardMaxHorizonMs: Number(
     process.env.DECK_CARD_MAX_HORIZON_MS ?? 3 * 60 * 60 * 1000,
   ),
+  // DeepBook Predict indexed server — the canonical way to discover oracles
+  // now that the on-chain `OraclePricesUpdated` tick events are quiet.
+  // `/predicts/:id/oracles` lists every oracle (id, expiry, strike grid,
+  // status) for the configured Predict object. Discovery falls back to the
+  // event scan when this is unreachable. Point at a different deployment
+  // (e.g. predict-testnet-6-24) by overriding this + DEEPBOOK_PREDICT_* .
+  predictServerUrl:
+    process.env.PREDICT_SERVER_URL ??
+    "https://predict-server.testnet.mystenlabs.com",
   // Deckmaster quote band: a card's implied probability (its UP ask from
   // `predict::get_trade_amounts`) must stay inside [min, max]. Keeps decks
   // free of near-certain 90/10 cards — the protocol's own ask bounds

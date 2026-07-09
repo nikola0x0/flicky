@@ -16,6 +16,7 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { json } from "./lib/http"
 import { getGraphQLClient, getSuiClient } from "./lib/sui"
+import { fetchActivePredictOracles } from "./lib/predict-api"
 import { makeLogger } from "./log"
 
 const log = makeLogger("oracle")
@@ -86,16 +87,28 @@ async function listEligibleOracles(
   const now = Date.now()
   const minExpiry = BigInt(now) + BigInt(minHeadroomMs)
 
-  const evRes = (await getGraphQLClient().query({
-    query: RECENT_EVENTS_QUERY,
-    variables: { type: `${pkg}::registry::OracleCreated`, last: 30 },
-  })) as RecentEventsResult
+  // Primary: the Predict server API. Fallback: the `OracleCreated` event
+  // scan, for when the server is unreachable.
   const candidates: string[] = []
-  for (const node of evRes.data?.events?.nodes ?? []) {
-    const p = node.contents.json as { oracle_id: string; underlying_asset: string }
-    if (p.underlying_asset !== asset) continue
-    candidates.push(normalizeSuiObjectId(p.oracle_id))
-    if (candidates.length >= 20) break
+  try {
+    for (const r of await fetchActivePredictOracles(asset)) candidates.push(r.id)
+  } catch (e) {
+    log.warn(
+      `predict oracle API failed, falling back to event scan: ${e instanceof Error ? e.message : String(e)}`,
+    )
+    const evRes = (await getGraphQLClient().query({
+      query: RECENT_EVENTS_QUERY,
+      variables: { type: `${pkg}::registry::OracleCreated`, last: 30 },
+    })) as RecentEventsResult
+    for (const node of evRes.data?.events?.nodes ?? []) {
+      const p = node.contents.json as {
+        oracle_id: string
+        underlying_asset: string
+      }
+      if (p.underlying_asset !== asset) continue
+      candidates.push(normalizeSuiObjectId(p.oracle_id))
+      if (candidates.length >= 20) break
+    }
   }
   if (candidates.length === 0) return []
   const res = await client.core.getObjects({

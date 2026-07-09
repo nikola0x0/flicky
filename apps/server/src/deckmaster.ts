@@ -26,6 +26,7 @@ import { createHash } from "node:crypto"
 import { countDecks, deleteDeck, getDeck, upsertDeck } from "./db"
 import { env } from "./env"
 import { makeLogger } from "./log"
+import { fetchActivePredictOracles } from "./lib/predict-api"
 
 const log = makeLogger("deckmaster")
 
@@ -252,16 +253,32 @@ export async function findDeckOracles(
   const pkg = env.deepbookPredictPackageId
   const now = Date.now()
 
-  // 1. Recent price-tick events → live oracle id set. One tick tx updates
-  //    the whole live set, so ~100 events covers many ticks' worth of ids.
-  const tickRes = (await getGraphQLClient().query({
-    query: RECENT_QUERY,
-    variables: { type: `${pkg}::oracle::OraclePricesUpdated`, last: 100 },
-  })) as RecentResult
+  // 1. Discover candidate oracle ids + strike-grid params.
+  //    PRIMARY: the Predict server's `/predicts/:id/oracles` API — the
+  //    canonical "which oracles are live" source now that the on-chain
+  //    `OraclePricesUpdated` tick events are quiet. It also hands us the
+  //    strike grid directly, so no `OracleCreated` scan is needed.
+  //    FALLBACK: the tick-event scan, for when the server is unreachable.
   const candidateIds = new Set<string>()
-  for (const node of tickRes.data?.events?.nodes ?? []) {
-    const p = node.contents.json as { oracle_id?: string }
-    if (p.oracle_id) candidateIds.add(normalizeSuiObjectId(p.oracle_id))
+  try {
+    for (const r of await fetchActivePredictOracles(asset)) {
+      candidateIds.add(r.id)
+      if (!gridCache.has(r.id)) {
+        gridCache.set(r.id, { minStrike: r.minStrike, tickSize: r.tickSize })
+      }
+    }
+  } catch (e) {
+    log.warn(
+      `predict oracle API failed, falling back to event scan: ${e instanceof Error ? e.message : String(e)}`,
+    )
+    const tickRes = (await getGraphQLClient().query({
+      query: RECENT_QUERY,
+      variables: { type: `${pkg}::oracle::OraclePricesUpdated`, last: 100 },
+    })) as RecentResult
+    for (const node of tickRes.data?.events?.nodes ?? []) {
+      const p = node.contents.json as { oracle_id?: string }
+      if (p.oracle_id) candidateIds.add(normalizeSuiObjectId(p.oracle_id))
+    }
   }
   if (candidateIds.size === 0) return []
 
