@@ -2,11 +2,10 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { createBrowserRouter, RouterProvider, Navigate } from "react-router"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { SuiClientProvider, WalletProvider } from "@mysten/dapp-kit"
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc"
+import { DAppKitProvider } from "@mysten/dapp-kit-react"
 
 import "@workspace/ui/globals.css"
-import "@mysten/dapp-kit/dist/index.css"
+import { dAppKit } from "@/lib/dapp-kit"
 import { ThemeProvider } from "@/components/theme-provider.tsx"
 import { EnokiWalletsRegistrar } from "@/components/enoki-wallets-registrar.tsx"
 import Landing from "@/routes/landing.tsx"
@@ -46,27 +45,14 @@ const router = createBrowserRouter([
 
 const queryClient = new QueryClient()
 
-const networks = {
-  testnet: new SuiJsonRpcClient({
-    url: getJsonRpcFullnodeUrl("testnet"),
-    network: "testnet",
-  }),
-  mainnet: new SuiJsonRpcClient({
-    url: getJsonRpcFullnodeUrl("mainnet"),
-    network: "mainnet",
-  }),
-}
-
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ThemeProvider defaultTheme="dark">
       <QueryClientProvider client={queryClient}>
-        <SuiClientProvider networks={networks} defaultNetwork="testnet">
+        <DAppKitProvider dAppKit={dAppKit}>
           <EnokiWalletsRegistrar />
-          <WalletProvider autoConnect>
-            <RouterProvider router={router} />
-          </WalletProvider>
-        </SuiClientProvider>
+          <RouterProvider router={router} />
+        </DAppKitProvider>
       </QueryClientProvider>
     </ThemeProvider>
   </StrictMode>,
