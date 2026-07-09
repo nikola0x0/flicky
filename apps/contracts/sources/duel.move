@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Flicky duel: a two-player, N-card prediction match escrowing stakes
-/// in a shared object, consuming DeepBook Predict positions for correctness
-/// and computing payout. Each card pins its OWN DeepBook `OracleSVI`, so a
-/// deck of 5 cards can span 5 different oracle expiries / strikes.
+/// in a shared object, scoring swipes against DeepBook Predict (6-24)
+/// expiry-market outcomes. Each card pins its OWN `ExpiryMarket` (via
+/// `expiry_market_id` + `strike`), so a deck of 5 cards can span 5
+/// different expiry markets / strikes.
 ///
 /// Lifecycle:
 ///   `PENDING` (creator staked, waiting for challenger) →
@@ -12,24 +13,31 @@
 ///   `COMPLETE` (finalized or refunded).
 ///
 /// Finalization is two-phase:
-///   1. `settle_card(card_idx, &oracle)` × `deck_size` — once each card's
-///      oracle has published `settlement_price`, anyone calls this to
-///      score both players' swipes for that card and accumulate the
+///   1. `settle_card(card_idx, settlement_price, p0_premium, p1_premium)` ×
+///      `deck_size` — once a card's expiry market has settled off-chain, a
+///      keeper feeds the settlement price and per-player premium (6-24
+///      exposes no public on-chain read for either) and anyone calls this
+///      to score both players' swipes for that card and accumulate the
 ///      per-card payout/premium onto the Duel. Each call emits a
-///      `CardSettled` event with the proof (oracle_id + settlement_price).
+///      `CardSettled` event with the proof (expiry_market_id +
+///      settlement_price).
 ///   2. `finalize(duel)` — verifies all cards are settled (or the
 ///      forfeit/refund branches apply), compares aggregate PnL, and
 ///      pays the pot.
 ///
-/// Why two-phase: each card may pin a different oracle that settles on its
-/// own clock — Move can't pass a `vector<&OracleSVI>` (no references inside
-/// vectors), so we settle one oracle at a time and accumulate state on the
-/// Duel itself. Bonus: a slow oracle doesn't block the others, and a
-/// failed settle for one card doesn't roll back the rest.
+/// Why two-phase: each card pins a different expiry market that settles on
+/// its own clock, and settlement data is keeper-fed one card at a time, so
+/// we settle one card at a time and accumulate state on the Duel itself.
+/// Bonus: a slow settlement doesn't block the others, and a failed settle
+/// for one card doesn't roll back the rest.
 ///
 /// Tiers:
-///   `STAKED` — players mint Predict positions; `record_swipe` enforces
-///              `manager.owner() == sender` and anti-replay vs PredictManager.
+///   `STAKED` — players mint 6-24 `ExpiryMarket` positions off-chain via
+///              `expiry_market::mint_exact_quantity`, chained into
+///              `record_swipe` in the same player-signed PTB; only the
+///              resulting `order_id` is recorded on-chain. Anti-replay is
+///              enforced at settle time (`predict_account::has_position`),
+///              not at swipe time.
 ///   `FREE`   — same engine, no Predict mint, no dUSDC stake. Same Duel
 ///              object, same scoring math, just gated money flow.
 module flicky::duel;
@@ -117,8 +125,9 @@ public struct Duel<phantom T> has key {
     status: u8,
     tier: u8,
     /// Number of cards in this duel. Chosen at create-time, bounded by
-    /// [`MIN_DECK_SIZE`, `MAX_DECK_SIZE`]. Each card pins its OWN oracle —
-    /// see `Card.oracle_id`. A 5-card duel can span 5 different oracles.
+    /// [`MIN_DECK_SIZE`, `MAX_DECK_SIZE`]. Each card pins its OWN expiry
+    /// market — see `Card.expiry_market_id`. A 5-card duel can span 5
+    /// different expiry markets.
     deck_size: u64,
     deck_hash: vector<u8>,
     cards: vector<Card>,
@@ -181,7 +190,8 @@ public struct SwipeRecorded has copy, drop {
 }
 
 /// Per-card settlement record — emitted once per `settle_card` call. The
-/// `oracle_id` + `settlement_price` are the proof for THIS card; off-chain
+/// `expiry_market_id` + `settlement_price` are the proof for THIS card
+/// (settlement_price is keeper-fed, not read on-chain); off-chain
 /// consumers collect all `deck_size` of these to reconstruct the full PnL
 /// proof. `actual_up` is `settlement_price > strike` (UP wins).
 public struct CardSettled has copy, drop {
@@ -197,9 +207,9 @@ public struct CardSettled has copy, drop {
 }
 
 /// Final outcome of a duel. Aggregates payouts/premiums across all settled
-/// cards. `primary_oracle_id` + `primary_settlement_price` echo card 0's
-/// settlement as a quick proof anchor; for full per-card proof, walk
-/// `CardSettled` events. Both fields are zero in the forfeit/refund
+/// cards. `primary_expiry_market_id` + `primary_settlement_price` echo
+/// card 0's settlement as a quick proof anchor; for full per-card proof,
+/// walk `CardSettled` events. Both fields are zero in the forfeit/refund
 /// branches where no cards were settled.
 public struct DuelFinalized has copy, drop {
     duel_id: ID,
