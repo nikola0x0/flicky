@@ -7,7 +7,7 @@ import {
 } from "react"
 import { createPortal } from "react-dom"
 import { createPaymentTransactionUri } from "@mysten/payment-kit"
-import { useSuiClient } from "@mysten/dapp-kit"
+import { useCurrentClient } from "@mysten/dapp-kit-react"
 
 import {
   useDusdcBalance,
@@ -468,7 +468,7 @@ function ManagerDepositTab({
   address: string
   walletDusdc: number
 }) {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const sign = useFlickySign()
   const invalidateBalances = useInvalidateWalletBalances()
   const { data: managerInfo, refetch: refetchManager } = useManagerBalance()

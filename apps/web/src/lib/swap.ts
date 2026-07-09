@@ -1,5 +1,5 @@
 import { Transaction } from "@mysten/sui/transactions"
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc"
+import type { ClientWithCoreApi } from "@mysten/sui/client"
 
 export const SWAP_PACKAGE_ID = import.meta.env.VITE_SWAP_PACKAGE_ID as string
 export const SWAP_POOL_ID = import.meta.env.VITE_SWAP_POOL_ID as string
@@ -22,7 +22,7 @@ export interface PoolReserves {
   spotPrice: number
 }
 
-function parseU64Bytes(bytes: number[]): bigint {
+function parseU64Bytes(bytes: ArrayLike<number>): bigint {
   let v = 0n
   for (let i = bytes.length - 1; i >= 0; i--) {
     v = (v << 8n) | BigInt(bytes[i])
@@ -45,7 +45,7 @@ export function isSwapConfigured(): boolean {
  * scaled numbers in token units (NOT raw u64).
  */
 export async function fetchPoolReserves(
-  client: SuiJsonRpcClient,
+  client: ClientWithCoreApi,
   sender?: string,
 ): Promise<PoolReserves | null> {
   if (!isSwapConfigured()) return null
@@ -65,23 +65,25 @@ export async function fetchPoolReserves(
     typeArguments: [SUI_COIN_TYPE, DUSDC_COIN_TYPE],
     arguments: [tx.object(SWAP_POOL_ID)],
   })
-
-  const result = await client.devInspectTransactionBlock({
-    sender:
-      sender ||
+  tx.setSender(
+    sender ||
       "0x0000000000000000000000000000000000000000000000000000000000000000",
-    transactionBlock: tx,
+  )
+
+  const result = await client.core.simulateTransaction({
+    transaction: tx,
+    include: { commandResults: true },
   })
 
-  const res = result.results
+  const res = result.commandResults
   if (!res || res.length < 3) return null
   const reserves = res[0].returnValues
   if (!reserves || reserves.length < 2) return null
 
-  const reserveSuiRaw = parseU64Bytes(reserves[0][0])
-  const reserveDusdcRaw = parseU64Bytes(reserves[1][0])
-  const feeBpsRaw = res[1].returnValues?.[0]?.[0]
-  const lpSupplyRaw = res[2].returnValues?.[0]?.[0]
+  const reserveSuiRaw = parseU64Bytes(reserves[0].bcs)
+  const reserveDusdcRaw = parseU64Bytes(reserves[1].bcs)
+  const feeBpsRaw = res[1].returnValues?.[0]?.bcs
+  const lpSupplyRaw = res[2].returnValues?.[0]?.bcs
 
   const reserveSui = Number(reserveSuiRaw) / Number(SUI_SCALE)
   const reserveDusdc = Number(reserveDusdcRaw) / Number(DUSDC_SCALE)
@@ -129,7 +131,7 @@ export function estimateSwapOutput(
  * RAW token decimals (9 for SUI, 6 for dUSDC).
  */
 export async function buildSwapTx(
-  client: SuiJsonRpcClient,
+  client: ClientWithCoreApi,
   sender: string,
   direction: SwapDirection,
   inputAmountRaw: bigint,
@@ -148,20 +150,18 @@ export async function buildSwapTx(
       arguments: [tx.object(SWAP_POOL_ID), coinIn, tx.pure.u64(minOutputRaw)],
     })
   } else {
-    const coins = await client.getCoins({
+    const coins = await client.core.listCoins({
       owner: sender,
       coinType: DUSDC_COIN_TYPE,
     })
-    if (coins.data.length === 0) {
+    if (coins.objects.length === 0) {
       throw new Error("No dUSDC coins found in wallet")
     }
-    const primary = tx.object(coins.data[0].coinObjectId)
-    if (coins.data.length > 1) {
+    const primary = tx.object(coins.objects[0].objectId)
+    if (coins.objects.length > 1) {
       tx.mergeCoins(
         primary,
-        coins.data.slice(1).map((c: { coinObjectId: string }) =>
-          tx.object(c.coinObjectId),
-        ),
+        coins.objects.slice(1).map((c) => tx.object(c.objectId)),
       )
     }
     const [coinIn] = tx.splitCoins(primary, [tx.pure.u64(inputAmountRaw)])
@@ -182,12 +182,12 @@ export async function buildSwapTx(
  * faucet are all counted.
  */
 export async function fetchCoinBalance(
-  client: SuiJsonRpcClient,
+  client: ClientWithCoreApi,
   owner: string,
   coinType: string,
 ): Promise<number> {
-  const result = await client.getBalance({ owner, coinType })
-  const totalRaw = BigInt(result.totalBalance)
+  const result = await client.core.getBalance({ owner, coinType })
+  const totalRaw = BigInt(result.balance.balance)
   const scale = coinType === SUI_COIN_TYPE ? SUI_SCALE : DUSDC_SCALE
   return Number(totalRaw) / Number(scale)
 }

@@ -7,15 +7,20 @@
  * one PTB) live in `./deepbook.ts`.
  */
 import { Transaction } from "@mysten/sui/transactions"
-import type { SuiJsonRpcClient, SuiObjectResponse } from "@mysten/sui/jsonRpc"
+import type { ClientWithCoreApi } from "@mysten/sui/client"
 import { bcs } from "@mysten/sui/bcs"
-import { normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
+import {
+  normalizeSuiObjectId,
+  normalizeSuiAddress,
+  fromBase64,
+} from "@mysten/sui/utils"
 
-type SuiClient = SuiJsonRpcClient
+type SuiClient = ClientWithCoreApi
 
 import * as duelGen from "@/sui/gen/flicky/duel"
 import { CONFIG } from "./config"
 import { DEEPBOOK } from "./deepbook"
+import { getGraphQLClient } from "./graphql"
 
 const { packageId, deepbookPredictPackageId } = CONFIG
 
@@ -215,11 +220,11 @@ async function takeCoinFromOwner(
   coinType: string,
   amount: bigint,
 ) {
-  const coins = await client.getCoins({ owner, coinType })
-  if (coins.data.length === 0) {
+  const coins = await client.core.listCoins({ owner, coinType })
+  if (coins.objects.length === 0) {
     throw new Error(`no ${coinType} coins in wallet ${owner}`)
   }
-  const [primary, ...rest] = coins.data.map((c) => tx.object(c.coinObjectId))
+  const [primary, ...rest] = coins.objects.map((c) => tx.object(c.objectId))
   if (rest.length > 0) tx.mergeCoins(primary, rest)
   const [taken] = tx.splitCoins(primary, [tx.pure.u64(amount)])
   return taken
@@ -374,22 +379,30 @@ export function buildFinalizeTx(
 
 // === Reads ===
 
-interface MoveFieldWrapper<T> {
-  type: string
-  fields: T
+interface RawSwipe {
+  is_up: boolean
+  quantity: string
+  premium: string
+  p_swiped: string
 }
 
+// Flat gRPC json shape of `flicky::duel::Duel`, as returned by
+// `client.core.getObject({ objectId, include: { json: true } })`. Unlike
+// JSON-RPC, gRPC does NOT nest Move structs under `.fields`: `id` is a bare
+// string, `cards`/swipes are flat objects, `Balance` collapses to a bare
+// string, `Option<Swipe>` is the swipe or null, and `vector<u8>`
+// (deck_hash) is base64.
 interface RawDuelFields {
-  id: { id: string }
+  id: string
   status: string | number
   tier: string | number
   deck_size: string
   deck_hash: number[] | string
-  cards: Array<MoveFieldWrapper<{ oracle_id: string; strike: string }>>
+  cards: Array<{ oracle_id: string; strike: string }>
   creator: string
   challenger: string
-  p0_stake: MoveFieldWrapper<{ value: string }> | string
-  p1_stake: MoveFieldWrapper<{ value: string }> | string
+  p0_stake: string | { value: string }
+  p1_stake: string | { value: string }
   cards_settled: boolean[]
   card_settlement_prices: string[]
   settled_count: string
@@ -400,66 +413,67 @@ interface RawDuelFields {
   p0_next_card_idx: string
   p1_next_card_idx: string
   started_at_ms: string
-  // Sui's JSON-RPC unwraps `Option<Swipe>`: `Some(x)` ⇒ wrapper, `None` ⇒ null.
   p0_swipes: Array<RawSwipe | null>
   p1_swipes: Array<RawSwipe | null>
 }
 
-interface RawSwipe {
-  type?: string
-  fields: {
-    is_up: boolean
-    quantity: string
-    premium: string
-    p_swiped: string
-  }
-}
-
-function balanceValue(b: MoveFieldWrapper<{ value: string }> | string): bigint {
-  if (typeof b === "string") return BigInt(b)
-  return BigInt(b.fields.value)
+function balanceValue(b: string | { value: string }): bigint {
+  return typeof b === "string" ? BigInt(b) : BigInt(b.value)
 }
 
 function parseSwipe(raw: RawSwipe | null): DuelSwipe | null {
   if (raw === null) return null
-  const f = raw.fields
   return {
-    isUp: f.is_up,
-    quantity: BigInt(f.quantity),
-    premium: BigInt(f.premium),
-    pSwiped: BigInt(f.p_swiped),
+    isUp: raw.is_up,
+    quantity: BigInt(raw.quantity),
+    premium: BigInt(raw.premium),
+    pSwiped: BigInt(raw.p_swiped),
   }
 }
 
-export function parseDuel(obj: SuiObjectResponse): DuelState {
-  if (obj.data?.content?.dataType !== "moveObject") {
+/** Render a gRPC vector<u8> (base64) or JSON-RPC number[]/hex to 0x-hex. */
+function deckHashToHex(bytes: number[] | string): string {
+  let arr: number[] | Uint8Array
+  if (typeof bytes === "string") {
+    if (bytes.toLowerCase().startsWith("0x")) return bytes.toLowerCase()
+    arr = fromBase64(bytes) // gRPC encodes vector<u8> as base64
+  } else {
+    arr = bytes
+  }
+  return (
+    "0x" +
+    Array.from(arr)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+  )
+}
+
+/**
+ * Parse a Duel from its flat gRPC json + object type string, as returned by
+ * `client.core.getObject({ objectId, include: { json: true } })`
+ * (`obj.object.json`, `obj.object.type`).
+ */
+export function parseDuel(json: unknown, objectType?: string): DuelState {
+  if (!json || typeof json !== "object") {
     throw new Error("not a Move object")
   }
-  const fields = obj.data.content.fields as unknown as RawDuelFields
+  const fields = json as RawDuelFields
   const cards = fields.cards.map((c) => ({
-    oracleId: normalizeSuiObjectId(c.fields.oracle_id),
-    strike: BigInt(c.fields.strike),
+    oracleId: normalizeSuiObjectId(c.oracle_id),
+    strike: BigInt(c.strike),
   }))
   // Extract the duel's stake coin type from the object type string.
   // e.g. "0xpkg::duel::Duel<0x2::sui::SUI>"  →  "0x2::sui::SUI"
-  const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
+  const typeMatch = objectType?.match(/Duel<(.+)>$/)
   const stakeCoinType = typeMatch?.[1] ?? CONFIG.stakeType
-  // Sui RPC returns vector<u8> either as number[] or a hex string.
-  const deckHashHex =
-    typeof fields.deck_hash === "string"
-      ? fields.deck_hash.toLowerCase().startsWith("0x")
-        ? fields.deck_hash.toLowerCase()
-        : "0x" + fields.deck_hash.toLowerCase()
-      : "0x" +
-        fields.deck_hash.map((b) => b.toString(16).padStart(2, "0")).join("")
   return {
-    id: normalizeSuiObjectId(fields.id.id),
+    id: normalizeSuiObjectId(fields.id),
     stakeCoinType,
     status: STATUS_MAP[String(fields.status)] ?? "PENDING",
     tier: Number(fields.tier),
     creator: fields.creator,
     challenger: fields.challenger,
-    deckHashHex,
+    deckHashHex: deckHashToHex(fields.deck_hash),
     deckSize: BigInt(fields.deck_size),
     cards,
     p0Stake: balanceValue(fields.p0_stake),
@@ -483,11 +497,11 @@ export async function fetchDuel(
   client: SuiClient,
   duelId: string,
 ): Promise<DuelState> {
-  const obj = await client.getObject({
-    id: duelId,
-    options: { showContent: true, showType: true },
+  const obj = await client.core.getObject({
+    objectId: duelId,
+    include: { json: true },
   })
-  return parseDuel(obj)
+  return parseDuel(obj.object.json, obj.object.type)
 }
 
 /**
@@ -506,21 +520,33 @@ export async function resolveCreatedDuelId(
   client: SuiClient,
   digest: string,
 ): Promise<string | null> {
-  await client.waitForTransaction({ digest })
-  const tx = await client.getTransactionBlock({
+  const res = await client.core.waitForTransaction({
     digest,
-    options: { showObjectChanges: true },
+    include: { effects: true, objectTypes: true },
   })
-  const changes = tx.objectChanges ?? []
-  for (const c of changes) {
-    if (c.type !== "created") continue
+  const tx = res.Transaction
+  const types = tx?.objectTypes ?? {}
+  for (const c of tx?.effects?.changedObjects ?? []) {
+    if (c.idOperation !== "Created") continue
     // objectType examples:
     //   "0xpkg::duel::Duel<0xcoin::TYPE>" (paid)
     //   "0xpkg::duel::Duel" (rare; free variant)
-    if (!c.objectType.includes("::duel::Duel")) continue
-    return normalizeSuiObjectId(c.objectId)
+    const t = types[c.objectId]
+    if (t && t.includes("::duel::Duel")) return normalizeSuiObjectId(c.objectId)
   }
   return null
+}
+
+// GraphQL `last: N` returns the N most-recent events of a type, in ascending
+// order — callers reverse when they want newest-first. (gRPC has no filtered
+// event API, so event reads go through GraphQL.)
+const RECENT_EVENTS_QUERY = `query Recent($type: String!, $last: Int!) {
+  events(filter: { type: $type }, last: $last) {
+    nodes { contents { json } }
+  }
+}`
+type RecentEventsResult<T> = {
+  data?: { events?: { nodes?: Array<{ contents: { json: T } }> } }
 }
 
 /**
@@ -528,18 +554,16 @@ export async function resolveCreatedDuelId(
  * configured package + stake type and returns most-recent-first.
  */
 export async function listDuelIds(
-  client: SuiClient,
+  _client: SuiClient,
   limit = 50,
 ): Promise<string[]> {
-  const events = await client.queryEvents({
-    query: { MoveEventType: `${packageId}::duel::DuelCreated` },
-    limit,
-    order: "descending",
-  })
-  return events.data.map((e) => {
-    const parsed = e.parsedJson as { duel_id: string }
-    return normalizeSuiObjectId(parsed.duel_id)
-  })
+  const res = (await getGraphQLClient().query({
+    query: RECENT_EVENTS_QUERY,
+    variables: { type: `${packageId}::duel::DuelCreated`, last: limit },
+  })) as RecentEventsResult<{ duel_id: string }>
+  return (res.data?.events?.nodes ?? [])
+    .map((n) => normalizeSuiObjectId(n.contents.json.duel_id))
+    .reverse()
 }
 
 // === DeepBook OracleSVI reads + discovery ===
@@ -561,30 +585,34 @@ export async function fetchOracleSvi(
   client: SuiClient,
   oracleId: string,
 ): Promise<OracleSviInfo> {
-  const obj = await client.getObject({
-    id: oracleId,
-    options: { showContent: true },
+  const obj = await client.core.getObject({
+    objectId: oracleId,
+    include: { json: true },
   })
-  if (obj.data?.content?.dataType !== "moveObject") {
+  const json = obj.object.json
+  if (!json || typeof json !== "object") {
     throw new Error("OracleSVI not found")
   }
-  const f = obj.data.content.fields as {
-    prices: { fields: { spot: string; forward: string } }
+  const f = json as {
+    prices: { spot: string; forward: string }
     expiry: string
     active: boolean
-    settlement_price: { fields: { vec: string[] } } | string | null
+    // gRPC unwraps `Option<u64>`: Some ⇒ bare string, None ⇒ null. Older
+    // JSON-RPC-style `{ fields: { vec: [...] } }` handled defensively.
+    settlement_price: string | { fields?: { vec?: string[] } } | null
   }
   let settlementPrice: bigint | null = null
-  if (f.settlement_price && typeof f.settlement_price === "object") {
-    const vec = f.settlement_price.fields?.vec ?? []
+  const sp = f.settlement_price
+  if (typeof sp === "string") {
+    settlementPrice = BigInt(sp)
+  } else if (sp && typeof sp === "object") {
+    const vec = sp.fields?.vec ?? []
     if (vec.length > 0) settlementPrice = BigInt(vec[0])
-  } else if (typeof f.settlement_price === "string") {
-    settlementPrice = BigInt(f.settlement_price)
   }
   return {
     id: normalizeSuiObjectId(oracleId),
-    spot: BigInt(f.prices.fields.spot),
-    forward: BigInt(f.prices.fields.forward),
+    spot: BigInt(f.prices.spot),
+    forward: BigInt(f.prices.forward),
     expiry: BigInt(f.expiry),
     isActive: !!f.active,
     settlementPrice,
@@ -633,51 +661,51 @@ export async function findLatestOracleSvi(
   asset = "BTC",
 ): Promise<string> {
   try {
-    const evts = await client.queryEvents({
-      query: {
-        MoveEventType: `${deepbookPredictPackageId}::registry::OracleCreated`,
+    const res = (await getGraphQLClient().query({
+      query: RECENT_EVENTS_QUERY,
+      variables: {
+        type: `${deepbookPredictPackageId}::registry::OracleCreated`,
+        last: 30,
       },
-      limit: 30,
-      order: "descending",
-    })
+    })) as RecentEventsResult<{ oracle_id: string; underlying_asset: string }>
     const candidates: string[] = []
-    for (const e of evts.data) {
-      const p = e.parsedJson as { oracle_id: string; underlying_asset: string }
+    // GraphQL returns ascending; reverse to consider newest-created first.
+    for (const n of (res.data?.events?.nodes ?? []).reverse()) {
+      const p = n.contents.json
       if (p.underlying_asset === asset) {
         candidates.push(normalizeSuiObjectId(p.oracle_id))
       }
     }
     if (candidates.length > 0) {
       const top = candidates.slice(0, 10)
-      const objs = await client.multiGetObjects({
-        ids: top,
-        options: { showContent: true },
+      const objs = await client.core.getObjects({
+        objectIds: top,
+        include: { json: true },
       })
       const nowMs = BigInt(Date.now())
       let best: { id: string; expiry: bigint } | null = null
-      for (let i = 0; i < objs.length; i++) {
-        const obj = objs[i]
-        if (obj.data?.content?.dataType !== "moveObject") continue
-        const f = obj.data.content.fields as {
+      for (const obj of objs.objects) {
+        if (obj instanceof Error || !obj.json) continue
+        const f = obj.json as {
           active?: boolean
           expiry?: string
-          prices?: { fields?: { spot?: string; forward?: string } }
-          settlement_price?: unknown
+          prices?: { spot?: string; forward?: string }
+          settlement_price?: string | { fields?: { vec?: string[] } } | null
         }
+        const sp = f.settlement_price
         const settled =
-          (typeof f.settlement_price === "string" && f.settlement_price !== "0") ||
-          (typeof f.settlement_price === "object" &&
-            f.settlement_price !== null &&
-            // Some Sui RPC variants wrap Option in { fields: { vec: [...] } }
-            ((f.settlement_price as { fields?: { vec?: string[] } }).fields?.vec
-              ?.length ?? 0) > 0)
-        const spot = BigInt(f.prices?.fields?.spot ?? "0")
-        const forward = BigInt(f.prices?.fields?.forward ?? "0")
+          (typeof sp === "string" && sp !== "0") ||
+          (!!sp &&
+            typeof sp === "object" &&
+            // Defensive: older JSON-RPC-style Option wrap { fields: { vec } }.
+            (sp.fields?.vec?.length ?? 0) > 0)
+        const spot = BigInt(f.prices?.spot ?? "0")
+        const forward = BigInt(f.prices?.forward ?? "0")
         const expiry = BigInt(f.expiry ?? "0")
         if (settled || !f.active || spot === 0n || forward === 0n) continue
         if (expiry - nowMs < ORACLE_MIN_HEADROOM_MS) continue
         if (best === null || expiry < best.expiry) {
-          best = { id: top[i], expiry }
+          best = { id: obj.objectId, expiry }
         }
       }
       if (best) return best.id

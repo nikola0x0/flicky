@@ -12,7 +12,7 @@
  */
 import { useEffect, useState, type ReactNode } from "react"
 import { Navigate, useNavigate, useParams } from "react-router"
-import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
+import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { findPredictManager } from "@/lib/deepbook"
@@ -29,7 +29,7 @@ export default function PlayDuel() {
   const { duelId } = useParams<{ duelId: string }>()
   const navigate = useNavigate()
   const account = useCurrentAccount()
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const { wsOpen, send, onMessage } = useFlickySocket(account?.address)
   const [load, setLoad] = useState<Load>({ kind: "loading" })
 

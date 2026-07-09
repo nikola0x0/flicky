@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test"
 import { Transaction } from "@mysten/sui/transactions"
-import type { SuiObjectResponse } from "@mysten/sui/jsonRpc"
 import {
   buildCreateDuelDusdcTx,
   buildCreateDuelTx,
@@ -16,11 +15,17 @@ import {
 } from "./flicky"
 import { CONFIG } from "./config"
 
-// Minimal SuiClient mock for the dUSDC builders. They only call
-// `client.getCoins({ owner, coinType })`; nothing else.
-function mockClient(coins: Array<{ coinObjectId: string; balance: string }>) {
+// Minimal gRPC client mock for the dUSDC builders. They only call
+// `client.core.listCoins({ owner, coinType })`; nothing else.
+function mockClient(coins: Array<{ objectId: string; balance: string }>) {
   return {
-    getCoins: async () => ({ data: coins }),
+    core: {
+      listCoins: async () => ({
+        objects: coins,
+        hasNextPage: false,
+        cursor: null,
+      }),
+    },
   } as unknown as Parameters<typeof buildCreateDuelDusdcTx>[0]
 }
 
@@ -56,72 +61,55 @@ describe("oracleStrikes", () => {
 
 // === parseDuel ===
 
-function makeDuelObject(overrides: Partial<Record<string, unknown>> = {}): SuiObjectResponse {
+const DUEL_TYPE = `${CONFIG.packageId}::duel::Duel<0x2::sui::SUI>`
+
+// Flat gRPC json shape of a Duel (`client.core.getObject`'s `obj.object.json`):
+// no `.fields` nesting, bare `id`, `Balance` as a bare string, `vector<u8>`
+// as number[] (or base64), `Option<Swipe>` as the swipe or null.
+function makeDuelFields(
+  overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
   return {
-    data: {
-      objectId: "0xabc",
-      version: "1",
-      digest: "fake",
-      type: `${CONFIG.packageId}::duel::Duel<0x2::sui::SUI>`,
-      content: {
-        dataType: "moveObject",
-        type: `${CONFIG.packageId}::duel::Duel<0x2::sui::SUI>`,
-        hasPublicTransfer: false,
-        fields: {
-          id: { id: "0xabc000000000000000000000000000000000000000000000000000000000beef" },
-          status: "2",
-          tier: "1",
-          deck_size: "5",
-          deck_hash: new Array(32).fill(0xab),
-          cards: Array.from({ length: 5 }, (_, i) => ({
-            type: `${CONFIG.packageId}::duel::Card`,
-            fields: {
-              oracle_id: "0xdeadbeef",
-              strike: String(80_000_000_000_000n + BigInt(i) * 1_000_000_000n),
-            },
-          })),
-          creator: "0xaaaaaa",
-          challenger: "0xbbbbbb",
-          p0_stake: { type: "0x2::balance::Balance<0x2::sui::SUI>", fields: { value: "10000000" } },
-          p1_stake: { type: "0x2::balance::Balance<0x2::sui::SUI>", fields: { value: "10000000" } },
-          // Per-card settle state — card 0 settled @ 80_000_001 / 1e9.
-          cards_settled: [true, false, false, false, false],
-          card_settlement_prices: ["80000001000000000", "0", "0", "0", "0"],
-          settled_count: "1",
-          // Net PnL accumulators: p0 won card 0, p1 lost it.
-          p0_payout: "20000",
-          p0_premium: "8000",
-          p1_payout: "0",
-          p1_premium: "12000",
-          p0_next_card_idx: "2",
-          p1_next_card_idx: "1",
-          started_at_ms: "1000",
-          p0_swipes: [
-            {
-              type: `${CONFIG.packageId}::duel::Swipe`,
-              fields: {
-                is_up: true,
-                quantity: "20000",
-                premium: "8000",
-                p_swiped: "400000000",
-              },
-            },
-            null,
-            null,
-            null,
-            null,
-          ],
-          p1_swipes: [null, null, null, null, null],
-          ...overrides,
-        },
-      },
-    },
-  } as unknown as SuiObjectResponse
+    id: "0xabc000000000000000000000000000000000000000000000000000000000beef",
+    status: "2",
+    tier: "1",
+    deck_size: "5",
+    deck_hash: new Array(32).fill(0xab),
+    cards: Array.from({ length: 5 }, (_, i) => ({
+      oracle_id: "0xdeadbeef",
+      strike: String(80_000_000_000_000n + BigInt(i) * 1_000_000_000n),
+    })),
+    creator: "0xaaaaaa",
+    challenger: "0xbbbbbb",
+    p0_stake: "10000000",
+    p1_stake: "10000000",
+    // Per-card settle state — card 0 settled @ 80_000_001 / 1e9.
+    cards_settled: [true, false, false, false, false],
+    card_settlement_prices: ["80000001000000000", "0", "0", "0", "0"],
+    settled_count: "1",
+    // Net PnL accumulators: p0 won card 0, p1 lost it.
+    p0_payout: "20000",
+    p0_premium: "8000",
+    p1_payout: "0",
+    p1_premium: "12000",
+    p0_next_card_idx: "2",
+    p1_next_card_idx: "1",
+    started_at_ms: "1000",
+    p0_swipes: [
+      { is_up: true, quantity: "20000", premium: "8000", p_swiped: "400000000" },
+      null,
+      null,
+      null,
+      null,
+    ],
+    p1_swipes: [null, null, null, null, null],
+    ...overrides,
+  }
 }
 
 describe("parseDuel", () => {
   test("parses every top-level field", () => {
-    const d = parseDuel(makeDuelObject())
+    const d = parseDuel(makeDuelFields(), DUEL_TYPE)
     expect(d.status).toBe("ACTIVE")
     expect(d.tier).toBe(1)
     expect(d.creator).toBe("0xaaaaaa")
@@ -141,21 +129,21 @@ describe("parseDuel", () => {
   })
 
   test("parses 5 cards with strikes", () => {
-    const d = parseDuel(makeDuelObject())
+    const d = parseDuel(makeDuelFields(), DUEL_TYPE)
     expect(d.cards).toHaveLength(5)
     expect(d.cards[0].strike).toBe(80_000_000_000_000n)
     expect(d.cards[4].strike).toBe(80_000_000_000_000n + 4_000_000_000n)
   })
 
   test("parses per-card settle state (cardsSettled + cardSettlementPrices)", () => {
-    const d = parseDuel(makeDuelObject())
+    const d = parseDuel(makeDuelFields(), DUEL_TYPE)
     expect(d.cardsSettled).toEqual([true, false, false, false, false])
     expect(d.cardSettlementPrices[0]).toBe(80_000_001_000_000_000n)
     expect(d.cardSettlementPrices[1]).toBe(0n)
   })
 
   test("parses p0/p1 swipes Option array", () => {
-    const d = parseDuel(makeDuelObject())
+    const d = parseDuel(makeDuelFields(), DUEL_TYPE)
     expect(d.p0Swipes[0]).toEqual({
       isUp: true,
       quantity: 20_000n,
@@ -172,14 +160,14 @@ describe("parseDuel", () => {
       ["2", "ACTIVE"],
       ["3", "COMPLETE"],
     ] as const) {
-      const d = parseDuel(makeDuelObject({ status: raw }))
+      const d = parseDuel(makeDuelFields({ status: raw }), DUEL_TYPE)
       expect(d.status).toBe(expected)
     }
   })
 
-  test("throws if response is not a moveObject", () => {
-    const bad = { data: { content: { dataType: "package" } } } as unknown as SuiObjectResponse
-    expect(() => parseDuel(bad)).toThrow(/not a Move object/)
+  test("throws if json is not a Move object", () => {
+    expect(() => parseDuel(null)).toThrow(/not a Move object/)
+    expect(() => parseDuel(undefined)).toThrow(/not a Move object/)
   })
 })
 
@@ -222,8 +210,8 @@ describe("PTB builders", () => {
     const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
     const hash = await computeDeckHash(cards)
     const client = mockClient([
-      { coinObjectId: "0xc0", balance: "10000000" },
-      { coinObjectId: "0xc1", balance: "5000000" },
+      { objectId: "0xc0", balance: "10000000" },
+      { objectId: "0xc1", balance: "5000000" },
     ])
     const tx = await buildCreateDuelDusdcTx(
       client,
@@ -250,7 +238,7 @@ describe("PTB builders", () => {
   })
 
   test("buildJoinDuelDusdcTx emits one join_duel with dUSDC type arg", async () => {
-    const client = mockClient([{ coinObjectId: "0xc0", balance: "10000000" }])
+    const client = mockClient([{ objectId: "0xc0", balance: "10000000" }])
     const tx = await buildJoinDuelDusdcTx(client, "0xabc", duelId, 1_000_000n, DUSDC)
     const data = tx.getData()
     const joinDuel = data.commands.find(

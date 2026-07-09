@@ -26,12 +26,11 @@ import {
   type ReactNode,
 } from "react"
 import {
-  useConnectWallet,
   useCurrentAccount,
-  useDisconnectWallet,
-  useSuiClient,
+  useCurrentClient,
+  useDAppKit,
   useWallets,
-} from "@mysten/dapp-kit"
+} from "@mysten/dapp-kit-react"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@workspace/ui/components/button"
@@ -60,6 +59,7 @@ import {
   findLatestOracleSvi,
   listDuelIds,
   oracleStrikes,
+  resolveCreatedDuelId,
   type DeckCard,
   type DuelState,
   type OracleSviInfo,
@@ -69,7 +69,7 @@ import {
   buildCreateManagerTx,
   buildDepositDusdcTx,
   buildStakedSwipeTx,
-  extractManagerIdFromChanges,
+  waitForCreatedManagerId,
   findPredictManager,
   getManagerDusdcBalance,
   getWalletDusdcBalance,
@@ -197,8 +197,10 @@ function WalletButton() {
 
 function WalletModal({ onClose }: { onClose: () => void }) {
   const wallets = useWallets()
-  const { mutateAsync: connect, isPending, error } = useConnectWallet()
+  const dAppKit = useDAppKit()
   const [busyWallet, setBusyWallet] = useState<string | null>(null)
+  const [error, setError] = useState<Error | null>(null)
+  const isPending = busyWallet !== null
 
   // Close on Escape.
   useEffect(() => {
@@ -211,11 +213,13 @@ function WalletModal({ onClose }: { onClose: () => void }) {
     const wallet = wallets.find((w) => w.name === name)
     if (!wallet) return
     setBusyWallet(name)
+    setError(null)
     try {
-      await connect({ wallet })
+      await dAppKit.connectWallet({ wallet })
       onClose()
-    } catch {
+    } catch (e) {
       // error surfaces below
+      setError(e instanceof Error ? e : new Error(String(e)))
     } finally {
       setBusyWallet(null)
     }
@@ -313,7 +317,7 @@ function WalletMenu({
   address: string
   onClose: () => void
 }) {
-  const { mutateAsync: disconnect } = useDisconnectWallet()
+  const dAppKit = useDAppKit()
   const [copied, setCopied] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -373,7 +377,7 @@ function WalletMenu({
         </a>
         <MenuItem
           onClick={async () => {
-            await disconnect()
+            await dAppKit.disconnectWallet()
             onClose()
           }}
           tone="danger"
@@ -541,7 +545,7 @@ function Footer() {
 // ─── oracle strip (always visible) ──────────────────────────────────────────
 
 function useOracle() {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const oracleIdQuery = useQuery({
     queryKey: ["oracle-id"],
     queryFn: () => findLatestOracleSvi(client),
@@ -616,7 +620,7 @@ function Lobby({
   address: string
   onEnterDuel: (id: string) => void
 }) {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const queryClient = useQueryClient()
   const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const { oracleId, oracle } = useOracle()
@@ -682,15 +686,9 @@ function Lobby({
           : buildCreateDuelTx(deck.hash, stake.amount, stake.coinType, deckSize)
 
       const res = await signAndExec({ transaction: tx })
-      const full = await client.waitForTransaction({
-        digest: res.digest,
-        options: { showObjectChanges: true },
-      })
-      const created = full.objectChanges?.find(
-        (c) => c.type === "created" && c.objectType.includes("::duel::Duel<"),
-      )
+      const duelId = await resolveCreatedDuelId(client, res.digest)
       queryClient.invalidateQueries({ queryKey: ["duels"] })
-      if (created?.type === "created") onEnterDuel(created.objectId)
+      if (duelId) onEnterDuel(duelId)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -831,7 +829,7 @@ function DepositPanel({
   address: string
   walletBalance: bigint | undefined
 }) {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const queryClient = useQueryClient()
   const { mutateAsync: signAndExec } = useFlickySign()
   const [copied, setCopied] = useState(false)
@@ -882,16 +880,11 @@ function DepositPanel({
     setToast(null)
     try {
       const res = await signAndExec({ transaction: buildCreateManagerTx() })
-      // Wait for indexing + pull objectChanges so we can pre-populate the
-      // query cache with the new manager id instead of waiting for the
-      // next 12s refetch tick. UI updates within ~1s of tx finality.
-      const full = await client.waitForTransaction({
-        digest: res.digest,
-        options: { showObjectChanges: true },
-      })
-      const newManagerId = extractManagerIdFromChanges(
-        full.objectChanges ?? [],
-      )
+      // Wait for indexing + read the tx's created objects so we can
+      // pre-populate the query cache with the new manager id instead of
+      // waiting for the next 12s refetch tick. UI updates within ~1s of
+      // tx finality.
+      const newManagerId = await waitForCreatedManagerId(client, res.digest)
       if (newManagerId) {
         // Persist to localStorage so F5 / next session doesn't pay the
         // event-scan cost and so the UI shows the manager id immediately
@@ -943,7 +936,7 @@ function DepositPanel({
         micro,
       )
       const res = await signAndExec({ transaction: tx })
-      await client.waitForTransaction({ digest: res.digest })
+      await client.core.waitForTransaction({ digest: res.digest })
       // Force immediate refetch instead of waiting for the polling tick.
       await Promise.all([
         queryClient.refetchQueries({
@@ -1154,7 +1147,7 @@ function DuelSummary({
   address: string
   onOpen: () => void
 }) {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const { data: d } = useQuery({
     queryKey: ["duel", duelId],
     queryFn: () => fetchDuel(client, duelId),
@@ -1200,7 +1193,7 @@ function DuelView({
   address: string
   onBack: () => void
 }) {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const { oracle } = useOracle()
   const duelQuery = useQuery({
     queryKey: ["duel", duelId],
@@ -1355,7 +1348,7 @@ function JoinView({
   duelId: string
   address: string
 }) {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const queryClient = useQueryClient()
   const [err, setErr] = useState<string | null>(null)
@@ -1499,7 +1492,7 @@ function SwipingView({
   isCreator: boolean
   address: string
 }) {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const queryClient = useQueryClient()
   const now = useNow(250)
@@ -1968,7 +1961,7 @@ function LockupView({
 
 function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
   const { mutateAsync: signAndExec, isPending } = useFlickySign()
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const queryClient = useQueryClient()
   const [err, setErr] = useState<string | null>(null)
   const [digest, setDigest] = useState<string | null>(null)
