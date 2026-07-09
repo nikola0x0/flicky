@@ -23,7 +23,7 @@
  */
 import { toBase64, fromBase64 } from "@mysten/sui/utils"
 import type { Transaction } from "@mysten/sui/transactions"
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc"
+import type { ClientWithCoreApi } from "@mysten/sui/client"
 
 const SPONSOR_URL =
   import.meta.env.VITE_SPONSOR_URL ?? "http://localhost:3001"
@@ -126,7 +126,7 @@ async function postSponsorWithRetry(body: unknown): Promise<Response> {
  * non-2xx, throws — callers can catch and fall back to wallet-pay.
  */
 export async function executeSponsored(
-  client: SuiJsonRpcClient,
+  client: ClientWithCoreApi,
   tx: Transaction,
   signer: SignerLike,
 ): Promise<{ digest: string }> {
@@ -175,7 +175,7 @@ export async function executeSponsored(
  * error players see when their dUSDC-only zkLogin wallet has no SUI.
  */
 export async function signAndExecuteWithSponsorOrFallback(
-  client: SuiJsonRpcClient,
+  client: ClientWithCoreApi,
   tx: Transaction,
   signer: SignerLike,
   fallback: FallbackSigner,

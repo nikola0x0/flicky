@@ -7,7 +7,7 @@ import {
 } from "react"
 import { createPortal } from "react-dom"
 import { Link } from "react-router"
-import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
+import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 import type { ClientMsg, ServerMsg } from "@/lib/protocol"
 import { STAKE_TIERS, type Tier } from "@/lib/protocol"
 import type { Unsubscribe } from "@/hooks/use-flicky-socket"
@@ -164,7 +164,7 @@ export function ActiveDuel({
   onExit,
 }: Props) {
   const account = useCurrentAccount()
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const sign = useFlickySign()
   const [phase, setPhase] = useState<Phase>(
     resumeDuelId
@@ -565,7 +565,7 @@ function PhaseSwiping({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [chartModal, setChartModal] = useState<null | "btc" | "pnl">(null)
-  const client = useSuiClient()
+  const client = useCurrentClient()
 
   // 1 Hz wall-clock so the "settles in …" countdown ticks. Keyed off nothing
   // but the interval — does NOT re-quote (that effect keys on the card), so

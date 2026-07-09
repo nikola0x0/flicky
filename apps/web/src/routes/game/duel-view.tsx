@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Link, useParams } from "react-router"
-import { useCurrentAccount } from "@mysten/dapp-kit"
+import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { markCardPnl } from "@/lib/pnl"

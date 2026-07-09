@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { Link } from "react-router"
-import { useCurrentAccount } from "@mysten/dapp-kit"
+import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { PixelButton } from "@/components/pixel-button"

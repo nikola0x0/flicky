@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
-import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
+import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import {
   buildCreateManagerTx,
@@ -68,7 +68,7 @@ type Phase =
 
 export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
   const account = useCurrentAccount()
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const sign = useFlickySign()
   const [phase, setPhase] = useState<Phase>({ kind: "checking" })
   const [walletDusdc, setWalletDusdc] = useState<bigint>(0n)

@@ -1,6 +1,6 @@
-import { useEffect, type CSSProperties } from "react"
+import { useEffect, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
-import { useConnectWallet, useWallets } from "@mysten/dapp-kit"
+import { useDAppKit, useWallets } from "@mysten/dapp-kit-react"
 import { isGoogleWallet } from "@mysten/enoki"
 
 import { PixelButton } from "@/components/pixel-button"
@@ -44,7 +44,8 @@ export interface LoginModalProps {
 
 export function LoginModal({ open, onClose }: LoginModalProps) {
   const wallets = useWallets()
-  const { mutate: connectWallet, isPending: isConnecting } = useConnectWallet()
+  const dAppKit = useDAppKit()
+  const [isConnecting, setIsConnecting] = useState(false)
 
   const googleWallet = wallets.find(isGoogleWallet)
   const slushWallet = wallets.find(
@@ -54,12 +55,21 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
       w.name === "Sui Wallet",
   )
 
-  const connectAndClose = (wallet: (typeof wallets)[number]) => {
-    connectWallet({ wallet }, { onSuccess: () => onClose() })
+  const connectAndClose = async (wallet: (typeof wallets)[number]) => {
+    setIsConnecting(true)
+    try {
+      await dAppKit.connectWallet({ wallet })
+      onClose()
+    } catch {
+      // user cancelled the popup or the connect failed — leave the modal
+      // open so they can retry.
+    } finally {
+      setIsConnecting(false)
+    }
   }
 
   const handleGoogle = () => {
-    if (googleWallet) connectAndClose(googleWallet)
+    if (googleWallet) void connectAndClose(googleWallet)
   }
 
   const handleSlush = () => {
@@ -67,7 +77,7 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
       window.open(SLUSH_INSTALL_URL, "_blank", "noopener,noreferrer")
       return
     }
-    connectAndClose(slushWallet)
+    void connectAndClose(slushWallet)
   }
 
   useEffect(() => {

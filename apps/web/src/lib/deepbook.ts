@@ -16,17 +16,18 @@
  *   - dUSDC has no public faucet; players need an existing source.
  */
 import { Transaction } from "@mysten/sui/transactions"
-import type { SuiJsonRpcClient, SuiObjectResponse } from "@mysten/sui/jsonRpc"
+import type { ClientWithCoreApi } from "@mysten/sui/client"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { bcs } from "@mysten/sui/bcs"
 
-type SuiClient = SuiJsonRpcClient
+type SuiClient = ClientWithCoreApi
 
 import * as predict from "@/sui/gen/deepbook_predict/predict"
 import * as predictManager from "@/sui/gen/deepbook_predict/predict_manager"
 import * as marketKey from "@/sui/gen/deepbook_predict/market_key"
 import * as duel from "@/sui/gen/flicky/duel"
 import { CONFIG } from "./config"
+import { getGraphQLClient } from "./graphql"
 
 /** Hard-coded testnet object IDs for DeepBook Predict. */
 export const DEEPBOOK = {
@@ -106,8 +107,25 @@ function clearManagerCache(address: string): void {
  */
 const MANAGER_SCAN_PAGE_CAP = 100 // 5000 events ≈ full testnet history
 
+// GraphQL descending scan: `last: 50` + `before: startCursor` walks the
+// event stream newest-first, page by page (gRPC has no filtered event API).
+const MANAGER_SCAN_QUERY = `query Scan($type: String!, $before: String) {
+  events(filter: { type: $type }, last: 50, before: $before) {
+    pageInfo { hasPreviousPage startCursor }
+    nodes { contents { json } }
+  }
+}`
+type ManagerScanResult = {
+  data?: {
+    events?: {
+      pageInfo?: { hasPreviousPage: boolean; startCursor: string | null }
+      nodes?: Array<{ contents: { json: { manager_id: string; owner: string } } }>
+    }
+  }
+}
+
 export async function findPredictManager(
-  client: SuiClient,
+  _client: SuiClient,
   address: string,
 ): Promise<{ id: string } | null> {
   const cached = readManagerCache(address)
@@ -124,32 +142,30 @@ export async function findPredictManager(
     return null // server scanned everything and found none
   }
 
-  // Fallback: server unreachable — scan events directly. Newest first,
-  // and UNBOUNDED (same as the server) so a returned `null` always means
-  // "scanned the whole stream, found none" — never "gave up early". A
+  // Fallback: server unreachable — scan events directly via GraphQL. Newest
+  // first, and UNBOUNDED (same as the server) so a returned `null` always
+  // means "scanned the whole stream, found none" — never "gave up early". A
   // truncated null here would let the bootstrap mint a duplicate manager,
   // which is exactly the failure this whole path exists to prevent. The
   // page cap below only guards a misbehaving RPC that never ends.
-  let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
+  const type = `${DEEPBOOK.package}::predict_manager::PredictManagerCreated`
+  let before: string | null = null
   for (let page = 0; page < MANAGER_SCAN_PAGE_CAP; page++) {
-    const evts = await client.queryEvents({
-      query: {
-        MoveEventType: `${DEEPBOOK.package}::predict_manager::PredictManagerCreated`,
-      },
-      limit: 50,
-      order: "descending",
-      cursor,
-    })
-    for (const e of evts.data) {
-      const p = e.parsedJson as { manager_id: string; owner: string }
+    const res = (await getGraphQLClient().query({
+      query: MANAGER_SCAN_QUERY,
+      variables: { type, before },
+    })) as ManagerScanResult
+    const ev = res.data?.events
+    for (const node of ev?.nodes ?? []) {
+      const p = node.contents.json
       if (p.owner === address) {
         const id = normalizeSuiObjectId(p.manager_id)
         writeManagerCache(address, id)
         return { id }
       }
     }
-    if (!evts.hasNextPage) break
-    cursor = evts.nextCursor
+    if (!ev?.pageInfo?.hasPreviousPage) break
+    before = ev.pageInfo.startCursor
   }
   return null
 }
@@ -193,13 +209,11 @@ export async function getWalletDusdcBalance(
   client: SuiClient,
   address: string,
 ): Promise<bigint> {
-  const coins = await client.getCoins({
+  const res = await client.core.getBalance({
     owner: address,
     coinType: DEEPBOOK.dusdcType,
   })
-  let total = 0n
-  for (const c of coins.data) total += BigInt(c.balance)
-  return total
+  return BigInt(res.balance.balance)
 }
 
 /** dUSDC held inside a PredictManager (devInspect of `balance<DUSDC>`). */
@@ -215,13 +229,14 @@ export async function getManagerDusdcBalance(
       typeArguments: [DEEPBOOK.dusdcType],
     }),
   )
-  const res = await client.devInspectTransactionBlock({
-    sender: "0x0000000000000000000000000000000000000000000000000000000000000000",
-    transactionBlock: tx,
+  tx.setSender("0x0000000000000000000000000000000000000000000000000000000000000000")
+  const res = await client.core.simulateTransaction({
+    transaction: tx,
+    include: { commandResults: true },
   })
-  const ret = res.results?.[0]?.returnValues?.[0]
+  const ret = res.commandResults?.[0]?.returnValues?.[0]
   if (!ret) return 0n
-  return BigInt(bcs.U64.parse(Uint8Array.from(ret[0])))
+  return BigInt(bcs.u64().parse(ret.bcs))
 }
 
 // === PTB builders ===
@@ -254,12 +269,15 @@ export async function buildDepositDusdcTx(
   managerId: string,
   amountMicroDusdc: bigint,
 ): Promise<Transaction> {
-  const coins = await client.getCoins({ owner, coinType: DEEPBOOK.dusdcType })
-  if (coins.data.length === 0) {
+  const coins = await client.core.listCoins({
+    owner,
+    coinType: DEEPBOOK.dusdcType,
+  })
+  if (coins.objects.length === 0) {
     throw new Error("no dUSDC coins to deposit")
   }
   const tx = new Transaction()
-  const [primary, ...rest] = coins.data.map((c) => tx.object(c.coinObjectId))
+  const [primary, ...rest] = coins.objects.map((c) => tx.object(c.objectId))
   if (rest.length > 0) tx.mergeCoins(primary, rest)
   const [deposit] = tx.splitCoins(primary, [tx.pure.u64(amountMicroDusdc)])
   tx.add(
@@ -473,39 +491,52 @@ export async function quoteSwipePremium(
       ],
     }),
   )
-  const res = await client.devInspectTransactionBlock({
-    sender:
-      "0x0000000000000000000000000000000000000000000000000000000000000000",
-    transactionBlock: tx,
+  tx.setSender(
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+  )
+  const res = await client.core.simulateTransaction({
+    transaction: tx,
+    include: { commandResults: true },
   })
   // The last result is `get_trade_amounts` returning (mint_cost, max_payout).
   // BCS-encoded u64 each. We only need mint_cost.
-  const last = res.results?.[res.results.length - 1]
+  const cmds = res.commandResults ?? []
+  const last = cmds[cmds.length - 1]
   const rets = last?.returnValues ?? []
   if (rets.length < 1) {
-    throw new Error("quoteSwipePremium: unexpected devInspect return shape")
+    throw new Error("quoteSwipePremium: unexpected simulate return shape")
   }
-  const premium = BigInt(bcs.U64.parse(Uint8Array.from(rets[0][0])))
+  const premium = BigInt(bcs.u64().parse(rets[0].bcs))
   const q = args.quantity
   const pImplied = q > 0n ? (premium * 1_000_000_000n) / q : 0n
   return { premium, pImplied }
 }
 
 /**
- * Parse the `created` change matching the new PredictManager out of a
- * `create_manager` tx's objectChanges.
+ * Wait for a `create_manager` tx to be indexed, then resolve the new
+ * PredictManager id from the tx's created objects.
+ *
+ * gRPC replaces v1 `objectChanges` with `effects.changedObjects`
+ * (`idOperation === "Created"`) keyed to their Move type via the
+ * `objectTypes` map. Returns null if the tx created no PredictManager,
+ * so the caller can fall back to event-scan discovery.
  */
-export function extractManagerIdFromChanges(
-  changes:
-    | SuiObjectResponse[]
-    | { type: string; objectType?: string; objectId?: string }[],
-): string | null {
-  for (const c of changes) {
-    const raw = "type" in c ? c : undefined
-    if (!raw) continue
-    if (raw.type !== "created") continue
-    if (!raw.objectType || !raw.objectType.endsWith("::PredictManager")) continue
-    return normalizeSuiObjectId(raw.objectId!)
+export async function waitForCreatedManagerId(
+  client: SuiClient,
+  digest: string,
+): Promise<string | null> {
+  const res = await client.core.waitForTransaction({
+    digest,
+    include: { effects: true, objectTypes: true },
+  })
+  const tx = res.Transaction
+  const types = tx?.objectTypes ?? {}
+  for (const c of tx?.effects?.changedObjects ?? []) {
+    if (c.idOperation !== "Created") continue
+    const t = types[c.objectId]
+    if (t && t.endsWith("::PredictManager")) {
+      return normalizeSuiObjectId(c.objectId)
+    }
   }
   return null
 }
@@ -526,7 +557,7 @@ export async function resolveCreatedManagerId(
   digest: string,
   ownerAddress: string,
 ): Promise<string | null> {
-  await client.waitForTransaction({ digest })
+  await client.core.waitForTransaction({ digest })
   // Bust the per-address cache so we don't return a stale null hit.
   invalidateManagerCache(ownerAddress)
   const mgr = await findPredictManager(client, ownerAddress)

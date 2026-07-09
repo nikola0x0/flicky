@@ -3,7 +3,7 @@ import type { CSSProperties } from "react"
 import { Navigate, useLocation, useNavigate } from "react-router"
 import { setPendingSwipe } from "@/lib/nav-transition"
 import { DeviceFrame } from "@/components/device-frame"
-import { useCurrentAccount } from "@mysten/dapp-kit"
+import { useCurrentAccount } from "@mysten/dapp-kit-react"
 
 import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"

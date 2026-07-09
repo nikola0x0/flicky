@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
-import { useSuiClient } from "@mysten/dapp-kit"
+import { useCurrentClient } from "@mysten/dapp-kit-react"
 import { Transaction } from "@mysten/sui/transactions"
 
 import {
@@ -255,7 +255,7 @@ const SEND_META: Record<
 }
 
 function SendTab({ address }: { address: string }) {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   const sign = useFlickySign()
   const invalidateBalances = useInvalidateWalletBalances()
   const { data: dusdcBalance = 0 } = useDusdcBalance()
@@ -523,18 +523,18 @@ function AmountField({
  * this correct regardless of the gas-payment path.
  */
 async function buildExternalTransferTx(
-  client: ReturnType<typeof useSuiClient>,
+  client: ReturnType<typeof useCurrentClient>,
   owner: string,
   recipient: string,
   coinType: string,
   amount: bigint,
 ): Promise<Transaction> {
-  const coins = await client.getCoins({ owner, coinType })
-  if (coins.data.length === 0) {
+  const coins = await client.core.listCoins({ owner, coinType })
+  if (coins.objects.length === 0) {
     throw new Error(`no ${coinType} coins in wallet`)
   }
   const tx = new Transaction()
-  const [primary, ...rest] = coins.data.map((c) => tx.object(c.coinObjectId))
+  const [primary, ...rest] = coins.objects.map((c) => tx.object(c.objectId))
   if (rest.length > 0) tx.mergeCoins(primary, rest)
   const [out] = tx.splitCoins(primary, [tx.pure.u64(amount)])
   tx.transferObjects([out], tx.pure.address(recipient))

@@ -1,6 +1,6 @@
 import { useEffect } from "react"
 import { createPortal } from "react-dom"
-import { useDisconnectWallet } from "@mysten/dapp-kit"
+import { useDAppKit } from "@mysten/dapp-kit-react"
 
 import { PixelButton } from "@/components/pixel-button"
 
@@ -18,10 +18,10 @@ export interface MenuModalProps {
 }
 
 export function MenuModal({ open, onClose }: MenuModalProps) {
-  const { mutate: disconnect } = useDisconnectWallet()
+  const dAppKit = useDAppKit()
 
   const handleLogout = () => {
-    disconnect()
+    void dAppKit.disconnectWallet()
     onClose()
   }
 
