@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import type { CSSProperties } from "react"
 import { useNavigate } from "react-router"
-import { useCurrentAccount } from "@mysten/dapp-kit"
+import { useCurrentAccount } from "@mysten/dapp-kit-react"
 
 import { MatchButton } from "@/components/match-button"
 import { ModeModal } from "@/components/mode-modal"

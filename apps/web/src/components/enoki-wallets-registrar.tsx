@@ -1,18 +1,18 @@
 import { useEffect } from "react"
-import { useSuiClient } from "@mysten/dapp-kit"
+import { useCurrentClient } from "@mysten/dapp-kit-react"
 import { registerEnokiWallets } from "@mysten/enoki"
 
 /**
  * Registers Enoki-backed zkLogin wallets (Google, etc.) into the
  * wallet-standard registry so they appear in dapp-kit's useWallets().
- * Lives inside <SuiClientProvider> so it has access to the SuiClient
- * via useSuiClient(). Renders nothing.
+ * Lives inside <DAppKitProvider> so it has access to the active gRPC
+ * client via useCurrentClient(). Renders nothing.
  *
  * No-op when env vars are missing — keeps the build from breaking in
  * environments without the Enoki keys.
  */
 export function EnokiWalletsRegistrar() {
-  const client = useSuiClient()
+  const client = useCurrentClient()
   useEffect(() => {
     const apiKey = import.meta.env.VITE_ENOKI_API_KEY
     const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID

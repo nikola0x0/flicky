@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react"
 import { Link, NavLink, Outlet, useLocation } from "react-router"
 import type { CSSProperties } from "react"
-import { useCurrentAccount } from "@mysten/dapp-kit"
+import { useCurrentAccount } from "@mysten/dapp-kit-react"
 
 /**
  * Game-route context, passed through react-router's <Outlet />. Lets

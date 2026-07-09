@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { useCurrentAccount, useSuiClient } from "@mysten/dapp-kit"
+import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 
 import {
   DUSDC_COIN_TYPE,
@@ -23,7 +23,7 @@ const MANAGER_BALANCE_KEY = "manager-balance"
  */
 export function useWalletBalance(coinType: string) {
   const account = useCurrentAccount()
-  const client = useSuiClient()
+  const client = useCurrentClient()
   return useQuery({
     queryKey: [BALANCE_ROOT_KEY, account?.address ?? null, coinType],
     queryFn: async () => {
@@ -62,7 +62,7 @@ export function useInvalidateWalletBalances() {
  */
 export function useManagerBalance() {
   const account = useCurrentAccount()
-  const client = useSuiClient()
+  const client = useCurrentClient()
   return useQuery({
     queryKey: [MANAGER_BALANCE_KEY, account?.address ?? null],
     queryFn: async () => {
