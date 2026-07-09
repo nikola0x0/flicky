@@ -14,5 +14,10 @@
     "verbatimModuleSyntax": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.local.ts"]
+  "exclude": [
+    "src/**/*.local.ts",
+    "src/scripts/deepbook-discover.ts",
+    "src/scripts/demo-duel.ts",
+    "src/scripts/e2e.test.ts"
+  ]
 }
