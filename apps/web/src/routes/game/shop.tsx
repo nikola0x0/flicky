@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import type { CSSProperties } from "react"
 import {
   useCurrentAccount,
-  useSignAndExecuteTransaction,
-  useSuiClient,
-} from "@mysten/dapp-kit"
+  useCurrentClient,
+  useDAppKit,
+} from "@mysten/dapp-kit-react"
 import { useOutletContext } from "react-router"
 
 import { PixelButton } from "@/components/pixel-button"
@@ -64,8 +64,8 @@ const DUSDC_TOKEN: TokenMeta = {
  */
 export default function GameShop() {
   const account = useCurrentAccount()
-  const client = useSuiClient()
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction()
+  const client = useCurrentClient()
+  const dAppKit = useDAppKit()
   const { openLogin } = useOutletContext<GameOutletContext>()
 
   const [direction, setDirection] = useState<SwapDirection>("sui_to_dusdc")
@@ -123,10 +123,13 @@ export default function GameShop() {
         inputRaw,
         minOutRaw
       )
-      const result = await signAndExecute({ transaction: tx })
+      const result = await dAppKit.signAndExecuteTransaction({ transaction: tx })
+      if (result.$kind !== "Transaction") {
+        throw new Error("swap failed")
+      }
       setStatus({
         kind: "ok",
-        msg: `swap complete — ${result.digest.slice(0, 10)}…`,
+        msg: `swap complete — ${result.Transaction.digest.slice(0, 10)}…`,
       })
       setTimeout(() => {
         refreshPool()
