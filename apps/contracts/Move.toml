@@ -6,8 +6,7 @@ authors = ["Flicky Labs <lequocuyit@gmail.com>"]
 
 [dependencies]
 deepbook_predict = { local = "./deepbook_predict_min" }
-deepbook = { local = "./deepbook_min" }
-token = { local = "./token_min" }
+account = { local = "./account_min" }
 
 [addresses]
 flicky = "0x0"
