@@ -78,6 +78,55 @@ upgrade-capability = "${upgradeCap}"`
 
 // -----------------------------------------------------------------------------
 
+/**
+ * `sui move build --dump-bytecode-as-base64` only emits the package's
+ * *immediate* dependencies (as declared in Move.toml). Sui's on-chain
+ * publish validation (`build_linkage_table` in sui-types) additionally
+ * requires that every dependency's own linkage table be a subset of the
+ * ids we pass — i.e. the FULL transitive closure, not just the direct
+ * deps. This matters here because `deepbook_predict_min`'s `published-at`
+ * points at the real, already-deployed DeepBook Predict package, which
+ * itself has several further on-chain dependencies that our local
+ * (trimmed) Move.toml no longer declares. Walking each dependency's
+ * on-chain `linkage_table` (via `sui client object --json`) and unioning
+ * it in reproduces what a fully-declared manifest would have produced.
+ * Without this, publish fails with `PublishUpgradeMissingDependency`.
+ */
+function getOnChainLinkageDeps(pkgId: string): string[] {
+  const out = execSync(`sui client object ${pkgId} --json`, {
+    env: { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` },
+    maxBuffer: 200 * 1024 * 1024,
+  }).toString();
+  const obj = JSON.parse(out) as {
+    content?: { Package?: { linkage_table?: Record<string, { upgraded_id: string }> } };
+  };
+  const linkageTable = obj.content?.Package?.linkage_table ?? {};
+  return Object.values(linkageTable).map((v) => v.upgraded_id);
+}
+
+function computeTransitiveDependencyClosure(seedDependencies: string[]): string[] {
+  const seen = new Set<string>(seedDependencies);
+  const queue = [...seedDependencies];
+  while (queue.length > 0) {
+    const id = queue.pop()!;
+    let deps: string[];
+    try {
+      deps = getOnChainLinkageDeps(id);
+    } catch {
+      // Not a package object we can introspect (or object doesn't exist) —
+      // leave it to the on-chain validator to reject if it's actually bad.
+      continue;
+    }
+    for (const dep of deps) {
+      if (!seen.has(dep)) {
+        seen.add(dep);
+        queue.push(dep);
+      }
+    }
+  }
+  return [...seen];
+}
+
 async function main() {
   const keypair = loadDeployerKeypair();
   const address = keypair.toSuiAddress();
@@ -99,15 +148,23 @@ async function main() {
   ) as { modules: string[]; dependencies: string[]; digest?: number[] };
 
   console.log(
-    `Compiled ${buildOutput.modules.length} modules, ${buildOutput.dependencies.length} deps:`,
+    `Compiled ${buildOutput.modules.length} modules, ${buildOutput.dependencies.length} direct deps:`,
     JSON.stringify(buildOutput.dependencies, null, 2)
+  );
+
+  // 1b. Expand to the full transitive dependency closure — see
+  //     computeTransitiveDependencyClosure() for why this is necessary.
+  const dependencies = computeTransitiveDependencyClosure(buildOutput.dependencies);
+  console.log(
+    `Resolved ${dependencies.length} transitive deps:`,
+    JSON.stringify(dependencies, null, 2)
   );
 
   // 2. Build the publish transaction.
   const tx = new Transaction();
   const upgradeCap = tx.publish({
     modules: buildOutput.modules,
-    dependencies: buildOutput.dependencies,
+    dependencies,
   });
   tx.transferObjects([upgradeCap], address);
   tx.setSender(address);

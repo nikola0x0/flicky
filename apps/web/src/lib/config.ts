@@ -17,7 +17,7 @@ export const CONFIG = {
    */
   packageId:
     import.meta.env.VITE_FLICKY_PACKAGE_ID_TESTNET ??
-    "0xaed053fcc146abd1da507eae72b4f3e9c838d83c83c7b68b230a3c9a2601a522",
+    "0x6c6be7201465b165c82e717b75074060208495118dbda5afb19471be89d3cbfb",
 
   /** DeepBook Predict package on testnet (provides `oracle::OracleSVI`). */
   deepbookPredictPackageId:

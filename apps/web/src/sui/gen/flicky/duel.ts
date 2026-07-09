@@ -41,18 +41,24 @@ import { type Transaction, type TransactionArgument } from '@mysten/sui/transact
 import * as balance from './deps/sui/balance.js';
 const $moduleName = 'flicky::duel';
 export const Card = new MoveStruct({ name: `${$moduleName}::Card`, fields: {
-        oracle_id: bcs.Address,
+        /**
+           * The 6-24 `ExpiryMarket` this card is bet on. Passed in at reveal (committed via
+           * the deck hash), used for settle-time anti-replay.
+           */
+        expiry_market_id: bcs.Address,
+        /** Raw strike price (`tick * tick_size`). `actual_up = settlement_price > strike`. */
         strike: bcs.u64()
     } });
 export const Swipe = new MoveStruct({ name: `${$moduleName}::Swipe`, fields: {
         is_up: bcs.bool(),
         quantity: bcs.u64(),
-        premium: bcs.u64(),
         /**
-         * Probability of the swiped direction, snapshotted from the oracle SVI surface
-         * inside the swipe PTB. Scaled by `PROB_SCALE` (1e9).
+         * The `order_id` returned by `expiry_market::mint_exact_quantity`, chained from
+         * the mint command in the same player-signed PTB. Used at settle time for
+         * anti-replay via `predict_account::has_position`. `0` for free-tier swipes (no
+         * mint).
          */
-        p_swiped: bcs.u64()
+        order_id: bcs.u256()
     } });
 export const Duel = new MoveStruct({ name: `${$moduleName}::Duel<phantom T>`, fields: {
         id: bcs.Address,
@@ -120,13 +126,12 @@ export const SwipeRecorded = new MoveStruct({ name: `${$moduleName}::SwipeRecord
         card_idx: bcs.u64(),
         is_up: bcs.bool(),
         quantity: bcs.u64(),
-        premium: bcs.u64(),
-        p_swiped: bcs.u64()
+        order_id: bcs.u256()
     } });
 export const CardSettled = new MoveStruct({ name: `${$moduleName}::CardSettled`, fields: {
         duel_id: bcs.Address,
         card_idx: bcs.u64(),
-        oracle_id: bcs.Address,
+        expiry_market_id: bcs.Address,
         settlement_price: bcs.u64(),
         actual_up: bcs.bool(),
         p0_payout: bcs.u64(),
@@ -143,7 +148,7 @@ export const DuelFinalized = new MoveStruct({ name: `${$moduleName}::DuelFinaliz
         p0_premium_total: bcs.u64(),
         p1_payout_total: bcs.u64(),
         p1_premium_total: bcs.u64(),
-        primary_oracle_id: bcs.Address,
+        primary_expiry_market_id: bcs.Address,
         primary_settlement_price: bcs.u64()
     } });
 export const DuelRefunded = new MoveStruct({ name: `${$moduleName}::DuelRefunded`, fields: {
@@ -159,23 +164,23 @@ export const DuelForfeited = new MoveStruct({ name: `${$moduleName}::DuelForfeit
         reason: bcs.u8()
     } });
 export interface NewCardArguments {
-    oracle: RawTransactionArgument<string>;
+    expiryMarketId: RawTransactionArgument<string>;
     strike: RawTransactionArgument<number | bigint>;
 }
 export interface NewCardOptions {
     package?: string;
     arguments: NewCardArguments | [
-        oracle: RawTransactionArgument<string>,
+        expiryMarketId: RawTransactionArgument<string>,
         strike: RawTransactionArgument<number | bigint>
     ];
 }
 export function newCard(options: NewCardOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
-        null,
+        '0x2::object::ID',
         'u64'
     ] satisfies (string | null)[];
-    const parameterNames = ["oracle", "strike"];
+    const parameterNames = ["expiryMarketId", "strike"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -183,16 +188,16 @@ export function newCard(options: NewCardOptions) {
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }
-export interface CardOracleIdArguments {
+export interface CardExpiryMarketIdArguments {
     card: TransactionArgument;
 }
-export interface CardOracleIdOptions {
+export interface CardExpiryMarketIdOptions {
     package?: string;
-    arguments: CardOracleIdArguments | [
+    arguments: CardExpiryMarketIdArguments | [
         card: TransactionArgument
     ];
 }
-export function cardOracleId(options: CardOracleIdOptions) {
+export function cardExpiryMarketId(options: CardExpiryMarketIdOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null
@@ -201,7 +206,7 @@ export function cardOracleId(options: CardOracleIdOptions) {
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
-        function: 'card_oracle_id',
+        function: 'card_expiry_market_id',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }
@@ -377,47 +382,42 @@ export function joinDuelFree(options: JoinDuelFreeOptions) {
 }
 export interface RecordSwipeArguments {
     duel: RawTransactionArgument<string>;
-    manager: RawTransactionArgument<string>;
-    predict: RawTransactionArgument<string>;
-    oracle: RawTransactionArgument<string>;
     cardIdx: RawTransactionArgument<number | bigint>;
     isUp: RawTransactionArgument<boolean>;
     quantity: RawTransactionArgument<number | bigint>;
+    orderId: RawTransactionArgument<number | bigint>;
 }
 export interface RecordSwipeOptions {
     package?: string;
     arguments: RecordSwipeArguments | [
         duel: RawTransactionArgument<string>,
-        manager: RawTransactionArgument<string>,
-        predict: RawTransactionArgument<string>,
-        oracle: RawTransactionArgument<string>,
         cardIdx: RawTransactionArgument<number | bigint>,
         isUp: RawTransactionArgument<boolean>,
-        quantity: RawTransactionArgument<number | bigint>
+        quantity: RawTransactionArgument<number | bigint>,
+        orderId: RawTransactionArgument<number | bigint>
     ];
     typeArguments: [
         string
     ];
 }
 /**
- * Record a player's swipe on `card_idx`. Snapshots `premium` and `p_swiped` from
- * `predict::get_trade_amounts` inside the PTB — caller cannot supply these.
- * Premium is the dUSDC cost the player would pay to mint the `quantity` Predict
- * position at the current SVI price.
+ * Record a player's swipe on `card_idx`. `order_id` is the id returned by
+ * `expiry_market::mint_exact_quantity`, chained from the mint command in the SAME
+ * player-signed PTB — so a genuine mint backs every staked swipe. Premium/p_swiped
+ * are no longer snapshotted here (6-24 exposes no public on-chain quote); premium
+ * is keeper-fed at settle time.
  */
 export function recordSwipe(options: RecordSwipeOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null,
-        null,
-        null,
-        null,
         'u64',
         'bool',
         'u64',
+        'u256',
         '0x2::clock::Clock'
     ] satisfies (string | null)[];
-    const parameterNames = ["duel", "manager", "predict", "oracle", "cardIdx", "isUp", "quantity"];
+    const parameterNames = ["duel", "cardIdx", "isUp", "quantity", "orderId"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -428,8 +428,6 @@ export function recordSwipe(options: RecordSwipeOptions) {
 }
 export interface RecordSwipeFreeArguments {
     duel: RawTransactionArgument<string>;
-    predict: RawTransactionArgument<string>;
-    oracle: RawTransactionArgument<string>;
     cardIdx: RawTransactionArgument<number | bigint>;
     isUp: RawTransactionArgument<boolean>;
 }
@@ -437,8 +435,6 @@ export interface RecordSwipeFreeOptions {
     package?: string;
     arguments: RecordSwipeFreeArguments | [
         duel: RawTransactionArgument<string>,
-        predict: RawTransactionArgument<string>,
-        oracle: RawTransactionArgument<string>,
         cardIdx: RawTransactionArgument<number | bigint>,
         isUp: RawTransactionArgument<boolean>
     ];
@@ -447,21 +443,18 @@ export interface RecordSwipeFreeOptions {
     ];
 }
 /**
- * Free-tier swipe — no PredictManager, no anti-replay. Premium and `p_swiped`
- * still come from real Predict pricing via `predict::get_trade_amounts` so scoring
- * stays consistent with Staked tier. Uses normalized quantity = `PROB_SCALE`.
+ * Free-tier swipe — no mint, no anti-replay. Normalized quantity = `PROB_SCALE`,
+ * `order_id = 0`.
  */
 export function recordSwipeFree(options: RecordSwipeFreeOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null,
-        null,
-        null,
         'u64',
         'bool',
         '0x2::clock::Clock'
     ] satisfies (string | null)[];
-    const parameterNames = ["duel", "predict", "oracle", "cardIdx", "isUp"];
+    const parameterNames = ["duel", "cardIdx", "isUp"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -472,35 +465,37 @@ export function recordSwipeFree(options: RecordSwipeFreeOptions) {
 }
 export interface SettleCardArguments {
     duel: RawTransactionArgument<string>;
-    p0Manager: RawTransactionArgument<string>;
-    p1Manager: RawTransactionArgument<string>;
-    oracle: RawTransactionArgument<string>;
+    p0Wrapper: RawTransactionArgument<string>;
+    p1Wrapper: RawTransactionArgument<string>;
     cardIdx: RawTransactionArgument<number | bigint>;
+    settlementPrice: RawTransactionArgument<number | bigint>;
+    p0Premium: RawTransactionArgument<number | bigint>;
+    p1Premium: RawTransactionArgument<number | bigint>;
 }
 export interface SettleCardOptions {
     package?: string;
     arguments: SettleCardArguments | [
         duel: RawTransactionArgument<string>,
-        p0Manager: RawTransactionArgument<string>,
-        p1Manager: RawTransactionArgument<string>,
-        oracle: RawTransactionArgument<string>,
-        cardIdx: RawTransactionArgument<number | bigint>
+        p0Wrapper: RawTransactionArgument<string>,
+        p1Wrapper: RawTransactionArgument<string>,
+        cardIdx: RawTransactionArgument<number | bigint>,
+        settlementPrice: RawTransactionArgument<number | bigint>,
+        p0Premium: RawTransactionArgument<number | bigint>,
+        p1Premium: RawTransactionArgument<number | bigint>
     ];
     typeArguments: [
         string
     ];
 }
 /**
- * Settle one card. Reads the supplied oracle's `settlement_price`, scores both
- * players' swipes on `card_idx` (UP wins if `price > strike`), and accumulates
- * payout/premium onto the duel. Permissionless — the oracle read makes the math
- * deterministic so the caller can't influence the outcome. Idempotent per card via
- * `cards_settled[card_idx]`.
- *
- * `p0_manager` and `p1_manager` are read for the anti-replay check
- * (`manager.position(key) >= swipe.quantity`): if a player redeemed their Predict
- * position before settle, their payout is zeroed (they already took the value
- * off-chain) but their premium still counts against them.
+ * Settle one card. `settlement_price` (keeper-fed from the `MarketSettled` event)
+ * and per-player `premium` (keeper-fed from `OrderMinted`) are supplied as
+ * arguments — 6-24 exposes no public on-chain read for either. Scores both
+ * players' swipes (UP wins if `settlement_price > strike`) and accumulates
+ * payout/premium onto the duel. Idempotent via `cards_settled[card_idx]`.
+ * Anti-replay: `predict_account::has_position` on each player's `AccountWrapper` —
+ * a player who redeemed their 6-24 position before settle has their payout zeroed
+ * (premium still counts).
  */
 export function settleCard(options: SettleCardOptions) {
     const packageAddress = options.package ?? 'flicky';
@@ -508,10 +503,12 @@ export function settleCard(options: SettleCardOptions) {
         null,
         null,
         null,
-        null,
+        'u64',
+        'u64',
+        'u64',
         'u64'
     ] satisfies (string | null)[];
-    const parameterNames = ["duel", "p0Manager", "p1Manager", "oracle", "cardIdx"];
+    const parameterNames = ["duel", "p0Wrapper", "p1Wrapper", "cardIdx", "settlementPrice", "p0Premium", "p1Premium"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -522,32 +519,38 @@ export function settleCard(options: SettleCardOptions) {
 }
 export interface SettleCardFreeArguments {
     duel: RawTransactionArgument<string>;
-    oracle: RawTransactionArgument<string>;
     cardIdx: RawTransactionArgument<number | bigint>;
+    settlementPrice: RawTransactionArgument<number | bigint>;
+    p0Premium: RawTransactionArgument<number | bigint>;
+    p1Premium: RawTransactionArgument<number | bigint>;
 }
 export interface SettleCardFreeOptions {
     package?: string;
     arguments: SettleCardFreeArguments | [
         duel: RawTransactionArgument<string>,
-        oracle: RawTransactionArgument<string>,
-        cardIdx: RawTransactionArgument<number | bigint>
+        cardIdx: RawTransactionArgument<number | bigint>,
+        settlementPrice: RawTransactionArgument<number | bigint>,
+        p0Premium: RawTransactionArgument<number | bigint>,
+        p1Premium: RawTransactionArgument<number | bigint>
     ];
     typeArguments: [
         string
     ];
 }
 /**
- * Per-card settle for Free tier. Same flow as `settle_card`, just without the
- * PredictManager anti-replay (free swipes never minted positions).
+ * Per-card settle for Free tier. No AccountWrapper / anti-replay (free swipes
+ * never minted). `premium` values are keeper-computed notionals.
  */
 export function settleCardFree(options: SettleCardFreeOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null,
-        null,
+        'u64',
+        'u64',
+        'u64',
         'u64'
     ] satisfies (string | null)[];
-    const parameterNames = ["duel", "oracle", "cardIdx"];
+    const parameterNames = ["duel", "cardIdx", "settlementPrice", "p0Premium", "p1Premium"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
@@ -617,38 +620,37 @@ export function finalizeFree(options: FinalizeFreeOptions) {
         typeArguments: options.typeArguments
     });
 }
-export interface FinalizeTestOneOracleArguments {
+export interface FinalizeTestOnePriceArguments {
     duel: RawTransactionArgument<string>;
-    oracle: RawTransactionArgument<string>;
+    price: RawTransactionArgument<number | bigint>;
 }
-export interface FinalizeTestOneOracleOptions {
+export interface FinalizeTestOnePriceOptions {
     package?: string;
-    arguments: FinalizeTestOneOracleArguments | [
+    arguments: FinalizeTestOnePriceArguments | [
         duel: RawTransactionArgument<string>,
-        oracle: RawTransactionArgument<string>
+        price: RawTransactionArgument<number | bigint>
     ];
     typeArguments: [
         string
     ];
 }
 /**
- * **TEST/DEV ONLY** — settle every still-unsettled card against ONE oracle's price
- * (settlement_price if settled, else spot fallback) ignoring per-card `oracle_id`,
- * then finalize. Skips anti-replay (no `PredictManager`). PnL is approximate —
- * never use on mainnet.
+ * **TEST/DEV ONLY** — settle every still-unsettled card against ONE fed `price`
+ * (free-style scoring: no anti-replay, premium 0), then finalize. PnL is
+ * approximate — never use on mainnet.
  */
-export function finalizeTestOneOracle(options: FinalizeTestOneOracleOptions) {
+export function finalizeTestOnePrice(options: FinalizeTestOnePriceOptions) {
     const packageAddress = options.package ?? 'flicky';
     const argumentsTypes = [
         null,
-        null,
+        'u64',
         '0x2::clock::Clock'
     ] satisfies (string | null)[];
-    const parameterNames = ["duel", "oracle"];
+    const parameterNames = ["duel", "price"];
     return (tx: Transaction) => tx.moveCall({
         package: packageAddress,
         module: 'duel',
-        function: 'finalize_test_one_oracle',
+        function: 'finalize_test_one_price',
         arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
         typeArguments: options.typeArguments
     });
@@ -1324,27 +1326,5 @@ export function probScale(options: ProbScaleOptions = {}) {
         package: packageAddress,
         module: 'duel',
         function: 'prob_scale',
-    });
-}
-export interface DummyDepsArguments {
-    Deep: TransactionArgument;
-}
-export interface DummyDepsOptions {
-    package?: string;
-    arguments: DummyDepsArguments | [
-        Deep: TransactionArgument
-    ];
-}
-export function dummyDeps(options: DummyDepsOptions) {
-    const packageAddress = options.package ?? 'flicky';
-    const argumentsTypes = [
-        null
-    ] satisfies (string | null)[];
-    const parameterNames = ["Deep"];
-    return (tx: Transaction) => tx.moveCall({
-        package: packageAddress,
-        module: 'duel',
-        function: 'dummy_deps',
-        arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
     });
 }
