@@ -46,7 +46,8 @@ describe("isTerminalSettleError", () => {
 describe("hexFromBytes", () => {
   test("string input passes through with 0x lowercase", () => {
     expect(hexFromBytes("0xABCDEF")).toBe("0xabcdef")
-    expect(hexFromBytes("aaff")).toBe("0xaaff") // adds 0x if missing
+    // gRPC json encodes vector<u8> as base64 — decode to hex
+    expect(hexFromBytes("q83v")).toBe("0xabcdef") // base64 of [0xab,0xcd,0xef]
   })
 
   test("byte array input is hex-encoded with leading zeros", () => {
@@ -62,7 +63,9 @@ describe("parseSwipe", () => {
 
   test("parses {is_up, quantity, premium} into SwipeLite", () => {
     const out = parseSwipe({
-      fields: { is_up: true, quantity: "1000000", premium: "250000" },
+      is_up: true,
+      quantity: "1000000",
+      premium: "250000",
     })
     expect(out).not.toBeNull()
     expect(out!.isUp).toBe(true)
@@ -72,7 +75,9 @@ describe("parseSwipe", () => {
 
   test("preserves false is_up (regression for the old shape that used p_swiped)", () => {
     const out = parseSwipe({
-      fields: { is_up: false, quantity: "1", premium: "2" },
+      is_up: false,
+      quantity: "1",
+      premium: "2",
     })
     expect(out?.isUp).toBe(false)
   })
@@ -80,34 +85,30 @@ describe("parseSwipe", () => {
 
 describe("parseDuelFromObject", () => {
   const FRESH_DUEL_FIELDS = {
-    id: { id: "0x6aeaf9f99c0090f6f2e14be729e90f0473255479469971444d36e7f401f3faaa" },
+    id: "0x6aeaf9f99c0090f6f2e14be729e90f0473255479469971444d36e7f401f3faaa",
     status: "2", // ACTIVE
     deck_hash: [0xab, 0xcd, 0xef] as number[],
     creator: "0x9c08a74cca711f45a176765e9db499f01def450fa90320a4c23934b2082aa882",
     challenger: "0x62dab70b5e879cd3a215fee9569587da86b362492dc41f2a2573f569755f4cc8",
-    p0_stake: { fields: { value: "5000000" } },
-    p1_stake: { fields: { value: "5000000" } },
+    p0_stake: "5000000",
+    p1_stake: "5000000",
     cards: [
       {
-        fields: {
-          oracle_id: "0x420f5040ea1dec75a15183b2bc39aee40e6f5f26643b6f186357224050614ece",
-          strike: "74098253655589",
-        },
+        oracle_id: "0x420f5040ea1dec75a15183b2bc39aee40e6f5f26643b6f186357224050614ece",
+        strike: "74098253655589",
       },
       {
-        fields: {
-          oracle_id: "0x2c2057537b36280fbaf4a7d7448a9b99aa17e4fa5f08fa1cedcdc81ef7cc159b",
-          strike: "75123456789012",
-        },
+        oracle_id: "0x2c2057537b36280fbaf4a7d7448a9b99aa17e4fa5f08fa1cedcdc81ef7cc159b",
+        strike: "75123456789012",
       },
     ],
     p0_swipes: [
-      { fields: { is_up: true, quantity: "100000", premium: "30000" } },
+      { is_up: true, quantity: "100000", premium: "30000" },
       null,
     ],
     p1_swipes: [
       null,
-      { fields: { is_up: false, quantity: "200000", premium: "80000" } },
+      { is_up: false, quantity: "200000", premium: "80000" },
     ],
   }
 
@@ -135,7 +136,7 @@ describe("parseDuelFromObject", () => {
     const d = parseDuelFromObject(undefined, FRESH_DUEL_FIELDS)!
     expect(d.cards).toHaveLength(2)
     expect(d.cards[0].strike).toBe(74_098_253_655_589n)
-    expect(d.cards[0].oracleId).toBe(FRESH_DUEL_FIELDS.cards[0].fields.oracle_id)
+    expect(d.cards[0].oracleId).toBe(FRESH_DUEL_FIELDS.cards[0].oracle_id)
   })
 
   test("p0_swipes / p1_swipes parsed with quantity + premium (new contract shape)", () => {
@@ -162,7 +163,7 @@ describe("parseDuelFromObject", () => {
       ...FRESH_DUEL_FIELDS,
       p0_swipes: [
         // Old shape — quantity + premium fields are missing.
-        { fields: { is_up: true, p_swiped: "500000000", decide_time_ms: "2000" } },
+        { is_up: true, p_swiped: "500000000", decide_time_ms: "2000" },
         null,
       ],
     } as unknown as typeof FRESH_DUEL_FIELDS
