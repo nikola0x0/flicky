@@ -7,7 +7,6 @@ import { DAppKitProvider } from "@mysten/dapp-kit-react"
 import "@workspace/ui/globals.css"
 import { dAppKit } from "@/lib/dapp-kit"
 import { ThemeProvider } from "@/components/theme-provider.tsx"
-import { EnokiWalletsRegistrar } from "@/components/enoki-wallets-registrar.tsx"
 import Landing from "@/routes/landing.tsx"
 import AuthCallback from "@/routes/auth-callback.tsx"
 import Profile from "@/routes/profile.tsx"
@@ -50,7 +49,6 @@ createRoot(document.getElementById("root")!).render(
     <ThemeProvider defaultTheme="dark">
       <QueryClientProvider client={queryClient}>
         <DAppKitProvider dAppKit={dAppKit}>
-          <EnokiWalletsRegistrar />
           <RouterProvider router={router} />
         </DAppKitProvider>
       </QueryClientProvider>

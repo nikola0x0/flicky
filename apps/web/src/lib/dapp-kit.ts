@@ -15,6 +15,7 @@
  */
 import { createDAppKit } from "@mysten/dapp-kit-react"
 import { SuiGrpcClient } from "@mysten/sui/grpc"
+import { enokiWalletsInitializer } from "@mysten/enoki"
 
 const GRPC_URLS: Record<string, string> = {
   testnet:
@@ -22,10 +23,38 @@ const GRPC_URLS: Record<string, string> = {
   mainnet: "https://fullnode.mainnet.sui.io:443",
 }
 
+// Register the Enoki zkLogin wallets (Google, …) as a dApp Kit wallet
+// initializer — NOT in a post-mount useEffect. Initializers run as part of
+// createDAppKit, so the Enoki wallet exists BEFORE autoConnect fires; a
+// useEffect registers too late and autoConnect can't restore the session,
+// which is why reloads were logging the user out. dApp Kit hands the
+// initializer the active network + gRPC client via `initialize`, so no
+// client/network is passed here. No-op when the Enoki keys are absent.
+const enokiApiKey = import.meta.env.VITE_ENOKI_API_KEY
+const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+const walletInitializers =
+  enokiApiKey && googleClientId
+    ? [
+        enokiWalletsInitializer({
+          apiKey: enokiApiKey,
+          providers: {
+            google: {
+              clientId: googleClientId,
+              // One fixed callback URL regardless of which route "Sign In"
+              // was clicked from. The popup lands here, Enoki reads the
+              // response, then closes it — the parent tab never navigates.
+              redirectUrl: `${window.location.origin}/auth/callback`,
+            },
+          },
+        }),
+      ]
+    : []
+
 export const dAppKit = createDAppKit({
   networks: ["testnet", "mainnet"],
   defaultNetwork: "testnet",
   autoConnect: true,
+  walletInitializers,
   createClient: (network) =>
     new SuiGrpcClient({ network, baseUrl: GRPC_URLS[network] }),
 })
