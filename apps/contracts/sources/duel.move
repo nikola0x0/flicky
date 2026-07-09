@@ -34,13 +34,9 @@
 ///              object, same scoring math, just gated money flow.
 module flicky::duel;
 
-use deepbook_predict::oracle::{Self as db_oracle, OracleSVI};
-use deepbook_predict::predict::{Self as db_predict, Predict};
-use deepbook_predict::predict_manager::{Self, PredictManager};
-use deepbook_predict::market_key;
+use account::account::{Self as acct, AccountWrapper};
+use deepbook_predict::predict_account;
 use sui::balance::{Self, Balance};
-use deepbook::constants as db_constants;
-use token::deep::DEEP;
 use sui::bcs;
 use std::hash;
 use sui::clock::Clock;
@@ -56,22 +52,17 @@ const ECreatorCannotJoin: u64 = 4;
 const EStakeMismatch: u64 = 5;
 const EInvalidDeckSize: u64 = 6;
 const ECardIndexOOB: u64 = 7;
-const EOracleMismatch: u64 = 8;
 const EOutOfTurn: u64 = 9;
 const EAllCardsNotSettled: u64 = 11;
 const EZeroStake: u64 = 13;
-const EOracleNotLive: u64 = 14;
+const EZeroSettlement: u64 = 14;
 const EInvalidDeckHash: u64 = 15;
 const EDeckAlreadyRevealed: u64 = 16;
 const EDeckHashMismatch: u64 = 17;
 const EDeckNotRevealed: u64 = 18;
-const ENotManagerOwner: u64 = 19;
-const EInsufficientPosition: u64 = 20;
 const ESwipeTimeout: u64 = 21;
 const EZeroQuantity: u64 = 24;
-const EZeroPremium: u64 = 25;
 const EWrongTier: u64 = 27;
-const EInvalidProb: u64 = 28;
 const ERefundDuelComplete: u64 = 29;
 const ERevealNotTimedOut: u64 = 30;
 const EInvalidDeckSizeBounds: u64 = 31;
@@ -104,17 +95,21 @@ const REVEAL_TIMEOUT_MS: u64 = 300_000; // 5 minutes — challenger can claim fo
 // === Structs ===
 
 public struct Card has copy, drop, store {
-    oracle_id: ID,
+    /// The 6-24 `ExpiryMarket` this card is bet on. Passed in at reveal
+    /// (committed via the deck hash), used for settle-time anti-replay.
+    expiry_market_id: ID,
+    /// Raw strike price (`tick * tick_size`). `actual_up = settlement_price > strike`.
     strike: u64,
 }
 
 public struct Swipe has copy, drop, store {
     is_up: bool,
     quantity: u64,
-    premium: u64,
-    /// Probability of the swiped direction, snapshotted from the oracle SVI
-    /// surface inside the swipe PTB. Scaled by `PROB_SCALE` (1e9).
-    p_swiped: u64,
+    /// The `order_id` returned by `expiry_market::mint_exact_quantity`,
+    /// chained from the mint command in the same player-signed PTB. Used at
+    /// settle time for anti-replay via `predict_account::has_position`.
+    /// `0` for free-tier swipes (no mint).
+    order_id: u256,
 }
 
 public struct Duel<phantom T> has key {
@@ -182,8 +177,7 @@ public struct SwipeRecorded has copy, drop {
     card_idx: u64,
     is_up: bool,
     quantity: u64,
-    premium: u64,
-    p_swiped: u64,
+    order_id: u256,
 }
 
 /// Per-card settlement record — emitted once per `settle_card` call. The
@@ -193,7 +187,7 @@ public struct SwipeRecorded has copy, drop {
 public struct CardSettled has copy, drop {
     duel_id: ID,
     card_idx: u64,
-    oracle_id: ID,
+    expiry_market_id: ID,
     settlement_price: u64,
     actual_up: bool,
     p0_payout: u64,
@@ -216,7 +210,7 @@ public struct DuelFinalized has copy, drop {
     p0_premium_total: u64,
     p1_payout_total: u64,
     p1_premium_total: u64,
-    primary_oracle_id: ID,
+    primary_expiry_market_id: ID,
     primary_settlement_price: u64,
 }
 
@@ -239,11 +233,11 @@ public struct DuelForfeited has copy, drop {
 
 // === Public: card construction ===
 
-public fun new_card(oracle: &OracleSVI, strike: u64): Card {
-    Card { oracle_id: db_oracle::id(oracle), strike }
+public fun new_card(expiry_market_id: ID, strike: u64): Card {
+    Card { expiry_market_id, strike }
 }
 
-public fun card_oracle_id(card: &Card): ID { card.oracle_id }
+public fun card_expiry_market_id(card: &Card): ID { card.expiry_market_id }
 
 public fun card_strike(card: &Card): u64 { card.strike }
 
@@ -397,50 +391,31 @@ fun join_internal<T>(
 
 // === Public: swipe ===
 
-/// Record a player's swipe on `card_idx`. Snapshots `premium` and `p_swiped`
-/// from `predict::get_trade_amounts` inside the PTB — caller cannot supply
-/// these. Premium is the dUSDC cost the player would pay to mint the
-/// `quantity` Predict position at the current SVI price.
+/// Record a player's swipe on `card_idx`. `order_id` is the id returned by
+/// `expiry_market::mint_exact_quantity`, chained from the mint command in
+/// the SAME player-signed PTB — so a genuine mint backs every staked swipe.
+/// Premium/p_swiped are no longer snapshotted here (6-24 exposes no public
+/// on-chain quote); premium is keeper-fed at settle time.
 public fun record_swipe<T>(
     duel: &mut Duel<T>,
-    manager: &PredictManager,
-    predict: &Predict,
-    oracle: &OracleSVI,
     card_idx: u64,
     is_up: bool,
     quantity: u64,
+    order_id: u256,
     clock: &Clock,
     ctx: &TxContext,
 ) {
     assert!(duel.tier == TIER_STAKED, EWrongTier);
-    let sender = ctx.sender();
-    assert!(manager.owner() == sender, ENotManagerOwner);
     assert!(quantity > 0, EZeroQuantity);
-
-    let (card, key) = preflight_swipe(duel, oracle, card_idx, is_up, clock, sender);
-
-    // Anti-replay: ensure the player actually minted at least `quantity` of
-    // the relevant Predict position before swiping.
-    let current_position_qty = predict_manager::position(manager, key);
-    assert!(current_position_qty >= quantity, EInsufficientPosition);
-
-    let (premium, _max_payout) =
-        db_predict::get_trade_amounts(predict, oracle, key, quantity, clock);
-    assert!(premium > 0, EZeroPremium);
-    let p_swiped = derive_p_swiped(premium, quantity);
-
-    let _ = card; // silence unused
-    record_swipe_internal(duel, card_idx, is_up, quantity, premium, p_swiped, sender);
+    let sender = ctx.sender();
+    preflight_swipe(duel, card_idx, clock, sender);
+    record_swipe_internal(duel, card_idx, is_up, quantity, order_id, sender);
 }
 
-/// Free-tier swipe — no PredictManager, no anti-replay. Premium and
-/// `p_swiped` still come from real Predict pricing via
-/// `predict::get_trade_amounts` so scoring stays consistent with Staked
-/// tier. Uses normalized quantity = `PROB_SCALE`.
+/// Free-tier swipe — no mint, no anti-replay. Normalized quantity =
+/// `PROB_SCALE`, `order_id = 0`.
 public fun record_swipe_free<T>(
     duel: &mut Duel<T>,
-    predict: &Predict,
-    oracle: &OracleSVI,
     card_idx: u64,
     is_up: bool,
     clock: &Clock,
@@ -448,26 +423,17 @@ public fun record_swipe_free<T>(
 ) {
     assert!(duel.tier == TIER_FREE, EWrongTier);
     let sender = ctx.sender();
-
-    let (_card, key) = preflight_swipe(duel, oracle, card_idx, is_up, clock, sender);
-
-    let (premium, _max_payout) =
-        db_predict::get_trade_amounts(predict, oracle, key, PROB_SCALE, clock);
-    assert!(premium > 0, EZeroPremium);
-    let p_swiped = derive_p_swiped(premium, PROB_SCALE);
-
-    record_swipe_internal(duel, card_idx, is_up, PROB_SCALE, premium, p_swiped, sender);
+    preflight_swipe(duel, card_idx, clock, sender);
+    record_swipe_internal(duel, card_idx, is_up, PROB_SCALE, 0, sender);
 }
 
-/// Common pre-flight checks. Returns the card and its market_key for `is_up`.
+/// Common pre-flight checks: duel active, deck revealed, in-window, in-turn.
 fun preflight_swipe<T>(
     duel: &Duel<T>,
-    oracle: &OracleSVI,
     card_idx: u64,
-    is_up: bool,
     clock: &Clock,
     sender: address,
-): (Card, market_key::MarketKey) {
+) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(!duel.cards.is_empty(), EDeckNotRevealed);
     assert!(card_idx < duel.deck_size, ECardIndexOOB);
@@ -477,24 +443,8 @@ fun preflight_swipe<T>(
     let is_p1 = sender == duel.challenger;
     assert!(is_p0 || is_p1, ENotPlayer);
 
-    let card = duel.cards[card_idx];
-    assert!(card.oracle_id == db_oracle::id(oracle), EOracleMismatch);
-    assert!(oracle.status(clock) == db_oracle::status_active(), EOracleNotLive);
-
     let next_idx = if (is_p0) duel.p0_next_card_idx else duel.p1_next_card_idx;
     assert!(card_idx == next_idx, EOutOfTurn);
-
-    let expiry = db_oracle::expiry(oracle);
-    let key = market_key::new(card.oracle_id, expiry, card.strike, is_up);
-    (card, key)
-}
-
-/// p_swiped (scaled by PROB_SCALE) = premium * PROB_SCALE / quantity.
-/// Inverts the Predict pricing equation: premium = quantity * p_swiped / 1e9.
-fun derive_p_swiped(premium: u64, quantity: u64): u64 {
-    let p = (((premium as u128) * (PROB_SCALE as u128)) / (quantity as u128)) as u64;
-    assert!(p > 0 && p < PROB_SCALE, EInvalidProb);
-    p
 }
 
 fun record_swipe_internal<T>(
@@ -502,14 +452,11 @@ fun record_swipe_internal<T>(
     card_idx: u64,
     is_up: bool,
     quantity: u64,
-    premium: u64,
-    p_swiped: u64,
+    order_id: u256,
     sender: address,
 ) {
-    assert!(premium > 0, EZeroPremium);
-
     let is_p0 = sender == duel.creator;
-    let swipe = Swipe { is_up, quantity, premium, p_swiped };
+    let swipe = Swipe { is_up, quantity, order_id };
     if (is_p0) {
         *vector::borrow_mut(&mut duel.p0_swipes, card_idx) = option::some(swipe);
         duel.p0_next_card_idx = card_idx + 1;
@@ -524,120 +471,118 @@ fun record_swipe_internal<T>(
         card_idx,
         is_up,
         quantity,
-        premium,
-        p_swiped,
+        order_id,
     });
 }
 
 // === Public: per-card settle ===
 
-/// Settle one card. Reads the supplied oracle's `settlement_price`, scores
-/// both players' swipes on `card_idx` (UP wins if `price > strike`), and
-/// accumulates payout/premium onto the duel. Permissionless — the oracle
-/// read makes the math deterministic so the caller can't influence the
-/// outcome. Idempotent per card via `cards_settled[card_idx]`.
-///
-/// `p0_manager` and `p1_manager` are read for the anti-replay check
-/// (`manager.position(key) >= swipe.quantity`): if a player redeemed their
-/// Predict position before settle, their payout is zeroed (they already
-/// took the value off-chain) but their premium still counts against them.
+/// Settle one card. `settlement_price` (keeper-fed from the `MarketSettled`
+/// event) and per-player `premium` (keeper-fed from `OrderMinted`) are
+/// supplied as arguments — 6-24 exposes no public on-chain read for either.
+/// Scores both players' swipes (UP wins if `settlement_price > strike`) and
+/// accumulates payout/premium onto the duel. Idempotent via
+/// `cards_settled[card_idx]`. Anti-replay: `predict_account::has_position`
+/// on each player's `AccountWrapper` — a player who redeemed their 6-24
+/// position before settle has their payout zeroed (premium still counts).
 public fun settle_card<T>(
     duel: &mut Duel<T>,
-    p0_manager: &PredictManager,
-    p1_manager: &PredictManager,
-    oracle: &OracleSVI,
+    p0_wrapper: &AccountWrapper,
+    p1_wrapper: &AccountWrapper,
     card_idx: u64,
+    settlement_price: u64,
+    p0_premium: u64,
+    p1_premium: u64,
 ) {
     assert!(duel.tier == TIER_STAKED, EWrongTier);
-    let (card, settlement_price, actual_up) =
-        preflight_settle(duel, oracle, card_idx);
-    let expiry = db_oracle::expiry(oracle);
-    let (p0_pay, p0_prem) =
-        score_staked_card(&duel.p0_swipes, p0_manager, card, expiry, card_idx, actual_up);
-    let (p1_pay, p1_prem) =
-        score_staked_card(&duel.p1_swipes, p1_manager, card, expiry, card_idx, actual_up);
+    let (card, actual_up) = preflight_settle(duel, card_idx, settlement_price);
+    let p0_pay = score_staked_card(&duel.p0_swipes, p0_wrapper, card, card_idx, actual_up);
+    let p1_pay = score_staked_card(&duel.p1_swipes, p1_wrapper, card, card_idx, actual_up);
+    let p0_prem = if (duel.p0_swipes[card_idx].is_some()) p0_premium else 0;
+    let p1_prem = if (duel.p1_swipes[card_idx].is_some()) p1_premium else 0;
     commit_card_settlement(
-        duel, card_idx, settlement_price, db_oracle::id(oracle), actual_up,
+        duel, card_idx, settlement_price, card.expiry_market_id, actual_up,
         p0_pay, p0_prem, p1_pay, p1_prem,
     );
 }
 
-/// Per-card settle for Free tier. Same flow as `settle_card`, just without
-/// the PredictManager anti-replay (free swipes never minted positions).
+/// Per-card settle for Free tier. No AccountWrapper / anti-replay (free
+/// swipes never minted). `premium` values are keeper-computed notionals.
 public fun settle_card_free<T>(
     duel: &mut Duel<T>,
-    oracle: &OracleSVI,
     card_idx: u64,
+    settlement_price: u64,
+    p0_premium: u64,
+    p1_premium: u64,
 ) {
     assert!(duel.tier == TIER_FREE, EWrongTier);
-    let (_card, settlement_price, actual_up) =
-        preflight_settle(duel, oracle, card_idx);
-    let (p0_pay, p0_prem) = score_free_card(&duel.p0_swipes, card_idx, actual_up);
-    let (p1_pay, p1_prem) = score_free_card(&duel.p1_swipes, card_idx, actual_up);
+    let (card, actual_up) = preflight_settle(duel, card_idx, settlement_price);
+    let p0_pay = score_free_card(&duel.p0_swipes, card_idx, actual_up);
+    let p1_pay = score_free_card(&duel.p1_swipes, card_idx, actual_up);
+    let p0_prem = if (duel.p0_swipes[card_idx].is_some()) p0_premium else 0;
+    let p1_prem = if (duel.p1_swipes[card_idx].is_some()) p1_premium else 0;
     commit_card_settlement(
-        duel, card_idx, settlement_price, db_oracle::id(oracle), actual_up,
+        duel, card_idx, settlement_price, card.expiry_market_id, actual_up,
         p0_pay, p0_prem, p1_pay, p1_prem,
     );
 }
 
-/// Common pre-flight for both `settle_card` variants. Returns the card,
-/// the resolved settlement price, and whether UP won.
+/// Common pre-flight for both settle variants. Returns the card and whether
+/// UP won. `settlement_price` is the keeper-fed argument (0 is rejected).
 fun preflight_settle<T>(
     duel: &Duel<T>,
-    oracle: &OracleSVI,
     card_idx: u64,
-): (Card, u64, bool) {
+    settlement_price: u64,
+): (Card, bool) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(!duel.cards.is_empty(), EDeckNotRevealed);
     assert!(card_idx < duel.deck_size, ECardIndexOOB);
     assert!(!*vector::borrow(&duel.cards_settled, card_idx), EAlreadySettled);
+    assert!(settlement_price > 0, EZeroSettlement);
 
     let card = duel.cards[card_idx];
-    assert!(card.oracle_id == db_oracle::id(oracle), EOracleMismatch);
-    let settlement_price_opt = db_oracle::settlement_price(oracle);
-    assert!(settlement_price_opt.is_some(), EOracleNotLive);
-    let settlement_price = *settlement_price_opt.borrow();
     let actual_up = settlement_price > card.strike;
-    (card, settlement_price, actual_up)
+    (card, actual_up)
 }
 
-/// Score one player's swipe on a single card, applying the anti-replay
-/// check via `manager.position(key) >= swipe.quantity`.
+/// Score one player's swipe on a single card. Anti-replay: if the account no
+/// longer holds the position (`!has_position`), the swipe is treated as
+/// redeemed-early and pays 0. Returns payout only; premium is keeper-fed.
 fun score_staked_card(
     swipes: &vector<Option<Swipe>>,
-    manager: &PredictManager,
+    wrapper: &AccountWrapper,
     card: Card,
-    expiry: u64,
     card_idx: u64,
     actual_up: bool,
-): (u64, u64) {
+): u64 {
     let slot = vector::borrow(swipes, card_idx);
-    if (slot.is_none()) return (0, 0);
+    if (slot.is_none()) return 0;
     let swipe = *slot.borrow();
-    let key = market_key::new(card.oracle_id, expiry, card.strike, swipe.is_up);
-    let has_redeemed_early = predict_manager::position(manager, key) < swipe.quantity;
-    score_swipe(&swipe, actual_up, has_redeemed_early)
+    let account = acct::load_account(wrapper);
+    let has_redeemed_early =
+        !predict_account::has_position(account, card.expiry_market_id, swipe.order_id);
+    score_payout(&swipe, actual_up, has_redeemed_early)
 }
 
-/// Free-tier scorer — no manager, no anti-replay.
+/// Free-tier scorer — no wrapper, no anti-replay.
 fun score_free_card(
     swipes: &vector<Option<Swipe>>,
     card_idx: u64,
     actual_up: bool,
-): (u64, u64) {
+): u64 {
     let slot = vector::borrow(swipes, card_idx);
-    if (slot.is_none()) return (0, 0);
+    if (slot.is_none()) return 0;
     let swipe = *slot.borrow();
-    score_swipe(&swipe, actual_up, false)
+    score_payout(&swipe, actual_up, false)
 }
 
 /// Apply a per-card settle to the duel + emit the proof event. Shared
-/// between `settle_card`, `settle_card_free`, and `finalize_test_one_oracle`.
+/// between `settle_card`, `settle_card_free`, and `finalize_test_one_price`.
 fun commit_card_settlement<T>(
     duel: &mut Duel<T>,
     card_idx: u64,
     settlement_price: u64,
-    oracle_id: ID,
+    expiry_market_id: ID,
     actual_up: bool,
     p0_pay: u64,
     p0_prem: u64,
@@ -654,7 +599,7 @@ fun commit_card_settlement<T>(
     event::emit(CardSettled {
         duel_id: object::id(duel),
         card_idx,
-        oracle_id,
+        expiry_market_id,
         settlement_price,
         actual_up,
         p0_payout: p0_pay,
@@ -664,10 +609,11 @@ fun commit_card_settlement<T>(
     });
 }
 
-fun score_swipe(swipe: &Swipe, actual_up: bool, has_redeemed_early: bool): (u64, u64) {
+/// Payout for one swipe: `quantity` if the direction matched the outcome and
+/// the position wasn't redeemed early, else 0.
+fun score_payout(swipe: &Swipe, actual_up: bool, has_redeemed_early: bool): u64 {
     let correct = !has_redeemed_early && (actual_up == swipe.is_up);
-    let payout = if (correct) swipe.quantity else 0;
-    (payout, swipe.premium)
+    if (correct) swipe.quantity else 0
 }
 
 // === Public: finalize ===
@@ -695,35 +641,28 @@ public fun finalize_free<T>(
     finalize_internal<T>(duel, clock, ctx);
 }
 
-/// **TEST/DEV ONLY** — settle every still-unsettled card against ONE
-/// oracle's price (settlement_price if settled, else spot fallback)
-/// ignoring per-card `oracle_id`, then finalize. Skips anti-replay (no
-/// `PredictManager`). PnL is approximate — never use on mainnet.
-public fun finalize_test_one_oracle<T>(
+/// **TEST/DEV ONLY** — settle every still-unsettled card against ONE fed
+/// `price` (free-style scoring: no anti-replay, premium 0), then finalize.
+/// PnL is approximate — never use on mainnet.
+public fun finalize_test_one_price<T>(
     duel: &mut Duel<T>,
-    oracle: &OracleSVI,
+    price: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
     assert!(duel.status == STATUS_ACTIVE, EDuelNotActive);
     assert!(!duel.cards.is_empty(), EDeckNotRevealed);
-    let price_opt = db_oracle::settlement_price(oracle);
-    let price = if (price_opt.is_some()) {
-        *price_opt.borrow()
-    } else {
-        db_oracle::spot_price(oracle)
-    };
-    let oracle_id = db_oracle::id(oracle);
+    assert!(price > 0, EZeroSettlement);
     let mut i = 0;
     while (i < duel.deck_size) {
         if (!*vector::borrow(&duel.cards_settled, i)) {
             let card = duel.cards[i];
             let actual_up = price > card.strike;
-            let (p0_pay, p0_prem) = score_free_card(&duel.p0_swipes, i, actual_up);
-            let (p1_pay, p1_prem) = score_free_card(&duel.p1_swipes, i, actual_up);
+            let p0_pay = score_free_card(&duel.p0_swipes, i, actual_up);
+            let p1_pay = score_free_card(&duel.p1_swipes, i, actual_up);
             commit_card_settlement(
-                duel, i, price, oracle_id, actual_up,
-                p0_pay, p0_prem, p1_pay, p1_prem,
+                duel, i, price, card.expiry_market_id, actual_up,
+                p0_pay, 0, p1_pay, 0,
             );
         };
         i = i + 1;
@@ -772,11 +711,11 @@ fun finalize_internal<T>(
 
     duel.status = STATUS_COMPLETE;
 
-    // Proof anchor: card 0's oracle + settlement price. Zeros if forfeit/
-    // refund kicked in before any card settled.
-    let (primary_oracle_id, primary_settlement_price) = if (!duel.cards.is_empty()
+    // Proof anchor: card 0's expiry market + settlement price. Zeros if
+    // forfeit/refund kicked in before any card settled.
+    let (primary_expiry_market_id, primary_settlement_price) = if (!duel.cards.is_empty()
         && *vector::borrow(&duel.cards_settled, 0)) {
-        (duel.cards[0].oracle_id, *vector::borrow(&duel.card_settlement_prices, 0))
+        (duel.cards[0].expiry_market_id, *vector::borrow(&duel.card_settlement_prices, 0))
     } else {
         (object::id_from_address(@0x0), 0)
     };
@@ -790,7 +729,7 @@ fun finalize_internal<T>(
         p0_premium_total: duel.p0_premium,
         p1_payout_total: duel.p1_payout,
         p1_premium_total: duel.p1_premium,
-        primary_oracle_id,
+        primary_expiry_market_id,
         primary_settlement_price,
     });
 }
@@ -955,7 +894,3 @@ public fun test_default_deck_size(): u64 { DEFAULT_DECK_SIZE }
 
 #[test_only]
 public fun test_prob_scale(): u64 { PROB_SCALE }
-
-public fun dummy_deps(_deep: &DEEP) {
-    db_constants::float_scaling();
-}
