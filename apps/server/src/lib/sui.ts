@@ -6,7 +6,8 @@
  * - Keypair helpers fail lazily so HTTP/WS can boot without signers
  *   (e.g. when running deck + sponsor only, with keeper disabled).
  */
-import { SuiClient, getFullnodeUrl } from "@mysten/sui/client"
+import { SuiGrpcClient } from "@mysten/sui/grpc"
+import { SuiGraphQLClient } from "@mysten/sui/graphql"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography"
 
@@ -18,14 +19,41 @@ export function requireEnv(name: string): string {
   return v
 }
 
-let _client: SuiClient | null = null
+const GRPC_DEFAULTS: Record<Network, string> = {
+  mainnet: "https://fullnode.mainnet.sui.io:443",
+  testnet: "https://fullnode.testnet.sui.io:443",
+  devnet: "https://fullnode.devnet.sui.io:443",
+  localnet: "http://127.0.0.1:9000",
+}
+const GRAPHQL_DEFAULTS: Record<Network, string> = {
+  mainnet: "https://graphql.mainnet.sui.io/graphql",
+  testnet: "https://graphql.testnet.sui.io/graphql",
+  devnet: "https://graphql.devnet.sui.io/graphql",
+  localnet: "http://127.0.0.1:9125/graphql",
+}
 
-export function getSuiClient(): SuiClient {
-  if (_client) return _client
-  const network = (process.env.SUI_NETWORK ?? "testnet") as Network
-  const url = process.env.SUI_RPC_URL ?? getFullnodeUrl(network)
-  _client = new SuiClient({ url })
-  return _client
+function network(): Network {
+  return (process.env.SUI_NETWORK ?? "testnet") as Network
+}
+
+let _grpc: SuiGrpcClient | null = null
+
+export function getSuiClient(): SuiGrpcClient {
+  if (_grpc) return _grpc
+  const net = network()
+  const baseUrl = process.env.SUI_GRPC_URL ?? GRPC_DEFAULTS[net]
+  _grpc = new SuiGrpcClient({ network: net, baseUrl })
+  return _grpc
+}
+
+let _gql: SuiGraphQLClient | null = null
+
+export function getGraphQLClient(): SuiGraphQLClient {
+  if (_gql) return _gql
+  const net = network()
+  const url = process.env.SUI_GRAPHQL_URL ?? GRAPHQL_DEFAULTS[net]
+  _gql = new SuiGraphQLClient({ url, network: net })
+  return _gql
 }
 
 export function getAdminKeypair(): Ed25519Keypair {

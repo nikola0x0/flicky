@@ -120,18 +120,18 @@ async function tick(): Promise<void> {
   const ids = Array.from(oracleSubscribers.keys())
   if (ids.length === 0) return
   const client = getSuiClient()
-  const objs = await client.multiGetObjects({
-    ids,
-    options: { showContent: true },
+  const res = await client.core.getObjects({
+    objectIds: ids,
+    include: { json: true },
   })
   const now = Date.now()
-  for (const obj of objs) {
-    if (obj.data?.content?.dataType !== "moveObject") continue
-    const id = normalizeSuiObjectId(obj.data.objectId)
-    const f = obj.data.content.fields as {
+  for (const obj of res.objects) {
+    if (obj instanceof Error || !obj.json) continue
+    const id = normalizeSuiObjectId(obj.objectId)
+    const f = obj.json as {
       expiry: string
       settlement_price: unknown
-      prices: { fields: { spot: string; forward: string } }
+      prices: { spot: string; forward: string }
     }
     const settled =
       f.settlement_price !== null && f.settlement_price !== undefined &&
@@ -139,14 +139,14 @@ async function tick(): Promise<void> {
         (typeof f.settlement_price === "object" &&
           ((f.settlement_price as { fields?: { vec?: unknown[] } }).fields?.vec ?? [])
             .length > 0))
-    const svi = parseSvi(obj.data.content.fields as Record<string, unknown>)
+    const svi = parseSvi(obj.json as Record<string, unknown>)
     const bucket = oracleSubscribers.get(id)
     if (!bucket || bucket.size === 0) continue
     const tickMsg: Record<string, unknown> = {
       type: "oracle_tick",
       oracleId: id,
-      spot: f.prices.fields.spot,
-      forward: f.prices.fields.forward,
+      spot: f.prices.spot,
+      forward: f.prices.forward,
       expiry: f.expiry,
       settled,
       timestampMs: now,

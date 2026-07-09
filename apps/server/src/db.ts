@@ -62,11 +62,22 @@ export function ready(): Promise<void> {
 
 async function ensureSchema(): Promise<void> {
   const sql = getSql()
+  // event_cursor stored (tx_digest, event_seq) under JSON-RPC. The GraphQL
+  // cursor is a single opaque string, so migrate the legacy shape once: drop
+  // the old table if it still carries tx_digest, then (re)create with a
+  // `cursor` column. Idempotent — the drop is skipped after the first boot.
+  const legacyCursor = (await sql`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'event_cursor' AND column_name = 'tx_digest'
+    LIMIT 1
+  `) as unknown[]
+  if (legacyCursor.length > 0) {
+    await sql`DROP TABLE event_cursor`
+  }
   await sql`
     CREATE TABLE IF NOT EXISTS event_cursor (
       tracker_id TEXT PRIMARY KEY,
-      tx_digest  TEXT   NOT NULL,
-      event_seq  TEXT   NOT NULL,
+      cursor     TEXT   NOT NULL,
       updated_at BIGINT NOT NULL
     )
   `
@@ -182,21 +193,14 @@ function describeError(e: unknown): string {
 
 // ─── Cursors ──────────────────────────────────────────────────────────────────
 
-export interface EventCursor {
-  txDigest: string
-  eventSeq: string
-}
-
-export async function loadCursor(trackerId: string): Promise<EventCursor | null> {
+export async function loadCursor(trackerId: string): Promise<string | null> {
   await ready()
   const sql = getSql()
   try {
     const rows = (await sql`
-      SELECT tx_digest, event_seq FROM event_cursor WHERE tracker_id = ${trackerId}
-    `) as Array<{ tx_digest: string; event_seq: string }>
-    const row = rows[0]
-    if (!row) return null
-    return { txDigest: row.tx_digest, eventSeq: row.event_seq }
+      SELECT cursor FROM event_cursor WHERE tracker_id = ${trackerId}
+    `) as Array<{ cursor: string }>
+    return rows[0]?.cursor ?? null
   } catch (e) {
     log.error(`loadCursor(${trackerId}): ${describeError(e)}`)
     throw e
@@ -205,17 +209,16 @@ export async function loadCursor(trackerId: string): Promise<EventCursor | null>
 
 export async function saveCursor(
   trackerId: string,
-  cursor: EventCursor,
+  cursor: string,
 ): Promise<void> {
   await ready()
   const sql = getSql()
   try {
     await sql`
-      INSERT INTO event_cursor (tracker_id, tx_digest, event_seq, updated_at)
-      VALUES (${trackerId}, ${cursor.txDigest}, ${cursor.eventSeq}, ${Date.now()})
+      INSERT INTO event_cursor (tracker_id, cursor, updated_at)
+      VALUES (${trackerId}, ${cursor}, ${Date.now()})
       ON CONFLICT (tracker_id) DO UPDATE SET
-        tx_digest  = EXCLUDED.tx_digest,
-        event_seq  = EXCLUDED.event_seq,
+        cursor     = EXCLUDED.cursor,
         updated_at = EXCLUDED.updated_at
     `
   } catch (e) {
@@ -225,22 +228,20 @@ export async function saveCursor(
 }
 
 export async function listCursors(): Promise<
-  Array<EventCursor & { trackerId: string; updatedAt: number }>
+  Array<{ trackerId: string; cursor: string; updatedAt: number }>
 > {
   await ready()
   const sql = getSql()
   const rows = (await sql`
-    SELECT tracker_id, tx_digest, event_seq, updated_at FROM event_cursor
+    SELECT tracker_id, cursor, updated_at FROM event_cursor
   `) as Array<{
     tracker_id: string
-    tx_digest: string
-    event_seq: string
+    cursor: string
     updated_at: number | string | bigint
   }>
   return rows.map((r) => ({
     trackerId: r.tracker_id,
-    txDigest: r.tx_digest,
-    eventSeq: r.event_seq,
+    cursor: r.cursor,
     updatedAt: Number(r.updated_at),
   }))
 }

@@ -21,13 +21,40 @@
 import { bcs } from "@mysten/sui/bcs"
 import { Transaction } from "@mysten/sui/transactions"
 import { normalizeSuiAddress, normalizeSuiObjectId } from "@mysten/sui/utils"
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { createHash } from "node:crypto"
 import { countDecks, deleteDeck, getDeck, upsertDeck } from "./db"
 import { env } from "./env"
 import { makeLogger } from "./log"
 
 const log = makeLogger("deckmaster")
+
+// GraphQL event scans (gRPC can't filter events). SCAN_QUERY walks
+// newest-first with `before` cursor; RECENT_QUERY grabs the latest N.
+const SCAN_QUERY = `query Scan($type: String!, $before: String) {
+  events(filter: { type: $type }, last: 50, before: $before) {
+    pageInfo { hasPreviousPage startCursor }
+    nodes { contents { json } }
+  }
+}`
+const RECENT_QUERY = `query Recent($type: String!, $last: Int!) {
+  events(filter: { type: $type }, last: $last) {
+    nodes { contents { json } }
+  }
+}`
+type ScanResult = {
+  data?: {
+    events?: {
+      pageInfo?: { hasPreviousPage: boolean; startCursor: string | null }
+      nodes?: Array<{ contents: { json: Record<string, unknown> } }>
+    }
+  }
+}
+type RecentResult = {
+  data?: {
+    events?: { nodes?: Array<{ contents: { json: Record<string, unknown> } }> }
+  }
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -109,23 +136,22 @@ const gridCache = new Map<string, { minStrike: bigint; tickSize: bigint }>()
  * scan fall back to `DEFAULT_BTC_GRID` at the call site.
  */
 async function resolveGrids(
-  client: SuiClient,
+  _client: SuiGrpcClient,
   pkg: string,
   wanted: Set<string>,
   maxPages = 8,
 ): Promise<void> {
   const missing = new Set([...wanted].filter((id) => !gridCache.has(id)))
   if (missing.size === 0) return
-  let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
+  let before: string | null = null
   for (let page = 0; page < maxPages && missing.size > 0; page++) {
-    const r = await client.queryEvents({
-      query: { MoveEventType: `${pkg}::registry::OracleCreated` },
-      cursor,
-      limit: 50,
-      order: "descending",
-    })
-    for (const e of r.data) {
-      const p = e.parsedJson as {
+    const r = (await getGraphQLClient().query({
+      query: SCAN_QUERY,
+      variables: { type: `${pkg}::registry::OracleCreated`, before },
+    })) as ScanResult
+    const ev = r.data?.events
+    for (const node of ev?.nodes ?? []) {
+      const p = node.contents.json as {
         oracle_id: string
         min_strike?: string
         tick_size?: string
@@ -139,8 +165,8 @@ async function resolveGrids(
       }
       missing.delete(id)
     }
-    if (!r.hasNextPage) break
-    cursor = r.nextCursor
+    if (!ev?.pageInfo?.hasPreviousPage) break
+    before = ev.pageInfo.startCursor
   }
 }
 
@@ -218,7 +244,7 @@ export function selectDeckOracleRows(
 }
 
 export async function findDeckOracles(
-  client: SuiClient,
+  client: SuiGrpcClient,
   asset = "BTC",
   count = 5,
   maxHorizonMs = env.deckCardMaxHorizonMs,
@@ -228,38 +254,37 @@ export async function findDeckOracles(
 
   // 1. Recent price-tick events → live oracle id set. One tick tx updates
   //    the whole live set, so ~100 events covers many ticks' worth of ids.
-  const ticks = await client.queryEvents({
-    query: { MoveEventType: `${pkg}::oracle::OraclePricesUpdated` },
-    limit: 100,
-    order: "descending",
-  })
+  const tickRes = (await getGraphQLClient().query({
+    query: RECENT_QUERY,
+    variables: { type: `${pkg}::oracle::OraclePricesUpdated`, last: 100 },
+  })) as RecentResult
   const candidateIds = new Set<string>()
-  for (const e of ticks.data) {
-    const p = e.parsedJson as { oracle_id?: string }
+  for (const node of tickRes.data?.events?.nodes ?? []) {
+    const p = node.contents.json as { oracle_id?: string }
     if (p.oracle_id) candidateIds.add(normalizeSuiObjectId(p.oracle_id))
   }
   if (candidateIds.size === 0) return []
 
   // 2. Resolve each candidate object into a normalized row.
-  const objs = await client.multiGetObjects({
-    ids: [...candidateIds],
-    options: { showContent: true },
+  const objsRes = await client.core.getObjects({
+    objectIds: [...candidateIds],
+    include: { json: true },
   })
   const rows: OracleRow[] = []
-  for (const obj of objs) {
-    if (obj.data?.content?.dataType !== "moveObject") continue
-    const f = obj.data.content.fields as {
+  for (const obj of objsRes.objects) {
+    if (obj instanceof Error || !obj.json) continue
+    const f = obj.json as {
       active: boolean
       expiry: string
       settlement_price: unknown
       underlying_asset?: string
-      prices: { fields: { spot: string; forward: string } }
+      prices: { spot: string; forward: string }
     }
     rows.push({
-      id: normalizeSuiObjectId(obj.data.objectId),
+      id: normalizeSuiObjectId(obj.objectId),
       expiry: BigInt(f.expiry),
-      spot: BigInt(f.prices.fields.spot),
-      forward: BigInt(f.prices.fields.forward),
+      spot: BigInt(f.prices.spot),
+      forward: BigInt(f.prices.forward),
       active: f.active,
       settled: isSettlementSet(f.settlement_price),
       asset: f.underlying_asset,
@@ -417,7 +442,7 @@ function pickFromPool<T>(pool: readonly T[], stream: Generator<number, never>): 
 }
 
 /** Decode an 8-byte little-endian u64 buffer to bigint. */
-function readU64LE(bytes: number[]): bigint {
+function readU64LE(bytes: Uint8Array | number[]): bigint {
   let v = 0n
   for (let i = 0; i < 8; i++) {
     v |= BigInt(bytes[i] ?? 0) << BigInt(i * 8)
@@ -447,7 +472,7 @@ function readU64LE(bytes: number[]): bigint {
  * returns the raw ask price directly.
  */
 export async function probeCard(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracle: OracleSnapshot,
   strike: bigint,
 ): Promise<ProbeResult> {
@@ -489,17 +514,23 @@ export async function probeCard(
     // non-success status or an out-of-bounds ask means the strike is
     // genuinely unmintable. Conflating the two (the old `catch → false`)
     // made throttled probes look like dead oracles.
+    // dev_inspect is read-only; sender just needs to be a syntactically
+    // valid address.
+    tx.setSender(
+      "0x0000000000000000000000000000000000000000000000000000000000000001",
+    )
     let r:
-      | Awaited<ReturnType<typeof client.devInspectTransactionBlock>>
+      | Awaited<
+          ReturnType<
+            typeof client.core.simulateTransaction<{ commandResults: true }>
+          >
+        >
       | undefined
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        r = await client.devInspectTransactionBlock({
-          transactionBlock: tx,
-          // dev_inspect is read-only; sender just needs to be a
-          // syntactically valid address.
-          sender:
-            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        r = await client.core.simulateTransaction({
+          transaction: tx,
+          include: { commandResults: true },
         })
         break
       } catch {
@@ -508,19 +539,20 @@ export async function probeCard(
       }
     }
     if (!r) return NOT_VIABLE
-    if (r.effects.status.status !== "success") return NOT_VIABLE
+    if (r.$kind !== "Transaction" || !r.Transaction.status.success)
+      return NOT_VIABLE
     // results[0] is the market_key call (no public return), results[1] is
     // get_trade_amounts returning (ask_qty, bid_qty), results[2] is
     // ask_bounds returning (min, max). returnValues entry shape:
     // [ [bytes[], "u64"], ... ]
-    const trade = r.results?.[1]?.returnValues
-    const bounds = r.results?.[2]?.returnValues
+    const trade = r.commandResults?.[1]?.returnValues
+    const bounds = r.commandResults?.[2]?.returnValues
     if (!trade || !bounds || trade.length < 1 || bounds.length < 2) {
       return NOT_VIABLE
     }
-    const ask = readU64LE(trade[0][0])
-    const minAsk = readU64LE(bounds[0][0])
-    const maxAsk = readU64LE(bounds[1][0])
+    const ask = readU64LE(trade[0].bcs)
+    const minAsk = readU64LE(bounds[0].bcs)
+    const maxAsk = readU64LE(bounds[1].bcs)
     if (ask < minAsk || ask > maxAsk) return NOT_VIABLE
     asks[dir] = ask
   }
@@ -543,7 +575,7 @@ const NOT_VIABLE: ProbeResult = { viable: false, askUp: 0n, askDown: 0n }
 
 /**
  * Probe function shape — `(oracle, strike) → ProbeResult`. Defaults to the
- * real `probeCard` against a `SuiClient`; tests inject a synthetic
+ * real `probeCard` against a `SuiGrpcClient`; tests inject a synthetic
  * function so the algorithm can be exercised without RPC.
  */
 export type ProbeFn = (
@@ -1013,7 +1045,7 @@ export function atmStrike(o: OracleSnapshot): bigint {
  * limiter (a no-op for synthetic test probes).
  */
 export async function selectViableOracles(
-  client: SuiClient,
+  client: SuiGrpcClient,
   candidates: OracleSnapshot[],
   max: number,
   /** Override the probe — defaults to the real `probeCard`. Tests inject a
@@ -1031,7 +1063,7 @@ export async function selectViableOracles(
 }
 
 export async function buildAndProbeDeck(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracles: OracleSnapshot[],
   seed: Uint8Array,
   /** Override the per-strike probe — defaults to the real `probeCard`
@@ -1214,7 +1246,7 @@ export async function knownHashCount(): Promise<number> {
 // ─── HTTP routes ────────────────────────────────────────────────────────────
 
 import { json } from "./lib/http"
-import { getSuiClient } from "./lib/sui"
+import { getGraphQLClient, getSuiClient } from "./lib/sui"
 import { clientIp, consume } from "./ratelimit"
 
 /**

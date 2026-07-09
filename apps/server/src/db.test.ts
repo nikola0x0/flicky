@@ -28,39 +28,33 @@ describe.skipIf(!HAS_TEST_DB)("db (Postgres)", () => {
     })
 
     test("saveCursor inserts a new row; loadCursor reads it back", async () => {
-      await db.saveCursor("tracker-x", { txDigest: "AAA", eventSeq: "0" })
-      expect(await db.loadCursor("tracker-x")).toEqual({
-        txDigest: "AAA",
-        eventSeq: "0",
-      })
+      await db.saveCursor("tracker-x", "eyJ0IjoxLCJlIjowfQ==")
+      expect(await db.loadCursor("tracker-x")).toBe("eyJ0IjoxLCJlIjowfQ==")
     })
 
     test("saveCursor upserts — second save overwrites the first", async () => {
-      await db.saveCursor("tracker-x", { txDigest: "AAA", eventSeq: "0" })
-      await db.saveCursor("tracker-x", { txDigest: "BBB", eventSeq: "5" })
-      expect(await db.loadCursor("tracker-x")).toEqual({
-        txDigest: "BBB",
-        eventSeq: "5",
-      })
+      await db.saveCursor("tracker-x", "eyJ0IjoxLCJlIjowfQ==")
+      await db.saveCursor("tracker-x", "eyJ0IjoyLCJlIjowfQ==")
+      expect(await db.loadCursor("tracker-x")).toBe("eyJ0IjoyLCJlIjowfQ==")
     })
 
     test("different tracker ids have independent cursors", async () => {
-      await db.saveCursor("tracker-x", { txDigest: "AAA", eventSeq: "0" })
-      await db.saveCursor("tracker-y", { txDigest: "BBB", eventSeq: "1" })
-      expect((await db.loadCursor("tracker-x"))?.txDigest).toBe("AAA")
-      expect((await db.loadCursor("tracker-y"))?.txDigest).toBe("BBB")
+      await db.saveCursor("tracker-x", "cursor-x")
+      await db.saveCursor("tracker-y", "cursor-y")
+      expect(await db.loadCursor("tracker-x")).toBe("cursor-x")
+      expect(await db.loadCursor("tracker-y")).toBe("cursor-y")
     })
   })
 
   describe("listCursors", () => {
     test("returns all rows with updatedAt", async () => {
-      await db.saveCursor("a", { txDigest: "tx-a", eventSeq: "0" })
-      await db.saveCursor("b", { txDigest: "tx-b", eventSeq: "0" })
+      await db.saveCursor("a", "cursor-a")
+      await db.saveCursor("b", "cursor-b")
       const rows = await db.listCursors()
       expect(rows).toHaveLength(2)
       const map = new Map(rows.map((r) => [r.trackerId, r]))
-      expect(map.get("a")?.txDigest).toBe("tx-a")
-      expect(map.get("b")?.txDigest).toBe("tx-b")
+      expect(map.get("a")?.cursor).toBe("cursor-a")
+      expect(map.get("b")?.cursor).toBe("cursor-b")
       expect(map.get("a")?.updatedAt).toBeGreaterThan(0)
     })
 
@@ -71,16 +65,10 @@ describe.skipIf(!HAS_TEST_DB)("db (Postgres)", () => {
 
   describe("persistence", () => {
     test("data survives across a closeDb / re-open cycle", async () => {
-      await db.saveCursor("survivor", {
-        txDigest: "live-thru-reopen",
-        eventSeq: "42",
-      })
+      await db.saveCursor("survivor", "live-thru-reopen")
       await db.closeDb()
       // Next call re-creates the pool against the same DB — data persists.
-      expect(await db.loadCursor("survivor")).toEqual({
-        txDigest: "live-thru-reopen",
-        eventSeq: "42",
-      })
+      expect(await db.loadCursor("survivor")).toBe("live-thru-reopen")
     })
   })
 })

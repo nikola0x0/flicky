@@ -56,8 +56,7 @@ async function safeListCursors(): Promise<unknown> {
   try {
     return (await listCursors()).map((c) => ({
       tracker: c.trackerId.split("::").pop(),
-      txDigest: c.txDigest,
-      eventSeq: c.eventSeq,
+      cursor: c.cursor,
       ageMs: Date.now() - c.updatedAt,
     }))
   } catch (e) {

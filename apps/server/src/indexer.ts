@@ -21,9 +21,10 @@
  * cadence below is the canonical Sui pattern (see
  * MystenLabs/sui/examples/trading/api/indexer/event-indexer.ts).
  */
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
+import { getGraphQLClient } from "./lib/sui"
 import {
   getDuel,
   loadCursor,
@@ -31,7 +32,6 @@ import {
   setDuelWinner,
   upsertDuel,
   type CardOutcome,
-  type EventCursor,
 } from "./db"
 import { makeLogger, shortId } from "./log"
 import { applyDuelOutcome } from "./mmr"
@@ -42,6 +42,24 @@ import {
 } from "./ws/matchmaking"
 
 const log = makeLogger("indexer")
+
+// GraphQL replaces JSON-RPC queryEvents (gRPC has no filtered event
+// pagination). `first`/`after` drains forward; `last: 1` seeds to head.
+const EVENTS_QUERY = `query Ev($type: String!, $after: String, $first: Int, $last: Int) {
+  events(filter: { type: $type }, after: $after, first: $first, last: $last) {
+    pageInfo { hasNextPage endCursor }
+    nodes { contents { json } }
+  }
+}`
+
+type GraphQLEventsResult = {
+  data?: {
+    events?: {
+      pageInfo?: { hasNextPage: boolean; endCursor: string | null }
+      nodes?: Array<{ contents: { json: Record<string, unknown> } }>
+    }
+  }
+}
 
 function eventName(fullType: string): string {
   return fullType.split("::").pop() ?? fullType
@@ -100,21 +118,24 @@ interface PendingSwipe {
 }
 
 interface CardRaw {
-  fields?: { oracle_id?: string; strike?: string }
+  oracle_id?: string
+  strike?: string
 }
 
 interface SwipeRaw {
-  fields?: { is_up?: boolean; quantity?: string; premium?: string }
+  is_up?: boolean
+  quantity?: string
+  premium?: string
 }
 
 function parseSwipeRaw(raw: unknown): { isUp: boolean; quantity: string; premium: string } | null {
   if (raw === null || raw === undefined) return null
   const s = raw as SwipeRaw
-  if (!s.fields || s.fields.is_up === undefined) return null
+  if (s.is_up === undefined) return null
   return {
-    isUp: !!s.fields.is_up,
-    quantity: String(s.fields.quantity ?? "0"),
-    premium: String(s.fields.premium ?? "0"),
+    isUp: !!s.is_up,
+    quantity: String(s.quantity ?? "0"),
+    premium: String(s.premium ?? "0"),
   }
 }
 
@@ -194,26 +215,24 @@ export function computeCardOutcomes(input: CardOutcomeInput): CardOutcome[] {
  * string in case a future RPC version unwraps it) defensively.
  */
 async function readOracleSettlements(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracleIds: string[],
 ): Promise<Map<string, string>> {
   const unique = Array.from(new Set(oracleIds.filter((x) => !!x)))
   if (unique.length === 0) return new Map()
-  const objs = await client.multiGetObjects({
-    ids: unique,
-    options: { showContent: true },
+  const res = await client.core.getObjects({
+    objectIds: unique,
+    include: { json: true },
   })
   const out = new Map<string, string>()
-  for (const o of objs) {
-    if (o.data?.content?.dataType !== "moveObject") continue
-    const oid = o.data.objectId
+  for (const o of res.objects) {
+    if (o instanceof Error) continue
+    const fields = o.json as
+      | { settlement_price?: string | { fields?: { vec?: string[] } } | null }
+      | undefined
+    if (!fields) continue
+    const oid = o.objectId
     if (!oid) continue
-    const fields = o.data.content.fields as {
-      settlement_price?:
-        | { fields?: { vec?: string[] } }
-        | string
-        | null
-    }
     const sp = fields.settlement_price
     let price: string | undefined
     if (typeof sp === "string") {
@@ -241,28 +260,30 @@ async function readOracleSettlements(
  * already computed so the per-card breakdown isn't blanked.
  */
 async function fetchDuel(
-  client: SuiClient,
+  client: SuiGrpcClient,
   id: string,
 ): Promise<DuelLite | null> {
-  const obj = await client.getObject({
-    id,
-    options: { showContent: true, showType: true },
+  const obj = await client.core.getObject({
+    objectId: id,
+    include: { json: true },
   })
-  if (obj.data?.content?.dataType !== "moveObject") return null
-  const f = obj.data.content.fields as unknown as {
-    status: string
-    creator: string
-    challenger: string
-    cards: CardRaw[]
-    p0_payout?: string
-    p0_premium?: string
-    p1_payout?: string
-    p1_premium?: string
-    started_at_ms?: string
-    p0_swipes?: unknown[]
-    p1_swipes?: unknown[]
-  }
-  const typeMatch = obj.data.type?.match(/Duel<(.+)>$/)
+  const f = obj.object?.json as unknown as
+    | {
+        status: string
+        creator: string
+        challenger: string
+        cards: CardRaw[]
+        p0_payout?: string
+        p0_premium?: string
+        p1_payout?: string
+        p1_premium?: string
+        started_at_ms?: string
+        p0_swipes?: unknown[]
+        p1_swipes?: unknown[]
+      }
+    | undefined
+  if (!f) return null
+  const typeMatch = obj.object?.type?.match(/Duel<(.+)>$/)
   const cards = Array.isArray(f.cards) ? f.cards : []
   const status = STATUS_MAP[String(f.status)] ?? "PENDING"
   const p0SwipesRaw = f.p0_swipes ?? []
@@ -279,10 +300,8 @@ async function fetchDuel(
     if (p0 || p1) swipes.push({ cardIdx: i, p0Swipe: p0, p1Swipe: p1 })
   }
   const cardsLite = cards.map((c) => ({
-    oracle_id: c.fields?.oracle_id
-      ? normalizeSuiObjectId(c.fields.oracle_id)
-      : "",
-    strike: c.fields?.strike ?? "0",
+    oracle_id: c.oracle_id ? normalizeSuiObjectId(c.oracle_id) : "",
+    strike: c.strike ?? "0",
   }))
   // Bulk-read settlement_price for every card's oracle. Cards whose
   // oracle isn't settled yet are simply absent from the map; the
@@ -332,12 +351,13 @@ async function fetchDuel(
 }
 
 export class DuelIndexer {
-  private readonly client: SuiClient
+  private readonly client: SuiGrpcClient
   private readonly packageId: string
   private readonly eventTypes: string[]
+  private readonly gql = getGraphQLClient()
   private stopped = false
 
-  constructor(client: SuiClient, packageId: string) {
+  constructor(client: SuiGrpcClient, packageId: string) {
     this.client = client
     this.packageId = packageId
     this.eventTypes = [
@@ -366,15 +386,14 @@ export class DuelIndexer {
   private async seedCursor(eventType: string): Promise<void> {
     if (await loadCursor(eventType)) return
     try {
-      const head = await this.client.queryEvents({
-        query: { MoveEventType: eventType },
-        limit: 1,
-        order: "descending",
-      })
-      const e = head.data[0]
-      if (e) {
-        await saveCursor(eventType, { txDigest: e.id.txDigest, eventSeq: e.id.eventSeq })
-        log.info(`seed ${eventName(eventType)} @ ${shortId(e.id.txDigest)}/${e.id.eventSeq}`)
+      const res = (await this.gql.query({
+        query: EVENTS_QUERY,
+        variables: { type: eventType, after: null, first: null, last: 1 },
+      })) as GraphQLEventsResult
+      const end = res.data?.events?.pageInfo?.endCursor
+      if (end) {
+        await saveCursor(eventType, end)
+        log.info(`seed ${eventName(eventType)} @ ${end.slice(0, 10)}…`)
       }
     } catch (e) {
       log.warn(`seed ${eventName(eventType)}: ${describeError(e)}`)
@@ -397,19 +416,19 @@ export class DuelIndexer {
       settlementPrice: string | null
     }>,
   ): Promise<void> {
-    let cursor: EventCursor | null = await loadCursor(eventType)
+    let cursor: string | null = await loadCursor(eventType)
     // Soft cap: at most 10 pages per tracker per tick. Prevents one
     // overflowing tracker from starving the others.
     for (let page = 0; page < 10; page++) {
-      const res = await this.client.queryEvents({
-        query: { MoveEventType: eventType },
-        cursor,
-        order: "ascending",
-        limit: 50,
-      })
-      if (res.data.length === 0) return
-      for (const e of res.data) {
-        const p = e.parsedJson as Record<string, unknown> | undefined
+      const res = (await this.gql.query({
+        query: EVENTS_QUERY,
+        variables: { type: eventType, after: cursor, first: 50, last: null },
+      })) as GraphQLEventsResult
+      const events = res.data?.events
+      const nodes = events?.nodes ?? []
+      if (nodes.length === 0) return
+      for (const node of nodes) {
+        const p = node.contents.json as Record<string, unknown> | undefined
         const id = p?.duel_id as string | undefined
         if (id) touched.add(normalizeSuiObjectId(id))
         // DuelCreated → look up the matched pair and push the duel id
@@ -461,15 +480,12 @@ export class DuelIndexer {
           }
         }
       }
-      if (res.nextCursor) {
-        const next: EventCursor = {
-          txDigest: res.nextCursor.txDigest,
-          eventSeq: res.nextCursor.eventSeq,
-        }
-        await saveCursor(eventType, next)
-        cursor = next
+      const end = events?.pageInfo?.endCursor
+      if (end) {
+        await saveCursor(eventType, end)
+        cursor = end
       }
-      if (!res.hasNextPage) return
+      if (!events?.pageInfo?.hasNextPage) return
     }
   }
 

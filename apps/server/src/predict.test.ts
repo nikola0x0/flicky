@@ -10,7 +10,7 @@
  * TEST_DATABASE_URL (see test-preload.ts) and skips otherwise.
  */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test"
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import * as predict from "./predict"
 import * as db from "./db"
@@ -32,23 +32,23 @@ function page(owners: string[], hasNextPage: boolean) {
 }
 
 /** Fake client that returns `pages` in order, then throws if over-read. */
-function clientFromPages(pages: ReturnType<typeof page>[]): SuiClient {
+function clientFromPages(pages: ReturnType<typeof page>[]): SuiGrpcClient {
   let i = 0
   return {
     queryEvents: async () => {
       if (i >= pages.length) throw new Error("over-read past scripted pages")
       return pages[i++]
     },
-  } as unknown as SuiClient
+  } as unknown as SuiGrpcClient
 }
 
 /** Fake client whose queryEvents always rejects (RPC down). */
-function throwingClient(): SuiClient {
+function throwingClient(): SuiGrpcClient {
   return {
     queryEvents: async () => {
       throw new Error("RPC unavailable")
     },
-  } as unknown as SuiClient
+  } as unknown as SuiGrpcClient
 }
 
 describe.skipIf(!HAS_TEST_DB)("findManagerFor return contract", () => {

@@ -23,14 +23,22 @@
  */
 import { Transaction } from "@mysten/sui/transactions"
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { fetchDeck } from "./deckmaster"
 import { makeLogger, shortId } from "./log"
 import { findManagerFor } from "./predict"
+import { getGraphQLClient } from "./lib/sui"
 
 const log = makeLogger("keeper")
+
+// GraphQL replaces JSON-RPC queryEvents in sweep (gRPC can't filter events).
+const SWEEP_QUERY = `query Sweep($type: String!) {
+  events(filter: { type: $type }, last: 30) {
+    nodes { contents { json } }
+  }
+}`
 
 interface SwipeLite {
   isUp: boolean
@@ -62,8 +70,11 @@ const STATUS_MAP: Record<string, "PENDING" | "ACTIVE" | "COMPLETE"> = {
 }
 
 export function hexFromBytes(bytes: number[] | string): string {
-  if (typeof bytes === "string")
-    return bytes.startsWith("0x") ? bytes.toLowerCase() : "0x" + bytes
+  if (typeof bytes === "string") {
+    // gRPC json encodes vector<u8> as base64; already-hex 0x strings pass through.
+    if (bytes.startsWith("0x")) return bytes.toLowerCase()
+    return "0x" + Buffer.from(bytes, "base64").toString("hex")
+  }
   return "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
@@ -91,21 +102,23 @@ export function isTerminalSettleError(msg: string): boolean {
 }
 
 interface RawSwipe {
-  fields: { is_up: boolean; quantity: string; premium: string }
+  is_up: boolean
+  quantity: string
+  premium: string
 }
 
 export function parseSwipe(raw: RawSwipe | null): SwipeLite | null {
   if (raw === null) return null
   return {
-    isUp: raw.fields.is_up,
-    quantity: BigInt(raw.fields.quantity),
-    premium: BigInt(raw.fields.premium),
+    isUp: raw.is_up,
+    quantity: BigInt(raw.quantity),
+    premium: BigInt(raw.premium),
   }
 }
 
 /**
  * Pure parser — extract a DuelLite from `obj.data.type` + `obj.data.content.fields`
- * as returned by `SuiClient.getObject({ showContent: true, showType: true })`.
+ * as returned by `SuiGrpcClient.getObject({ showContent: true, showType: true })`.
  * Returns null if the input isn't a moveObject of the expected shape.
  * Exposed so the keeper tests can exercise it without mocking the
  * full client.
@@ -116,27 +129,27 @@ export function parseDuelFromObject(
 ): DuelLite | null {
   if (!fields || typeof fields !== "object") return null
   const f = fields as {
-    id: { id: string }
+    id: string
     status: string
     deck_hash: number[] | string
     creator: string
     challenger: string
-    p0_stake: { fields: { value: string } } | string
-    p1_stake: { fields: { value: string } } | string
-    cards: Array<{ fields: { oracle_id: string; strike: string } }>
+    p0_stake: string | { value?: string }
+    p1_stake: string | { value?: string }
+    cards: Array<{ oracle_id: string; strike: string }>
     p0_swipes: Array<RawSwipe | null>
     p1_swipes: Array<RawSwipe | null>
     p0_next_card_idx: string | number
     p1_next_card_idx: string | number
     started_at_ms: string | number
   }
-  if (!f.id?.id || f.status === undefined) return null
+  if (!f.id || f.status === undefined) return null
   const typeMatch = type?.match(/Duel<(.+)>$/)
   const stakeCoinType = typeMatch?.[1] ?? "0x2::sui::SUI"
-  const stakeValue = (b: { fields: { value: string } } | string): bigint =>
-    typeof b === "string" ? BigInt(b) : BigInt(b.fields.value)
+  const stakeValue = (b: string | { value?: string }): bigint =>
+    typeof b === "string" ? BigInt(b) : BigInt(b.value ?? "0")
   return {
-    id: normalizeSuiObjectId(f.id.id),
+    id: normalizeSuiObjectId(f.id),
     status: STATUS_MAP[String(f.status)] ?? "PENDING",
     stakeCoinType,
     deckHashHex: hexFromBytes(f.deck_hash),
@@ -145,8 +158,8 @@ export function parseDuelFromObject(
     p0Stake: stakeValue(f.p0_stake),
     p1Stake: stakeValue(f.p1_stake),
     cards: f.cards.map((c) => ({
-      oracleId: normalizeSuiObjectId(c.fields.oracle_id),
-      strike: BigInt(c.fields.strike),
+      oracleId: normalizeSuiObjectId(c.oracle_id),
+      strike: BigInt(c.strike),
     })),
     p0Swipes: f.p0_swipes.map(parseSwipe),
     p1Swipes: f.p1_swipes.map(parseSwipe),
@@ -156,28 +169,28 @@ export function parseDuelFromObject(
   }
 }
 
-async function fetchDuel(client: SuiClient, id: string): Promise<DuelLite | null> {
-  const obj = await client.getObject({
-    id,
-    options: { showContent: true, showType: true },
+async function fetchDuel(client: SuiGrpcClient, id: string): Promise<DuelLite | null> {
+  const obj = await client.core.getObject({
+    objectId: id,
+    include: { json: true },
   })
-  if (obj.data?.content?.dataType !== "moveObject") return null
-  return parseDuelFromObject(obj.data.type ?? undefined, obj.data.content.fields)
+  if (!obj.object?.json) return null
+  return parseDuelFromObject(obj.object.type ?? undefined, obj.object.json)
 }
 
 export { type DuelLite, type SwipeLite }
 
 async function readOracleExpiry(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracleId: string,
 ): Promise<bigint | null> {
   try {
-    const obj = await client.getObject({
-      id: oracleId,
-      options: { showContent: true },
+    const obj = await client.core.getObject({
+      objectId: oracleId,
+      include: { json: true },
     })
-    if (obj.data?.content?.dataType !== "moveObject") return null
-    const f = obj.data.content.fields as { expiry: string }
+    const f = obj.object?.json as { expiry?: string } | undefined
+    if (!f?.expiry) return null
     return BigInt(f.expiry)
   } catch {
     return null
@@ -193,18 +206,18 @@ async function readOracleExpiry(
  * this into an event tracker in `indexer.ts` instead.
  */
 async function readOracleSettled(
-  client: SuiClient,
+  client: SuiGrpcClient,
   oracleId: string,
 ): Promise<boolean> {
   try {
-    const obj = await client.getObject({
-      id: oracleId,
-      options: { showContent: true },
+    const obj = await client.core.getObject({
+      objectId: oracleId,
+      include: { json: true },
     })
-    if (obj.data?.content?.dataType !== "moveObject") return false
-    const f = obj.data.content.fields as {
-      settlement_price: string | null | { fields: { vec: string[] } }
-    }
+    const f = obj.object?.json as
+      | { settlement_price?: string | null | { fields?: { vec?: string[] } } }
+      | undefined
+    if (!f) return false
     if (typeof f.settlement_price === "string") return true
     if (f.settlement_price && typeof f.settlement_price === "object") {
       return (f.settlement_price.fields?.vec ?? []).length > 0
@@ -216,7 +229,8 @@ async function readOracleSettled(
 }
 
 export class Keeper {
-  readonly client: SuiClient
+  readonly client: SuiGrpcClient
+  private readonly gql = getGraphQLClient()
   readonly keypair: Ed25519Keypair
   readonly packageId: string
   readonly address: string
@@ -225,7 +239,7 @@ export class Keeper {
   readonly inFlight = new Set<string>()
   private stopped = false
 
-  constructor(client: SuiClient, keypair: Ed25519Keypair, packageId: string) {
+  constructor(client: SuiGrpcClient, keypair: Ed25519Keypair, packageId: string) {
     this.client = client
     this.keypair = keypair
     this.packageId = packageId
@@ -263,14 +277,13 @@ export class Keeper {
     const res = await this.client.signAndExecuteTransaction({
       transaction: tx,
       signer: this.keypair,
-      options: { showEffects: true },
     })
-    if (res.effects?.status.status === "success") {
-      await this.client.waitForTransaction({ digest: res.digest })
+    if (res.$kind === "Transaction" && res.Transaction.status.success) {
+      await this.client.waitForTransaction({ digest: res.Transaction.digest })
       this.revealed.add(duel.id)
-      log.info(`reveal ${shortId(duel.id)} · ${shortId(res.digest)}`)
+      log.info(`reveal ${shortId(duel.id)} · ${shortId(res.Transaction.digest)}`)
     } else {
-      const reason = res.effects?.status.error ?? "unknown"
+      const reason = res.Transaction?.status.error?.message ?? "unknown"
       if (reason.includes("16") || reason.includes("EDeckAlreadyRevealed")) {
         this.revealed.add(duel.id)
         return
@@ -407,19 +420,18 @@ export class Keeper {
       const res = await this.client.signAndExecuteTransaction({
         transaction: tx,
         signer: this.keypair,
-        options: { showEffects: true },
       })
-      if (res.effects?.status.status !== "success") {
-        const reason = res.effects?.status.error ?? "unknown"
+      if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
+        const reason = res.Transaction?.status.error?.message ?? "unknown"
         log.warn(`skip ${shortId(duelId)}: ${reason}`)
         return
       }
-      await this.client.waitForTransaction({ digest: res.digest })
+      await this.client.waitForTransaction({ digest: res.Transaction.digest })
       this.finalized.add(duelId)
       log.info(
         `settle_card×${settledCount} + finalize ${shortId(duelId)}` +
         (redeemsCount ? ` + ${redeemsCount} redeem(s)` : "") +
-        ` · ${shortId(res.digest)}`,
+        ` · ${shortId(res.Transaction.digest)}`,
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -437,22 +449,28 @@ export class Keeper {
   }
 
   async sweep(): Promise<void> {
-    const evts = await this.client.queryEvents({
-      query: { MoveEventType: `${this.packageId}::duel::DuelCreated` },
-      limit: 30,
-      order: "descending",
-    })
-    for (const e of evts.data) {
-      const p = e.parsedJson as { duel_id: string }
-      this.tryClose(normalizeSuiObjectId(p.duel_id))
+    const res = (await this.gql.query({
+      query: SWEEP_QUERY,
+      variables: { type: `${this.packageId}::duel::DuelCreated` },
+    })) as {
+      data?: {
+        events?: { nodes?: Array<{ contents: { json: { duel_id: string } } }> }
+      }
+    }
+    for (const node of res.data?.events?.nodes ?? []) {
+      this.tryClose(normalizeSuiObjectId(node.contents.json.duel_id))
     }
   }
 
   async start(): Promise<void> {
-    const balance = await this.client.getBalance({ owner: this.address })
+    const gb = await this.client.core.getBalance({
+      owner: this.address,
+      coinType: "0x2::sui::SUI",
+    })
+    const total = BigInt(gb.balance?.balance ?? "0")
     log.info(`address ${this.address}`)
-    log.info(`balance ${(Number(balance.totalBalance) / 1e9).toFixed(4)} SUI`)
-    if (BigInt(balance.totalBalance) < 50_000_000n) {
+    log.info(`balance ${(Number(total) / 1e9).toFixed(4)} SUI`)
+    if (total < 50_000_000n) {
       log.warn("balance < 0.05 SUI; fund the keeper wallet")
     }
     log.info(`polling every ${env.keeperPollIntervalMs}ms`)

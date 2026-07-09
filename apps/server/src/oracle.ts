@@ -11,20 +11,31 @@
  *   GET  /oracle/:id
  *     → { id, expiry, spot, forward, active, settled }
  */
-import type { SuiClient } from "@mysten/sui/client"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { json } from "./lib/http"
-import { getSuiClient } from "./lib/sui"
+import { getGraphQLClient, getSuiClient } from "./lib/sui"
 import { makeLogger } from "./log"
 
 const log = makeLogger("oracle")
+
+const RECENT_EVENTS_QUERY = `query Recent($type: String!, $last: Int!) {
+  events(filter: { type: $type }, last: $last) {
+    nodes { contents { json } }
+  }
+}`
+type RecentEventsResult = {
+  data?: {
+    events?: { nodes?: Array<{ contents: { json: Record<string, unknown> } }> }
+  }
+}
 
 interface OracleFields {
   active: boolean
   expiry: string
   settlement_price: unknown
-  prices: { fields: { spot: string; forward: string } }
+  prices: { spot: string; forward: string }
 }
 
 interface OracleView {
@@ -50,24 +61,24 @@ function toView(id: string, f: OracleFields): OracleView {
   return {
     id: normalizeSuiObjectId(id),
     expiry: f.expiry,
-    spot: f.prices.fields.spot,
-    forward: f.prices.fields.forward,
+    spot: f.prices.spot,
+    forward: f.prices.forward,
     active: f.active,
     settled: isSettlementSet(f.settlement_price),
   }
 }
 
 async function readOracle(
-  client: SuiClient,
+  client: SuiGrpcClient,
   id: string,
 ): Promise<OracleView | null> {
-  const obj = await client.getObject({ id, options: { showContent: true } })
-  if (obj.data?.content?.dataType !== "moveObject") return null
-  return toView(id, obj.data.content.fields as unknown as OracleFields)
+  const obj = await client.core.getObject({ objectId: id, include: { json: true } })
+  if (!obj.object?.json) return null
+  return toView(id, obj.object.json as unknown as OracleFields)
 }
 
 async function listEligibleOracles(
-  client: SuiClient,
+  client: SuiGrpcClient,
   asset: string,
   minHeadroomMs: number,
 ): Promise<OracleView[]> {
@@ -75,28 +86,27 @@ async function listEligibleOracles(
   const now = Date.now()
   const minExpiry = BigInt(now) + BigInt(minHeadroomMs)
 
-  const evts = await client.queryEvents({
-    query: { MoveEventType: `${pkg}::registry::OracleCreated` },
-    limit: 30,
-    order: "descending",
-  })
+  const evRes = (await getGraphQLClient().query({
+    query: RECENT_EVENTS_QUERY,
+    variables: { type: `${pkg}::registry::OracleCreated`, last: 30 },
+  })) as RecentEventsResult
   const candidates: string[] = []
-  for (const e of evts.data) {
-    const p = e.parsedJson as { oracle_id: string; underlying_asset: string }
+  for (const node of evRes.data?.events?.nodes ?? []) {
+    const p = node.contents.json as { oracle_id: string; underlying_asset: string }
     if (p.underlying_asset !== asset) continue
     candidates.push(normalizeSuiObjectId(p.oracle_id))
     if (candidates.length >= 20) break
   }
   if (candidates.length === 0) return []
-  const objs = await client.multiGetObjects({
-    ids: candidates,
-    options: { showContent: true },
+  const res = await client.core.getObjects({
+    objectIds: candidates,
+    include: { json: true },
   })
   const eligible: OracleView[] = []
-  for (const obj of objs) {
-    if (obj.data?.content?.dataType !== "moveObject") continue
-    const id = obj.data.objectId
-    const f = obj.data.content.fields as unknown as OracleFields
+  for (const obj of res.objects) {
+    if (obj instanceof Error || !obj.json) continue
+    const id = obj.objectId
+    const f = obj.json as unknown as OracleFields
     const view = toView(id, f)
     if (!view.active) continue
     if (view.settled) continue
