@@ -15,8 +15,26 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { makeLogger } from "./log"
 import { getCachedManager, cacheManager } from "./db"
+import { getGraphQLClient } from "./lib/sui"
 
 const log = makeLogger("predict")
+
+// Descending event scan via GraphQL (gRPC has no filtered event pagination).
+// `last: 50` + `before: startCursor` walks newest-first, page by page.
+const MANAGER_SCAN_QUERY = `query Scan($type: String!, $before: String) {
+  events(filter: { type: $type }, last: 50, before: $before) {
+    pageInfo { hasPreviousPage startCursor }
+    nodes { contents { json } }
+  }
+}`
+type ScanResult = {
+  data?: {
+    events?: {
+      pageInfo?: { hasPreviousPage: boolean; startCursor: string | null }
+      nodes?: Array<{ contents: { json: { manager_id: string; owner: string } } }>
+    }
+  }
+}
 
 // Safety backstop for the event scan: a manager's `PredictManagerCreated`
 // event lives at a fixed depth, but testnet churn (duplicate managers per
@@ -53,33 +71,33 @@ export const MIN_BALANCE_FOR_QUEUE = 5_000_000n // 5 dUSDC, 6 decimals
  *               with). Surface a retryable error instead.
  */
 export async function findManagerFor(
-  client: SuiGrpcClient,
+  _client: SuiGrpcClient,
   owner: string,
 ): Promise<string | null> {
   const cached = await getCachedManager(owner)
   if (cached) return cached
-  let cursor: { txDigest: string; eventSeq: string } | null | undefined = null
-  // No try/catch: a queryEvents rejection propagates so the caller can tell
+  let before: string | null = null
+  // No try/catch: a query rejection propagates so the caller can tell
   // "scan failed" apart from "scanned everything, found none".
   for (let page = 0; page < MAX_MANAGER_SCAN_PAGES; page++) {
-    const evts = await client.queryEvents({
-      query: {
-        MoveEventType: `${env.deepbookPredictPackageId}::predict_manager::PredictManagerCreated`,
+    const res = (await getGraphQLClient().query({
+      query: MANAGER_SCAN_QUERY,
+      variables: {
+        type: `${env.deepbookPredictPackageId}::predict_manager::PredictManagerCreated`,
+        before,
       },
-      limit: 50,
-      order: "descending",
-      cursor,
-    })
-    for (const e of evts.data) {
-      const p = e.parsedJson as { manager_id: string; owner: string }
+    })) as ScanResult
+    const ev = res.data?.events
+    for (const node of ev?.nodes ?? []) {
+      const p = node.contents.json
       if (p.owner === owner) {
         const id = normalizeSuiObjectId(p.manager_id)
         await cacheManager(owner, id)
         return id
       }
     }
-    if (!evts.hasNextPage) return null // scanned the whole stream — authoritative
-    cursor = evts.nextCursor
+    if (!ev?.pageInfo?.hasPreviousPage) return null // exhausted — authoritative
+    before = ev.pageInfo.startCursor
   }
   // Ran out of page budget before reaching the end — the scan is INCOMPLETE,
   // not exhausted. Never seen at current volume (~10 pages), but we must not
@@ -109,13 +127,14 @@ export async function readManagerBalance(
       typeArguments: [env.dusdcCoinType],
       arguments: [tx.object(managerId)],
     })
-    const res = await client.devInspectTransactionBlock({
-      sender: address,
-      transactionBlock: tx,
+    tx.setSender(address)
+    const res = await client.core.simulateTransaction({
+      transaction: tx,
+      include: { commandResults: true },
     })
-    const ret = res.results?.[0]?.returnValues?.[0]
+    const ret = res.commandResults?.[0]?.returnValues?.[0]
     if (!ret) return null
-    return BigInt(bcs.u64().parse(new Uint8Array(ret[0])))
+    return BigInt(bcs.u64().parse(ret.bcs))
   } catch (e) {
     log.warn(`readManagerBalance(${managerId}): ${e instanceof Error ? e.message : String(e)}`)
     return null
