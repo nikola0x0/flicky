@@ -2,18 +2,20 @@
  * Settled-redeem keeper — runs as a background service inside the same
  * Bun process as the HTTP/WS server.
  *
- * Flow:
+ * Flow (6-24 model — feed-settle, no on-chain oracle read):
  *   1. Sweep recent `${packageId}::duel::DuelCreated` events.
  *   2. For each duel that's not yet COMPLETE:
  *      - If ACTIVE and not revealed, reveal the deck (deckmaster has
  *        the plaintext if anyone called /deckmaster/generate before
  *        the server restart).
- *      - If both players finished all swipes and every card's oracle has
- *        a `settlement_price`, build a single PTB chaining
- *        `settle_card × deck_size` (per-card scoring with each card's
- *        own oracle) + `finalize` (distributes the side-pot) +
- *        `redeem_permissionless × N` (materialises each player's Predict
- *        payout). Settles run first so they read live positions before
+ *      - If both players finished all swipes and every card's `ExpiryMarket`
+ *        has settled (per the predict indexer's `/markets/{id}/state`), build
+ *        a single PTB chaining `settle_card × deck_size` (keeper-fed
+ *        `settlement_price` + per-player `net_premium`, per card) +
+ *        `finalize` (distributes the side-pot) + `redeem_settled × N`
+ *        (materialises each player's 6-24 `AccountWrapper` payout). Settles
+ *        run first so `settle_card`'s anti-replay check
+ *        (`predict_account::has_position`) sees live positions before
  *        redeem zeroes them.
  *   3. Remember finalized duel ids so we don't re-process.
  *
@@ -28,7 +30,7 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { fetchDeck } from "./deckmaster"
 import { makeLogger, shortId } from "./log"
-import { findManagerFor } from "./predict"
+import { deriveWrapperFor } from "./predict"
 import { getGraphQLClient } from "./lib/sui"
 
 const log = makeLogger("keeper")
@@ -43,7 +45,12 @@ const SWEEP_QUERY = `query Sweep($type: String!) {
 interface SwipeLite {
   isUp: boolean
   quantity: bigint
-  premium: bigint
+  /**
+   * The `order_id` returned by `expiry_market::mint_exact_quantity`,
+   * chained into `record_swipe` in the same player-signed PTB. `0` for
+   * free-tier swipes (never produced by the STAKED-only settle path below).
+   */
+  orderId: bigint
 }
 
 interface DuelLite {
@@ -55,7 +62,7 @@ interface DuelLite {
   challenger: string
   p0Stake: bigint
   p1Stake: bigint
-  cards: Array<{ oracleId: string; strike: bigint }>
+  cards: Array<{ expiryMarketId: string; strike: bigint }>
   p0Swipes: (SwipeLite | null)[]
   p1Swipes: (SwipeLite | null)[]
   p0NextCardIdx: number
@@ -81,30 +88,45 @@ export function hexFromBytes(bytes: number[] | string): string {
 /**
  * Classify a settle/redeem failure as terminal — retrying it can never
  * succeed, so the keeper should mark the duel finalized and stop. Returns
- * false for transient errors (RPC blips, 429s, timeouts) that should keep
- * retrying.
+ * false for transient errors (RPC blips, 429s, timeouts, or a not-yet-fully
+ * propagated settlement) that should keep retrying.
  *
  * Terminal cases:
  *   - `flicky::duel` EDuelNotActive (abort code 2): the duel already
  *     finalized/refunded out from under us. The dry-run budget error shows
  *     the raw code, not the name, so we also match a bare `2)`.
- *   - `predict_manager::decrease_position` abort (EInsufficientPosition,
+ *   - `predict_manager::decrease_position` abort (4-16 legacy, EInsufficientPosition,
  *     code 1): a player's Predict position was already redeemed.
  *     decrease_position has no other abort code, so matching the function
  *     name is sufficient. Nothing more for the keeper to do.
+ *
+ * Explicitly NON-terminal (documented here, not just falling through to the
+ * default `false`, so the classification is intentional and testable):
+ *   - `flicky::duel` EZeroSettlement (abort code 14): `settle_card`/`finalize`
+ *     reject a keeper-fed `settlement_price` of 0. This should never happen —
+ *     `Keeper.tryClose` only calls settle_card once `readMarketSettlement`
+ *     reports `settled: true` with a non-null price — but if it does (indexer
+ *     read race, stale cache), the duel isn't stuck: a later retry with a
+ *     correctly-resolved settlement price can still succeed.
  */
 export function isTerminalSettleError(msg: string): boolean {
   if (msg.includes("EDuelNotActive") || /\babort code: 2\b|\b2\)/.test(msg)) {
     return true
   }
   if (msg.includes("decrease_position")) return true
+  if (
+    msg.includes("EZeroSettlement") ||
+    /\babort code: 14\b|\b14\)/.test(msg)
+  ) {
+    return false
+  }
   return false
 }
 
 interface RawSwipe {
   is_up: boolean
   quantity: string
-  premium: string
+  order_id: string
 }
 
 export function parseSwipe(raw: RawSwipe | null): SwipeLite | null {
@@ -112,7 +134,7 @@ export function parseSwipe(raw: RawSwipe | null): SwipeLite | null {
   return {
     isUp: raw.is_up,
     quantity: BigInt(raw.quantity),
-    premium: BigInt(raw.premium),
+    orderId: BigInt(raw.order_id),
   }
 }
 
@@ -125,7 +147,7 @@ export function parseSwipe(raw: RawSwipe | null): SwipeLite | null {
  */
 export function parseDuelFromObject(
   type: string | undefined,
-  fields: unknown,
+  fields: unknown
 ): DuelLite | null {
   if (!fields || typeof fields !== "object") return null
   const f = fields as {
@@ -136,7 +158,7 @@ export function parseDuelFromObject(
     challenger: string
     p0_stake: string | { value?: string }
     p1_stake: string | { value?: string }
-    cards: Array<{ oracle_id: string; strike: string }>
+    cards: Array<{ expiry_market_id: string; strike: string }>
     p0_swipes: Array<RawSwipe | null>
     p1_swipes: Array<RawSwipe | null>
     p0_next_card_idx: string | number
@@ -158,18 +180,23 @@ export function parseDuelFromObject(
     p0Stake: stakeValue(f.p0_stake),
     p1Stake: stakeValue(f.p1_stake),
     cards: f.cards.map((c) => ({
-      oracleId: normalizeSuiObjectId(c.oracle_id),
+      expiryMarketId: normalizeSuiObjectId(c.expiry_market_id),
       strike: BigInt(c.strike),
     })),
     p0Swipes: f.p0_swipes.map(parseSwipe),
     p1Swipes: f.p1_swipes.map(parseSwipe),
-    p0NextCardIdx: f.p0_next_card_idx !== undefined ? Number(f.p0_next_card_idx) : 0,
-    p1NextCardIdx: f.p1_next_card_idx !== undefined ? Number(f.p1_next_card_idx) : 0,
+    p0NextCardIdx:
+      f.p0_next_card_idx !== undefined ? Number(f.p0_next_card_idx) : 0,
+    p1NextCardIdx:
+      f.p1_next_card_idx !== undefined ? Number(f.p1_next_card_idx) : 0,
     startedAtMs: f.started_at_ms !== undefined ? BigInt(f.started_at_ms) : 0n,
   }
 }
 
-async function fetchDuel(client: SuiGrpcClient, id: string): Promise<DuelLite | null> {
+async function fetchDuel(
+  client: SuiGrpcClient,
+  id: string
+): Promise<DuelLite | null> {
   const obj = await client.core.getObject({
     objectId: id,
     include: { json: true },
@@ -180,51 +207,110 @@ async function fetchDuel(client: SuiGrpcClient, id: string): Promise<DuelLite | 
 
 export { type DuelLite, type SwipeLite }
 
-async function readOracleExpiry(
-  client: SuiGrpcClient,
-  oracleId: string,
-): Promise<bigint | null> {
+interface MarketSettlementState {
+  settled: boolean
+  settlementPrice: bigint | null
+}
+
+/**
+ * Read an `ExpiryMarket`'s settlement state via the predict indexer's
+ * current-state lookup: `GET {predictIndexerUrl}/markets/{id}/state` →
+ * `{ market, config, mint_paused, oracle_prices, oracle_svi, settlement }`.
+ * `settlement` is `null` until `market_settled` has been indexed, else
+ * `{ settlement_price: "<u64 decimal string>", settled_at_ms, ... }` (probed
+ * live against testnet 2026-07-10: confirmed on both branches — `null` for a
+ * future-expiry market, a populated object with `settlement_price` +
+ * `kind: "market_settled"` for a past-expiry one).
+ *
+ * THIN LOCAL READER — Task 6 (indexer/ws field renames) is expected to
+ * consolidate this into a shared indexer module; kept as one small exported
+ * function so that move is a pure relocation.
+ *
+ * Fails closed: any fetch/parse error reports `settled: false` so the keeper
+ * never mistakes an indexer hiccup for "not settled yet" vs. accidentally
+ * treats it as settled with a garbage price — `tryClose` just retries later.
+ */
+export async function readMarketSettlement(
+  expiryMarketId: string
+): Promise<MarketSettlementState> {
   try {
-    const obj = await client.core.getObject({
-      objectId: oracleId,
-      include: { json: true },
-    })
-    const f = obj.object?.json as { expiry?: string } | undefined
-    if (!f?.expiry) return null
-    return BigInt(f.expiry)
-  } catch {
-    return null
+    const res = await fetch(
+      `${env.predictIndexerUrl}/markets/${expiryMarketId}/state`
+    )
+    if (!res.ok) return { settled: false, settlementPrice: null }
+    const data = (await res.json()) as {
+      settlement?: { settlement_price?: string } | null
+    }
+    const price = data.settlement?.settlement_price
+    if (price === undefined || price === null)
+      return { settled: false, settlementPrice: null }
+    return { settled: true, settlementPrice: BigInt(price) }
+  } catch (e) {
+    log.warn(
+      `readMarketSettlement(${expiryMarketId}): fetch failed, treating as unsettled: ${e instanceof Error ? e.message : String(e)}`
+    )
+    return { settled: false, settlementPrice: null }
   }
 }
 
 /**
- * PRD §Backend §PnL tracker says "Subscribes to Predict's settle events"
- * but the on-chain `OracleSVI` doesn't emit one — settlement is a silent
- * `settlement_price = Option::some(price)` field flip. We poll the field
- * directly via getObject; the indexer's `KEEPER_POLL_INTERVAL_MS` bounds
- * end-to-end latency. If DeepBook later adds a `Settled` event, hoist
- * this into an event tracker in `indexer.ts` instead.
+ * Read a minted order's `net_premium` (DUSDC base units) for the settle-time
+ * `p0_premium`/`p1_premium` args to `duel::settle_card`.
+ *
+ * PROBED shape (2026-07-10): the reference doc's guessed `/market-orders`,
+ * `/manager-orders`, `/managers` paths all 404 on the live
+ * `predict-server-beta` indexer. The real API (`crates/predict-server/API.md`
+ * in the deepbookv3 branch) instead exposes a purpose-built current-state
+ * lookup: `GET /markets/{expiry_market_id}/positions/{position_root_id}/cashflow`
+ * → a `position_cashflow` row aggregating the whole replacement chain
+ * (`net_premium`, `mint_fees`, `live_redeem_amount`, `settled_payout`, …),
+ * or `null` for an unknown root — confirmed live (`/markets/<id>/positions/12345/cashflow`
+ * → `200 null`). A flicky swipe's `order_id` is always a mint root (never a
+ * replacement — flicky never partially closes), so `position_root_id ===
+ * order_id` always holds and this is the correct, precise lookup (matches
+ * `OrderMinted.net_premium` for that order without an unbounded event scan).
+ *
+ * DEVIATION from the brief's literal `readOrderPremium(orderId)` signature:
+ * `API.md` is explicit that `order_id` is **expiry-local, not globally
+ * unique** — "always treat `(expiry_market_id, order_id)` as the key" — so
+ * this function takes `expiryMarketId` too. Task 6 should carry this two-arg
+ * shape forward rather than the brief's one-arg guess.
+ *
+ * Safe-but-approximate fallback: any failure (HTTP error, no cashflow row —
+ * e.g. the indexer hasn't caught up to the mint yet — or a malformed body)
+ * returns `0n` and logs a warning. `settle_card` only uses premium for the
+ * tie-break (`EqualScoreHigherPremiumWins` — see duel.move), never the
+ * primary payout math, so a `0` fallback cannot mis-pay the primary winner;
+ * it can only mis-resolve an exact-tie edge case. Flagged LOUDLY per task
+ * instructions — see task-5-report.md "premium=0 fallback" section.
  */
-async function readOracleSettled(
-  client: SuiGrpcClient,
-  oracleId: string,
-): Promise<boolean> {
+export async function readOrderPremium(
+  expiryMarketId: string,
+  orderId: bigint
+): Promise<bigint> {
   try {
-    const obj = await client.core.getObject({
-      objectId: oracleId,
-      include: { json: true },
-    })
-    const f = obj.object?.json as
-      | { settlement_price?: string | null | { fields?: { vec?: string[] } } }
-      | undefined
-    if (!f) return false
-    if (typeof f.settlement_price === "string") return true
-    if (f.settlement_price && typeof f.settlement_price === "object") {
-      return (f.settlement_price.fields?.vec ?? []).length > 0
+    const res = await fetch(
+      `${env.predictIndexerUrl}/markets/${expiryMarketId}/positions/${orderId.toString()}/cashflow`
+    )
+    if (!res.ok) {
+      log.warn(
+        `readOrderPremium(${expiryMarketId}, ${orderId}): HTTP ${res.status} — falling back to premium=0 (tie-break only, not primary payout)`
+      )
+      return 0n
     }
-    return false
-  } catch {
-    return false
+    const data = (await res.json()) as { net_premium?: string } | null
+    if (!data || data.net_premium === undefined) {
+      log.warn(
+        `readOrderPremium(${expiryMarketId}, ${orderId}): no cashflow row (indexer lag or unminted order) — falling back to premium=0`
+      )
+      return 0n
+    }
+    return BigInt(data.net_premium)
+  } catch (e) {
+    log.warn(
+      `readOrderPremium(${expiryMarketId}, ${orderId}): fetch failed — falling back to premium=0: ${e instanceof Error ? e.message : String(e)}`
+    )
+    return 0n
   }
 }
 
@@ -239,7 +325,11 @@ export class Keeper {
   readonly inFlight = new Set<string>()
   private stopped = false
 
-  constructor(client: SuiGrpcClient, keypair: Ed25519Keypair, packageId: string) {
+  constructor(
+    client: SuiGrpcClient,
+    keypair: Ed25519Keypair,
+    packageId: string
+  ) {
     this.client = client
     this.keypair = keypair
     this.packageId = packageId
@@ -260,8 +350,12 @@ export class Keeper {
     const cardArgs = plaintext.map((c) =>
       tx.moveCall({
         target: `${this.packageId}::duel::new_card`,
-        arguments: [tx.object(c.oracle_id), tx.pure.u64(c.strike)],
-      }),
+        // 6-24 `new_card(expiry_market_id: ID, strike: u64)` takes a plain
+        // ID, not an owned/shared object reference. `DeckCard.oracle_id`
+        // holds the `ExpiryMarket` id (field name predates the 6-24 rename —
+        // see deckmaster.ts; not renamed here to stay in this task's scope).
+        arguments: [tx.pure.id(c.oracle_id), tx.pure.u64(c.strike)],
+      })
     )
     tx.moveCall({
       target: `${this.packageId}::duel::reveal_deck`,
@@ -281,7 +375,9 @@ export class Keeper {
     if (res.$kind === "Transaction" && res.Transaction.status.success) {
       await this.client.waitForTransaction({ digest: res.Transaction.digest })
       this.revealed.add(duel.id)
-      log.info(`reveal ${shortId(duel.id)} · ${shortId(res.Transaction.digest)}`)
+      log.info(
+        `reveal ${shortId(duel.id)} · ${shortId(res.Transaction.digest)}`
+      )
     } else {
       const reason = res.Transaction?.status.error?.message ?? "unknown"
       if (reason.includes("16") || reason.includes("EDeckAlreadyRevealed")) {
@@ -307,8 +403,8 @@ export class Keeper {
       await this.tryReveal(duel)
       if (duel.cards.length === 0) return
 
-      // Happy path: both players completed every swipe AND every oracle
-      // in the deck has published `settlement_price`. Partial / stuck
+      // Happy path: both players completed every swipe AND every card's
+      // ExpiryMarket has settled (per the predict indexer). Partial / stuck
       // duels are left to the players' own `refund_duel` — the server
       // can't sign on their behalf.
       const deckSize = duel.cards.length
@@ -316,59 +412,83 @@ export class Keeper {
         duel.p0NextCardIdx === deckSize && duel.p1NextCardIdx === deckSize
       if (!bothDone) return
 
-      const uniqueOracleIds = Array.from(
-        new Set(duel.cards.map((c) => c.oracleId)),
+      const uniqueMarketIds = Array.from(
+        new Set(duel.cards.map((c) => c.expiryMarketId))
       )
-      for (const oid of uniqueOracleIds) {
-        if (!(await readOracleSettled(this.client, oid))) return
+      const settlementByMarket = new Map<string, bigint>()
+      for (const mid of uniqueMarketIds) {
+        const state = await readMarketSettlement(mid)
+        if (!state.settled || state.settlementPrice === null) return
+        settlementByMarket.set(mid, state.settlementPrice)
       }
 
-      let p0Manager: string | null
-      let p1Manager: string | null
+      let p0Wrapper: string | null
+      let p1Wrapper: string | null
       try {
-        p0Manager = await findManagerFor(this.client, duel.creator)
-        p1Manager = await findManagerFor(this.client, duel.challenger)
+        p0Wrapper = await deriveWrapperFor(this.client, duel.creator)
+        p1Wrapper = await deriveWrapperFor(this.client, duel.challenger)
       } catch (e) {
-        // Scan couldn't complete (RPC error) — distinct from "no manager".
+        // Lookup couldn't complete (RPC error) — distinct from "no wrapper".
         // Bail and let the next poll retry rather than mis-settling.
         log.warn(
-          `skip ${shortId(duelId)}: manager lookup failed, will retry: ${e instanceof Error ? e.message : String(e)}`,
+          `skip ${shortId(duelId)}: wrapper lookup failed, will retry: ${e instanceof Error ? e.message : String(e)}`
         )
         return
       }
-      if (!p0Manager || !p1Manager) {
-        log.warn(`skip ${shortId(duelId)}: no predict manager for p0 or p1`)
+      if (!p0Wrapper || !p1Wrapper) {
+        log.warn(`skip ${shortId(duelId)}: no account wrapper for p0 or p1`)
         return
       }
 
-      const expiryByOracle = new Map<string, bigint>()
-      for (const oid of uniqueOracleIds) {
-        const e = await readOracleExpiry(this.client, oid)
-        if (e !== null) expiryByOracle.set(oid, e)
+      // Resolve every keeper-fed value BEFORE building the PTB — 6-24
+      // exposes no public on-chain read for settlement_price or premium, so
+      // both come from the predict indexer.
+      const settlementPrices: bigint[] = []
+      const p0Premiums: bigint[] = []
+      const p1Premiums: bigint[] = []
+      for (let i = 0; i < duel.cards.length; i++) {
+        const card = duel.cards[i]
+        const price = settlementByMarket.get(card.expiryMarketId)
+        if (price === undefined) return // defensive; can't happen post-gate above
+        settlementPrices.push(price)
+        const p0Swipe = duel.p0Swipes[i]
+        const p1Swipe = duel.p1Swipes[i]
+        p0Premiums.push(
+          p0Swipe
+            ? await readOrderPremium(card.expiryMarketId, p0Swipe.orderId)
+            : 0n
+        )
+        p1Premiums.push(
+          p1Swipe
+            ? await readOrderPremium(card.expiryMarketId, p1Swipe.orderId)
+            : 0n
+        )
       }
 
       const tx = new Transaction()
 
       // 1) `settle_card` per card, then `finalize`. Each settle_card scores
-      //    one card against its OWN oracle's `settlement_price` and reads
-      //    each player's LIVE PredictManager position to flag
+      //    both players' swipes on ONE card against the keeper-fed
+      //    settlement_price and reads each player's LIVE AccountWrapper
+      //    position (anti-replay: `predict_account::has_position`) to flag
       //    early-redeemers. All settles MUST run before any redeem in this
       //    PTB — redeeming first would zero the positions and make every
-      //    swipe score as "redeemed early". `finalize` (no oracle arg)
+      //    swipe score as "redeemed early". `finalize` (no market arg)
       //    distributes the pot from the accumulated per-player payout /
       //    premium fields filled by settle_card.
       const settledCount = duel.cards.length
       for (let i = 0; i < settledCount; i++) {
-        const card = duel.cards[i]
         tx.moveCall({
           target: `${this.packageId}::duel::settle_card`,
           typeArguments: [duel.stakeCoinType],
           arguments: [
             tx.object(duelId),
-            tx.object(p0Manager),
-            tx.object(p1Manager),
-            tx.object(card.oracleId),
+            tx.object(p0Wrapper),
+            tx.object(p1Wrapper),
             tx.pure.u64(BigInt(i)),
+            tx.pure.u64(settlementPrices[i]),
+            tx.pure.u64(p0Premiums[i]),
+            tx.pure.u64(p1Premiums[i]),
           ],
         })
       }
@@ -379,37 +499,30 @@ export class Keeper {
       })
 
       // 2) Redeem every recorded position (both players) so their dUSDC
-      //    payout materializes in their PredictManager. Predict positions
-      //    are dUSDC regardless of the Duel<T> stake type. market_key takes
-      //    the oracle as a *pure* ID; redeem takes it as the &OracleSVI
-      //    object — different input kinds, so no dedup conflict.
+      //    payout materializes in their AccountWrapper. `redeem_settled` is
+      //    permissionless (no auth/pricer) but requires a FULL close:
+      //    `close_quantity === redeemed_order.quantity()`.
       let redeemsCount = 0
       for (let i = 0; i < duel.cards.length; i++) {
         const card = duel.cards[i]
-        const expiry = expiryByOracle.get(card.oracleId)
-        if (expiry === undefined) continue
-        for (const [mgr, swipe] of [
-          [p0Manager, duel.p0Swipes[i]] as const,
-          [p1Manager, duel.p1Swipes[i]] as const,
+        for (const [wrapper, swipe] of [
+          [p0Wrapper, duel.p0Swipes[i]] as const,
+          [p1Wrapper, duel.p1Swipes[i]] as const,
         ]) {
           if (!swipe || swipe.quantity <= 0n) continue
-          const mk = tx.moveCall({
-            target: `${env.deepbookPredictPackageId}::market_key::${swipe.isUp ? "up" : "down"}`,
-            arguments: [
-              tx.pure.id(card.oracleId),
-              tx.pure.u64(expiry),
-              tx.pure.u64(card.strike),
-            ],
-          })
           tx.moveCall({
-            target: `${env.deepbookPredictPackageId}::predict::redeem_permissionless`,
+            target: `${env.deepbookPredictPackageId}::expiry_market::redeem_settled`,
             typeArguments: [env.dusdcCoinType],
             arguments: [
-              tx.object(env.deepbookPredictObjectId),
-              tx.object(mgr),
-              tx.object(card.oracleId),
-              mk,
+              tx.object(card.expiryMarketId),
+              tx.object(env.accountRegistryId),
+              tx.object(wrapper),
+              tx.object(env.protocolConfigId),
+              tx.object(env.oracleRegistryId),
+              tx.object(env.pythFeedId),
+              tx.pure.u256(swipe.orderId),
               tx.pure.u64(swipe.quantity),
+              tx.object(env.accumulatorRootId),
               tx.object("0x6"),
             ],
           })
@@ -430,14 +543,15 @@ export class Keeper {
       this.finalized.add(duelId)
       log.info(
         `settle_card×${settledCount} + finalize ${shortId(duelId)}` +
-        (redeemsCount ? ` + ${redeemsCount} redeem(s)` : "") +
-        ` · ${shortId(res.Transaction.digest)}`,
+          (redeemsCount ? ` + ${redeemsCount} redeem(s)` : "") +
+          ` · ${shortId(res.Transaction.digest)}`
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      // Terminal aborts — the duel already finalized, or a player's Predict
-      // position was already redeemed — can never succeed on retry. Mark the
-      // duel done so the keeper stops re-attempting (and stops logging) it.
+      // Terminal aborts — the duel already finalized, or (4-16 legacy) a
+      // player's Predict position was already redeemed — can never succeed
+      // on retry. Mark the duel done so the keeper stops re-attempting (and
+      // stops logging) it.
       if (isTerminalSettleError(msg)) {
         this.finalized.add(duelId)
         return
@@ -463,6 +577,13 @@ export class Keeper {
   }
 
   async start(): Promise<void> {
+    if (env.predictSettlementMode !== "keeper") {
+      log.warn(
+        `predictSettlementMode=${env.predictSettlementMode} not implemented ` +
+          `(needs contract settle_card_onchain) — falling back to keeper mode`
+      )
+    }
+
     const gb = await this.client.core.getBalance({
       owner: this.address,
       coinType: "0x2::sui::SUI",
