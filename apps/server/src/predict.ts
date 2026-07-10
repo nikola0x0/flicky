@@ -52,6 +52,13 @@ async function devInspectReturn(
   const res = await client.core.simulateTransaction({
     transaction: tx,
     include: { commandResults: true },
+    // Plain-devInspect semantics: disable transaction checks. A chained read
+    // like `load_account(wrapper) -> balance<T>(&Account, ...)` returns an
+    // intermediate `&Account` reference that "checks" mode rejects, which
+    // silently drops the later command's return value (readAccountBalance then
+    // sees "no value"). Reads are read-only simulations, so disabling checks
+    // is safe and matches classic devInspect. Single-call reads are unaffected.
+    checksEnabled: false,
   })
   return res.commandResults?.[commandIndex]?.returnValues?.[0]?.bcs
 }
