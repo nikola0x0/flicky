@@ -17,13 +17,14 @@ import {
   fetchOracleSvi,
   resolveCreatedDuelId,
 } from "@/lib/flicky"
-import {
-  DEEPBOOK,
-  buildStakedSwipeTx,
-  quoteSwipePremium,
-} from "@/lib/deepbook"
+import { DEEPBOOK, buildStakedSwipeTx, quoteSwipePremium } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
-import { liveCardPnl, fmtDusdcSigned, fmtPnlPct } from "@/lib/pnl"
+import {
+  liveCardPnl,
+  fmtDusdcSigned,
+  fmtPnlPct,
+  type SwipeLite,
+} from "@/lib/pnl"
 import { SWIPE_WINDOW_MS, swipeWindowRemainingMs } from "@/lib/swipe-window"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
 import { WsErrorBanner } from "@/components/ws-error-banner"
@@ -123,7 +124,7 @@ export interface RoomState {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
-  cards: Array<{ oracle_id: string; strike: string }>
+  cards: Array<{ expiry_market_id: string; strike: string }>
   p0Payout: string
   p0Premium: string
   p1Payout: string
@@ -139,14 +140,30 @@ export interface RoomState {
     upWon: boolean
     p0Pnl: string | null
     p1Pnl: string | null
-    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
   }>
   swipes: Array<{
     cardIdx: number
-    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
   }>
+}
+
+/**
+ * 6-24: swipe wire now carries `orderId` instead of `premium` — the real
+ * premium needs a server-side lookup by `orderId` that isn't wired into
+ * `room_state`/`swipes` yet (see protocol.ts). `pnl.ts`'s helpers still
+ * take a `SwipeLite` with `premium`; shim it to `"0"` so the live mark
+ * still tracks ITM/OTM (quantity vs. 0) until that lookup lands — the
+ * dollar amount is approximate (overstated by the unsubtracted premium).
+ */
+function toSwipeLite(
+  swipe: { isUp: boolean; quantity: string; orderId: string } | null
+): SwipeLite | null {
+  return swipe
+    ? { isUp: swipe.isUp, quantity: swipe.quantity, premium: "0" }
+    : null
 }
 
 export function ActiveDuel({
@@ -169,19 +186,17 @@ export function ActiveDuel({
   const [phase, setPhase] = useState<Phase>(
     resumeDuelId
       ? { kind: "AWAIT_REVEAL", duelId: resumeDuelId }
-      : { kind: "ENTRY", reason: "Setting up the match…" },
+      : { kind: "ENTRY", reason: "Setting up the match…" }
   )
   const [roomState, setRoomState] = useState<RoomState | null>(null)
   // serverNowMs - Date.now() from the latest match_tick. Corrects the local
   // clock so the swipe-window countdown tracks the chain-enforced deadline
   // even when the player's system clock is skewed. 0 until the first tick.
   const [serverClockOffsetMs, setServerClockOffsetMs] = useState(0)
-  // Live oracle prices, keyed by oracle id. Powers mark-to-market PnL.
-  const [ticks, setTicks] = useState<
-    Record<string, { spot: string; forward: string }>
-  >({})
-  // Oracle expiries, keyed by oracle id. Needed to build MarketKey for
-  // swipe quotes and the swipe PTB. Resolved once per unique oracle
+  // Live market prices, keyed by expiry_market_id. Powers mark-to-market PnL.
+  const [ticks, setTicks] = useState<Record<string, { spot: string }>>({})
+  // Market expiries, keyed by expiry_market_id. Needed to build MarketKey
+  // for swipe quotes and the swipe PTB. Resolved once per unique market
   // when the deck arrives.
   const [expiries, setExpiries] = useState<Record<string, bigint>>({})
   // Refs so the WS handler can read latest state without re-subscribing.
@@ -232,13 +247,13 @@ export function ActiveDuel({
     return () => send({ type: "room_unsubscribe", duelId: resumeDuelId })
   }, [resumeDuelId, send])
 
-  // Stream oracle ticks into local state. Used by mark-to-market PnL.
+  // Stream market ticks into local state. Used by mark-to-market PnL.
   useEffect(() => {
     return onMessage((msg) => {
       if (msg.type !== "oracle_tick") return
       setTicks((prev) => ({
         ...prev,
-        [msg.oracleId]: { spot: msg.spot, forward: msg.forward },
+        [msg.expiryMarketId]: { spot: msg.spot },
       }))
     })
   }, [onMessage])
@@ -253,12 +268,13 @@ export function ActiveDuel({
 
   // When the deck arrives, fetch each unique oracle's expiry (needed to
   // build MarketKey for quotes + swipes) and subscribe to ticks.
-  const oraclesReady =
-    roomState?.cards.length === 5 ? roomState.cards : null
+  const oraclesReady = roomState?.cards.length === 5 ? roomState.cards : null
   useEffect(() => {
     if (!oraclesReady) return
     let cancelled = false
-    const unique = Array.from(new Set(oraclesReady.map((c) => c.oracle_id)))
+    const unique = Array.from(
+      new Set(oraclesReady.map((c) => c.expiry_market_id))
+    )
     ;(async () => {
       const next: Record<string, bigint> = {}
       for (const id of unique) {
@@ -271,11 +287,11 @@ export function ActiveDuel({
       }
       if (cancelled) return
       setExpiries((prev) => ({ ...prev, ...next }))
-      send({ type: "oracle_subscribe", oracleIds: unique })
+      send({ type: "oracle_subscribe", marketIds: unique })
     })()
     return () => {
       cancelled = true
-      send({ type: "oracle_unsubscribe", oracleIds: unique })
+      send({ type: "oracle_unsubscribe", marketIds: unique })
     }
   }, [oraclesReady, client, send])
 
@@ -295,7 +311,7 @@ export function ActiveDuel({
         const deckHashBytes = hexToBytes(deckHash)
         if (deckHashBytes.length !== 32) {
           throw new Error(
-            `deck hash must be 32 bytes, got ${deckHashBytes.length}`,
+            `deck hash must be 32 bytes, got ${deckHashBytes.length}`
           )
         }
         const tx = await buildCreateDuelDusdcTx(
@@ -303,7 +319,7 @@ export function ActiveDuel({
           account.address,
           deckHashBytes,
           STAKE_TIERS[tier],
-          DEEPBOOK.dusdcType,
+          DEEPBOOK.dusdcType
         )
         const res = await sign.mutateAsync({ transaction: tx })
         // Sponsored-gas path returns only `{ digest }` — objectChanges
@@ -312,7 +328,7 @@ export function ActiveDuel({
         const duelId = await resolveCreatedDuelId(client, res.digest)
         if (!duelId) {
           throw new Error(
-            "create_duel landed but Duel id not yet indexed — try again",
+            "create_duel landed but Duel id not yet indexed — try again"
           )
         }
         // Hand off to the deep-linkable play route if the matchmaking
@@ -348,7 +364,7 @@ export function ActiveDuel({
           account.address,
           msg.duelId,
           STAKE_TIERS[tier],
-          DEEPBOOK.dusdcType,
+          DEEPBOOK.dusdcType
         )
         await sign.mutateAsync({ transaction: tx })
         if (onDuelReady) {
@@ -443,7 +459,7 @@ export function ActiveDuel({
             setPhase((p) =>
               p.kind === "SWIPING"
                 ? { kind: "SWIPING", duelId: p.duelId, cardIdx: p.cardIdx + 1 }
-                : p,
+                : p
             )
           }
         />
@@ -480,7 +496,9 @@ function SwipeWindowBar({
   return (
     <div
       className={`flex items-center gap-2.5 border-2 px-3 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.5)] ${
-        danger ? "border-rose-500/70 bg-[#3a1717]" : "border-black/60 bg-[#0a0f1f]"
+        danger
+          ? "border-rose-500/70 bg-[#3a1717]"
+          : "border-black/60 bg-[#0a0f1f]"
       } ${urgent ? "countdown-urgent" : ""}`}
     >
       <img
@@ -490,7 +508,7 @@ function SwipeWindowBar({
         className="size-4 shrink-0 [image-rendering:pixelated]"
       />
       <span
-        className={`font-pixel shrink-0 text-base tracking-[0.2em] uppercase tabular-nums ${
+        className={`shrink-0 font-pixel text-base tracking-[0.2em] uppercase tabular-nums ${
           danger ? "text-rose-300" : "text-amber-300"
         }`}
       >
@@ -546,14 +564,14 @@ function PhaseSwiping({
   roomState: RoomState
   managerId: string
   expiries: Record<string, bigint>
-  ticks: Record<string, { spot: string; forward: string }>
+  ticks: Record<string, { spot: string }>
   myAddress: string
   isWindowExpired: boolean
   sign: ReturnType<typeof useFlickySign>
   onSwipeDone: () => void
 }) {
   const card = roomState.cards[cardIdx]
-  const expiry = card ? expiries[card.oracle_id] : undefined
+  const expiry = card ? expiries[card.expiry_market_id] : undefined
   const [quoteUp, setQuoteUp] = useState<{
     premium: bigint
     pImplied: bigint
@@ -603,14 +621,14 @@ function PhaseSwiping({
       try {
         const [up, down] = await Promise.all([
           quoteSwipePremium(client, {
-            oracleSviId: card.oracle_id,
+            oracleSviId: card.expiry_market_id,
             oracleExpiry: expiry,
             strike: BigInt(card.strike),
             isUp: true,
             quantity: SWIPE_QUANTITY,
           }),
           quoteSwipePremium(client, {
-            oracleSviId: card.oracle_id,
+            oracleSviId: card.expiry_market_id,
             oracleExpiry: expiry,
             strike: BigInt(card.strike),
             isUp: false,
@@ -621,14 +639,13 @@ function PhaseSwiping({
         setQuoteUp(up)
         setQuoteDown(down)
       } catch (e) {
-        if (!cancelled)
-          setError(e instanceof Error ? e.message : String(e))
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [card?.oracle_id, card?.strike, expiry, client])
+  }, [card?.expiry_market_id, card?.strike, expiry, client])
 
   const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
   const opponent = myIsP0 ? roomState.challenger : roomState.creator
@@ -652,7 +669,7 @@ function PhaseSwiping({
     )
   }
 
-  const tick = ticks[card.oracle_id]
+  const tick = ticks[card.expiry_market_id]
 
   const doSwipe = async (isUp: boolean) => {
     if (isWindowExpired) return
@@ -661,7 +678,7 @@ function PhaseSwiping({
     try {
       const tx = buildStakedSwipeTx({
         duelId,
-        oracleSviId: card.oracle_id,
+        oracleSviId: card.expiry_market_id,
         managerId,
         oracleExpiry: expiry,
         strike: BigInt(card.strike),
@@ -716,14 +733,17 @@ function PhaseSwiping({
   const cw = cardWidth.current || 320
   const rotate = (drag.x / (cw / 2)) * DRAG_MAX_ROTATE_DEG
   const transform =
-    flyOff ?? (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
+    flyOff ??
+    (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
   const progress = Math.min(1, Math.abs(drag.x) / (cw * DRAG_COMMIT_FRACTION))
   const yesGlow = drag.x > 0 ? progress : 0
   const noGlow = drag.x < 0 ? progress : 0
 
   const yesCost = quoteUp ? fmtDusdcSigned(-quoteUp.premium).trim() : "…"
   const noCost = quoteDown ? fmtDusdcSigned(-quoteDown.premium).trim() : "…"
-  const yesOdds = quoteUp ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(0)}%` : "…"
+  const yesOdds = quoteUp
+    ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(0)}%`
+    : "…"
   const hasNext = cardIdx + 1 < roomState.cards.length
 
   // Live settle countdown — the horizon the player is predicting over.
@@ -772,11 +792,14 @@ function PhaseSwiping({
       </div>
 
       {/* big, centered swipe card — fills the screen; next card peeks behind */}
-      <div className="relative flex-1 select-none" style={{ touchAction: "none" }}>
+      <div
+        className="relative flex-1 select-none"
+        style={{ touchAction: "none" }}
+      >
         {hasNext && (
           <div
             aria-hidden
-            className="pixel-tile no-hover absolute inset-x-4 bottom-3 top-6 bg-[#141d3a] bg-cover bg-center [image-rendering:pixelated]"
+            className="pixel-tile no-hover absolute inset-x-4 top-6 bottom-3 bg-[#141d3a] bg-cover bg-center [image-rendering:pixelated]"
             style={{ backgroundImage: "url(/assets/cards/card-back.png)" }}
           />
         )}
@@ -786,7 +809,7 @@ function PhaseSwiping({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
-          className={`pixel-tile absolute inset-x-1 bottom-4 top-2 flex cursor-grab flex-col gap-2.5 bg-[#2c3c74] p-3 shadow-[inset_0_3px_0_rgba(255,255,255,0.1),inset_0_-4px_0_rgba(0,0,0,0.4)] ${
+          className={`pixel-tile absolute inset-x-1 top-2 bottom-4 flex cursor-grab flex-col gap-2.5 bg-[#2c3c74] p-3 shadow-[inset_0_3px_0_rgba(255,255,255,0.1),inset_0_-4px_0_rgba(0,0,0,0.4)] ${
             drag.active ? "" : "transition-transform duration-300 ease-out"
           } ${drag.flying ? "pointer-events-none" : "active:cursor-grabbing"}`}
           style={{ transform, willChange: "transform" }}
@@ -801,19 +824,19 @@ function PhaseSwiping({
             style={{ opacity: noGlow }}
           />
           {drag.x > 24 && (
-            <div className="font-pixel absolute bottom-56 left-4 z-30 -rotate-6 border-2 border-emerald-400 bg-[#0e1530]/80 px-3 py-1 text-2xl font-black text-emerald-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
+            <div className="absolute bottom-56 left-4 z-30 -rotate-6 border-2 border-emerald-400 bg-[#0e1530]/80 px-3 py-1 font-pixel text-2xl font-black text-emerald-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
               yes
             </div>
           )}
           {drag.x < -24 && (
-            <div className="font-pixel absolute right-4 bottom-56 z-30 rotate-6 border-2 border-rose-400 bg-[#0e1530]/80 px-3 py-1 text-2xl font-black text-rose-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
+            <div className="absolute right-4 bottom-56 z-30 rotate-6 border-2 border-rose-400 bg-[#0e1530]/80 px-3 py-1 font-pixel text-2xl font-black text-rose-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
               no
             </div>
           )}
 
           {/* title banner */}
           <div className="flex items-center justify-between border-2 border-black/55 bg-[#0e1530] px-2.5 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.45)]">
-            <span className="font-pixel flex items-center gap-1.5 text-base tracking-[0.18em] text-amber-300 uppercase">
+            <span className="flex items-center gap-1.5 font-pixel text-base tracking-[0.18em] text-amber-300 uppercase">
               <img
                 src="/assets/cards/asset-btc-16.png"
                 alt=""
@@ -829,16 +852,16 @@ function PhaseSwiping({
 
           {/* art window — pixel mascot reacts to the swipe direction */}
           <div className="crt-screen relative flex flex-1 items-center justify-center overflow-hidden border-2 border-black/55 bg-gradient-to-b from-[#243169] to-[#10183a] shadow-[inset_0_3px_0_rgba(255,255,255,0.05),inset_0_-3px_0_rgba(0,0,0,0.5)]">
-            <span className="absolute left-1 top-1 size-1.5 bg-black/50" />
-            <span className="absolute right-1 top-1 size-1.5 bg-black/50" />
+            <span className="absolute top-1 left-1 size-1.5 bg-black/50" />
+            <span className="absolute top-1 right-1 size-1.5 bg-black/50" />
             <span className="absolute bottom-1 left-1 size-1.5 bg-black/50" />
-            <span className="absolute bottom-1 right-1 size-1.5 bg-black/50" />
+            <span className="absolute right-1 bottom-1 size-1.5 bg-black/50" />
             <img
               src={artSrc}
               alt=""
               aria-hidden
               draggable={false}
-              className="pointer-events-none h-[88%] w-[88%] object-contain select-none [image-rendering:pixelated] [-webkit-user-drag:none]"
+              className="pointer-events-none h-[88%] w-[88%] object-contain select-none [-webkit-user-drag:none] [image-rendering:pixelated]"
               style={{
                 transform: `scale(${1 + progress * 0.18}) rotate(${rotate * 0.4}deg)`,
                 filter: `drop-shadow(0 0 12px ${artGlow})`,
@@ -857,7 +880,7 @@ function PhaseSwiping({
             </p>
             {countdown && (
               <p
-                className={`font-pixel mt-1.5 flex items-center gap-1.5 text-sm tracking-[0.2em] uppercase tabular-nums ${countdownColor}`}
+                className={`mt-1.5 flex items-center gap-1.5 font-pixel text-sm tracking-[0.2em] uppercase tabular-nums ${countdownColor}`}
               >
                 <img
                   src="/icons/clock.png"
@@ -917,7 +940,9 @@ function PhaseSwiping({
                 aria-hidden
                 className="size-4 [image-rendering:pixelated]"
               />
-              <span className="font-pixel text-lg text-rose-300 uppercase">no</span>
+              <span className="font-pixel text-lg text-rose-300 uppercase">
+                no
+              </span>
               <span className="font-pixel text-sm text-rose-200/70 tabular-nums">
                 {noCost}
               </span>
@@ -940,8 +965,10 @@ function PhaseSwiping({
         </div>
       </div>
 
-      {error && <p className="pt-2 text-center text-sm text-red-400">{error}</p>}
-      <p className="font-pixel pt-2 text-center text-[11px] tracking-[0.25em] text-white/40 uppercase">
+      {error && (
+        <p className="pt-2 text-center text-sm text-red-400">{error}</p>
+      )}
+      <p className="pt-2 text-center font-pixel text-[11px] tracking-[0.25em] text-white/40 uppercase">
         {busy ? "minting position…" : "swipe → yes · ← no"}
       </p>
 
@@ -1062,7 +1089,7 @@ function ChartModal({
         {children}
       </div>
     </div>,
-    document.body,
+    document.body
   )
 }
 
@@ -1079,10 +1106,10 @@ function CardLedger({
 }: {
   roomState: RoomState
   myIsP0: boolean
-  ticks: Record<string, { spot: string; forward: string }>
+  ticks: Record<string, { spot: string }>
 }) {
   const settledByIdx = new Map(
-    roomState.cardOutcomes.map((o) => [o.cardIdx, o]),
+    roomState.cardOutcomes.map((o) => [o.cardIdx, o])
   )
   return (
     <div className="rounded border border-white/10 bg-white/5 text-sm">
@@ -1096,7 +1123,11 @@ function CardLedger({
           : null
         // % return on the premium paid for this card. `net` is the signed
         // PnL (null when there's nothing to show) — drives the value color.
-        const premium = mySwipe ? BigInt(mySwipe.premium) : 0n
+        // 6-24: the swipe wire carries `orderId` instead of `premium` (see
+        // `toSwipeLite` above) — premium is shimmed to 0 until a
+        // server-side order-premium lookup lands, so this % is unavailable
+        // pre-settlement.
+        const premium = BigInt(toSwipeLite(mySwipe)?.premium ?? "0")
         let net: bigint | null = null
         let pnlLabel = "—"
         if (settled) {
@@ -1109,9 +1140,9 @@ function CardLedger({
           }
         } else if (mySwipe) {
           const live = liveCardPnl(
-            mySwipe,
+            toSwipeLite(mySwipe),
             card.strike,
-            ticks[card.oracle_id]?.forward,
+            ticks[card.expiry_market_id]?.spot
           )
           if (live !== null) {
             net = live
@@ -1163,7 +1194,7 @@ function SettlingHandoff({ duelId }: { duelId: string }) {
         alt=""
         aria-hidden
         draggable={false}
-        className="size-56 select-none [image-rendering:pixelated] [-webkit-user-drag:none] drop-shadow-[0_0_22px_rgba(74,255,154,0.4)]"
+        className="size-56 drop-shadow-[0_0_22px_rgba(74,255,154,0.4)] select-none [-webkit-user-drag:none] [image-rendering:pixelated]"
       />
       <p className="font-pixel text-base tracking-[0.2em] text-emerald-300 uppercase">
         picks locked in
@@ -1233,10 +1264,7 @@ function nextCardIdx(rs: RoomState, myAddress: string | undefined): number {
   return Math.min(n, 5)
 }
 
-function countMySwipes(
-  rs: RoomState,
-  myAddress: string | undefined,
-): number {
+function countMySwipes(rs: RoomState, myAddress: string | undefined): number {
   if (!myAddress) return 0
   const isP0 = myAddress.toLowerCase() === rs.creator.toLowerCase()
   let n = 0
@@ -1258,4 +1286,3 @@ function hexToBytes(hex: string): Uint8Array {
   }
   return bytes
 }
-

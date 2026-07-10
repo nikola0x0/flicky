@@ -16,17 +16,17 @@ import { Group } from "@visx/group"
 import { scaleLinear } from "@visx/scale"
 import { LinePath } from "@visx/shape"
 import { curveMonotoneX } from "@visx/curve"
-import { markCardPnl } from "@/lib/pnl"
+import { markCardPnl, type SwipeLite } from "@/lib/pnl"
 import { PlayerAvatar } from "@/components/player-avatar"
 
 export interface ChartDuel {
   id: string
   settledCount: number
-  cards: Array<{ oracle_id: string; strike: string }>
+  cards: Array<{ expiry_market_id: string; strike: string }>
   swipes: Array<{
     cardIdx: number
-    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
   }>
   cardOutcomes: Array<{
     cardIdx: number
@@ -37,8 +37,7 @@ export interface ChartDuel {
 
 export interface ChartTick {
   spot: string
-  forward: string
-  /** Oracle expiry (ms). Drives time-decay in the continuous mark. */
+  /** Market expiry (ms). Drives time-decay in the continuous mark. */
   expiryMs?: number
 }
 
@@ -95,13 +94,29 @@ export function StreamingPnlChart({
   )
 }
 
-function totalPremium(duel: ChartDuel, side: "p0" | "p1"): bigint {
-  let total = 0n
-  for (const s of duel.swipes) {
-    const swipe = side === "p0" ? s.p0Swipe : s.p1Swipe
-    if (swipe) total += BigInt(swipe.premium)
-  }
-  return total
+// 6-24: the swipe wire no longer carries `premium` — only `orderId` (the
+// server "looks up premium server-side by orderId", per protocol.ts, but
+// no such lookup is wired into room_state/swipes yet). Until that lands,
+// there's no per-card premium to sum here; ChartCanvas already falls back
+// to a flat "$" y-axis scale when premium is 0.
+function totalPremium(_duel: ChartDuel, _side: "p0" | "p1"): bigint {
+  return 0n
+}
+
+/**
+ * 6-24: swipe wire now carries `orderId` instead of `premium` — the real
+ * premium needs a server-side lookup by `orderId` that isn't wired into
+ * `room_state`/`swipes` yet (see protocol.ts). `pnl.ts`'s helpers still
+ * take a `SwipeLite` with `premium`; shim it to `"0"` so the live mark
+ * still tracks ITM/OTM (quantity vs. 0) until that lookup lands — the
+ * dollar amount is approximate (overstated by the unsubtracted premium).
+ */
+function toSwipeLite(
+  swipe: { isUp: boolean; quantity: string; orderId: string } | null
+): SwipeLite | null {
+  return swipe
+    ? { isUp: swipe.isUp, quantity: swipe.quantity, premium: "0" }
+    : null
 }
 
 /**
@@ -114,7 +129,7 @@ function currentRunningPnl(
   duel: ChartDuel,
   side: "p0" | "p1",
   ticks: Record<string, ChartTick>,
-  nowMs: number,
+  nowMs: number
 ): bigint {
   let running = 0n
   for (const o of duel.cardOutcomes) {
@@ -128,14 +143,14 @@ function currentRunningPnl(
     if (!swipe) continue
     const card = duel.cards[s.cardIdx]
     if (!card) continue
-    const tick = ticks[card.oracle_id]
+    const tick = ticks[card.expiry_market_id]
     if (!tick) continue
     const pnl = markCardPnl(
-      swipe,
+      toSwipeLite(swipe),
       card.strike,
-      tick.forward,
+      tick.spot,
       tick.expiryMs,
-      nowMs,
+      nowMs
     )
     if (pnl !== null) running += pnl
   }
@@ -150,7 +165,7 @@ function currentRunningPnl(
  */
 function useChartHistory(
   duel: ChartDuel,
-  ticks: Record<string, ChartTick>,
+  ticks: Record<string, ChartTick>
 ): { samples: Sample[]; boundaries: Boundary[] } {
   const duelRef = useRef(duel)
   // Latest raw tick values (the target).
@@ -172,7 +187,7 @@ function useChartHistory(
     targetTicksRef.current = ticks
   }, [ticks])
 
-  // RAF loop: linearly interpolate each oracle's forward from its last
+  // RAF loop: linearly interpolate each market's spot from its last
   // value to the latest target across the observed tick cadence. When a
   // new target arrives, re-anchor from the *current* eased value (no
   // jump) and stretch the new ease over however long the previous gap
@@ -185,10 +200,10 @@ function useChartHistory(
       const ease = easeRef.current
       for (const id in target) {
         const t = target[id]
-        const targetF = Number(t.forward)
+        const targetF = Number(t.spot)
         const e = ease[id]
         if (!e) {
-          // First sight of this oracle — snap, seed the anchor.
+          // First sight of this market — snap, seed the anchor.
           ease[id] = { from: targetF, to: targetF, startMs: now, durMs: 1 }
           smoothed[id] = t
           continue
@@ -196,16 +211,18 @@ function useChartHistory(
         if (targetF !== e.to) {
           // New target — re-anchor from the current eased value and ease
           // over the just-observed inter-tick gap.
-          const curF = smoothed[id] ? Number(smoothed[id].forward) : e.to
-          const gap = Math.min(EASE_MAX_MS, Math.max(EASE_MIN_MS, now - e.startMs))
+          const curF = smoothed[id] ? Number(smoothed[id].spot) : e.to
+          const gap = Math.min(
+            EASE_MAX_MS,
+            Math.max(EASE_MIN_MS, now - e.startMs)
+          )
           ease[id] = { from: curF, to: targetF, startMs: now, durMs: gap }
         }
         const a = ease[id]
         const p = a.durMs <= 0 ? 1 : Math.min(1, (now - a.startMs) / a.durMs)
         const f = a.from + (a.to - a.from) * p
         smoothed[id] = {
-          spot: t.spot,
-          forward: BigInt(Math.round(f)).toString(),
+          spot: BigInt(Math.round(f)).toString(),
           expiryMs: t.expiryMs,
         }
       }
@@ -235,7 +252,7 @@ function useChartHistory(
       setHistory((prev) =>
         prev.duelId === duel.id
           ? { ...prev, boundaries: [...prev.boundaries, ...additions] }
-          : { duelId: duel.id, samples: [], boundaries: additions },
+          : { duelId: duel.id, samples: [], boundaries: additions }
       )
     }
   }, [duel])
@@ -311,7 +328,8 @@ function ChartCanvas({
       if (oa > absMax) absMax = oa
       if (s.t > tMax) tMax = s.t
     }
-    const padded = ((absMax > MIN_AMP_MICRO ? absMax : MIN_AMP_MICRO) * 12n) / 10n
+    const padded =
+      ((absMax > MIN_AMP_MICRO ? absMax : MIN_AMP_MICRO) * 12n) / 10n
     const domain: [number, number] = !isFinite(tMax)
       ? [0, 1]
       : [tMax - WINDOW_MS, tMax]
@@ -321,11 +339,11 @@ function ChartCanvas({
 
   const xScale = useMemo(
     () => scaleLinear<number>({ domain: xDomain, range: [0, iw] }),
-    [xDomain, iw],
+    [xDomain, iw]
   )
   const yScale = useMemo(
     () => scaleLinear<number>({ domain: [-ampNum, ampNum], range: [ih, 0] }),
-    [ampNum, ih],
+    [ampNum, ih]
   )
 
   const yZero = yScale(0)
@@ -335,8 +353,14 @@ function ChartCanvas({
   // still renders something sensible.
   const ampPercent =
     youPremium > 0n ? Math.round((ampNum / Number(youPremium)) * 100) : 0
-  const yTopLabel = ampPercent > 0 ? `+${ampPercent}%` : `+${fmtUsd(BigInt(Math.round(ampNum)))}`
-  const yBotLabel = ampPercent > 0 ? `-${ampPercent}%` : `-${fmtUsd(BigInt(Math.round(ampNum)))}`
+  const yTopLabel =
+    ampPercent > 0
+      ? `+${ampPercent}%`
+      : `+${fmtUsd(BigInt(Math.round(ampNum)))}`
+  const yBotLabel =
+    ampPercent > 0
+      ? `-${ampPercent}%`
+      : `-${fmtUsd(BigInt(Math.round(ampNum)))}`
   // Break-even midline — read in the same unit as the top/bottom labels.
   const yZeroLabel = ampPercent > 0 ? "0%" : "$0"
 
@@ -363,22 +387,84 @@ function ChartCanvas({
         role="img"
         aria-label="match PnL over time"
       >
-        <text x={ml - 6} y={mt} fill="#ffffffaa" fontSize="11" textAnchor="end" dominantBaseline="hanging">{yTopLabel}</text>
-        <text x={ml - 6} y={mt + yZero} fill="#ffffffcc" fontSize="11" textAnchor="end" dominantBaseline="middle">{yZeroLabel}</text>
-        <text x={ml - 6} y={H - mb} fill="#ffffffaa" fontSize="11" textAnchor="end" dominantBaseline="auto">{yBotLabel}</text>
+        <text
+          x={ml - 6}
+          y={mt}
+          fill="#ffffffaa"
+          fontSize="11"
+          textAnchor="end"
+          dominantBaseline="hanging"
+        >
+          {yTopLabel}
+        </text>
+        <text
+          x={ml - 6}
+          y={mt + yZero}
+          fill="#ffffffcc"
+          fontSize="11"
+          textAnchor="end"
+          dominantBaseline="middle"
+        >
+          {yZeroLabel}
+        </text>
+        <text
+          x={ml - 6}
+          y={H - mb}
+          fill="#ffffffaa"
+          fontSize="11"
+          textAnchor="end"
+          dominantBaseline="auto"
+        >
+          {yBotLabel}
+        </text>
 
         <Group left={ml} top={mt}>
-          <line x1={0} x2={iw} y1={0} y2={0} stroke="#ffffff20" strokeWidth={1} />
-          <line x1={0} x2={iw} y1={yZero} y2={yZero} stroke="#ffffff35" strokeDasharray="2 2" />
-          <line x1={0} x2={iw} y1={ih} y2={ih} stroke="#ffffff20" strokeWidth={1} />
+          <line
+            x1={0}
+            x2={iw}
+            y1={0}
+            y2={0}
+            stroke="#ffffff20"
+            strokeWidth={1}
+          />
+          <line
+            x1={0}
+            x2={iw}
+            y1={yZero}
+            y2={yZero}
+            stroke="#ffffff35"
+            strokeDasharray="2 2"
+          />
+          <line
+            x1={0}
+            x2={iw}
+            y1={ih}
+            y2={ih}
+            stroke="#ffffff20"
+            strokeWidth={1}
+          />
 
           {boundaries.map((b) => {
             if (b.t < xDomain[0] || b.t > xDomain[1]) return null
             const x = xScale(b.t)
             return (
               <g key={`${b.idx}-${b.t}`} opacity={0.65}>
-                <line x1={x} x2={x} y1={0} y2={ih} stroke="#ffffff40" strokeDasharray="2 2" />
-                <text x={x} y={ih + 12} fill="#ffffff80" fontSize="11" textAnchor="middle" dominantBaseline="hanging">
+                <line
+                  x1={x}
+                  x2={x}
+                  y1={0}
+                  y2={ih}
+                  stroke="#ffffff40"
+                  strokeDasharray="2 2"
+                />
+                <text
+                  x={x}
+                  y={ih + 12}
+                  fill="#ffffff80"
+                  fontSize="11"
+                  textAnchor="middle"
+                  dominantBaseline="hanging"
+                >
                   c{b.idx + 1}
                 </text>
               </g>
@@ -386,19 +472,24 @@ function ChartCanvas({
           })}
 
           {hasData &&
-            (
-              [
-                { ago: 60_000, anchor: "start" as const },
-                { ago: 30_000, anchor: "middle" as const },
-                { ago: 0, anchor: "end" as const },
-              ]
-            ).map(({ ago, anchor }) => {
+            [
+              { ago: 60_000, anchor: "start" as const },
+              { ago: 30_000, anchor: "middle" as const },
+              { ago: 0, anchor: "end" as const },
+            ].map(({ ago, anchor }) => {
               const tx = xDomain[1] - ago
               const x = xScale(tx)
               return (
                 <g key={ago} opacity={0.55}>
                   <line x1={x} x2={x} y1={ih} y2={ih + 3} stroke="#ffffff55" />
-                  <text x={x} y={ih + 18} fill="#ffffff70" fontSize="11" textAnchor={anchor} dominantBaseline="hanging">
+                  <text
+                    x={x}
+                    y={ih + 18}
+                    fill="#ffffff70"
+                    fontSize="11"
+                    textAnchor={anchor}
+                    dominantBaseline="hanging"
+                  >
                     {ago === 0 ? "now" : `-${ago / 1000}s`}
                   </text>
                 </g>
