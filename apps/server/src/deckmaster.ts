@@ -21,12 +21,11 @@
  * On-chain commit-reveal (unchanged from 4-16):
  *   - `commitDeck` returns `{ cards, hash }` where hash = sha2-256 of the
  *     BCS-serialized card vector that flicky::duel::reveal_deck expects.
- *     `Card` on chain is `{ expiry_market_id: ID, strike: u64 }` — kept
- *     here as `DeckCard.oracle_id` (the field predates the 6-24 rename;
- *     the value is now an `ExpiryMarket` id, not an `OracleSVI` id. Full
- *     field rename across server/ws/web is scoped to a later task so the
- *     wire contract — HTTP JSON keys, WS message shapes, on-chain BCS
- *     layout — doesn't shift mid-migration).
+ *     `Card` on chain is `{ expiry_market_id: ID, strike: u64 }` —
+ *     `DeckCard.expiryMarketId` internally (TS camelCase, matching this
+ *     file's other market-id fields); serialized to the wire / BCS /
+ *     Postgres JSON as `expiry_market_id` (Plan 2 Task 6 completed the
+ *     rename across server/ws — see indexer.ts, ws/protocol.ts).
  *   - The plaintext is persisted to the Postgres `deck` table (see db.ts)
  *     so a server restart doesn't strand pending duels. The keeper or the
  *     player's tab calls `reveal_deck` after `join_duel` lands; we just
@@ -44,8 +43,8 @@ const log = makeLogger("deckmaster")
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface DeckCard {
-  /** `ExpiryMarket` id (field name predates the 6-24 rename — see header). */
-  oracle_id: string
+  /** `ExpiryMarket` id — see header for the wire/BCS key naming note. */
+  expiryMarketId: string
   strike: bigint
 }
 
@@ -58,7 +57,7 @@ export interface GeneratedDeck {
 // ─── BCS shape that matches flicky::duel::Card on chain ─────────────────────
 
 const CardBcs = bcs.struct("Card", {
-  oracle_id: bcs.Address,
+  expiry_market_id: bcs.Address,
   strike: bcs.u64(),
 })
 const DeckBcs = bcs.vector(CardBcs)
@@ -99,7 +98,12 @@ export interface MarketSnapshot {
  */
 export function selectMarketRows(
   rows: MarketRow[],
-  opts: { now: number; minHeadroomMs: number; maxHorizonMs: number; count: number },
+  opts: {
+    now: number
+    minHeadroomMs: number
+    maxHorizonMs: number
+    count: number
+  }
 ): MarketSnapshot[] {
   const { now, minHeadroomMs, maxHorizonMs, count } = opts
   const seen = new Set<string>()
@@ -132,7 +136,7 @@ export function selectMarketRows(
 export async function findDeckMarkets(
   count = 5,
   maxHorizonMs = env.deckCardMaxHorizonMs,
-  minHeadroomMs = env.deckCardMinHeadroomMs,
+  minHeadroomMs = env.deckCardMinHeadroomMs
 ): Promise<MarketSnapshot[]> {
   const res = await fetch(`${env.predictIndexerUrl}/markets`)
   if (!res.ok) throw new Error(`predict indexer /markets ${res.status}`)
@@ -153,7 +157,7 @@ export async function findDeckMarkets(
  */
 export async function readBtcSpot(): Promise<bigint> {
   const res = await fetch(
-    `${env.propbookIndexerUrl}/oracles/${env.pythFeedId}/pyth/latest`,
+    `${env.propbookIndexerUrl}/oracles/${env.pythFeedId}/pyth/latest`
   )
   if (!res.ok) throw new Error(`propbook /pyth/latest ${res.status}`)
   const j = (await res.json()) as { normalized_spot: string }
@@ -171,7 +175,7 @@ export async function readBtcSpot(): Promise<bigint> {
 export function snapToAdmissionTick(
   rawStrike: bigint,
   tickSize: bigint,
-  admissionTickSize: bigint,
+  admissionTickSize: bigint
 ): bigint {
   if (tickSize <= 0n) {
     throw new Error("snapToAdmissionTick: tickSize must be > 0")
@@ -268,7 +272,7 @@ export type SignBias = -1 | 1
  */
 export function allocateSignBalance(
   deckSize: number,
-  prgStream: Generator<number, never>,
+  prgStream: Generator<number, never>
 ): SignBias[] {
   if (deckSize <= 0) return []
   const half = Math.floor(deckSize / 2)
@@ -308,7 +312,7 @@ const ZONE_PATTERN: readonly Zone[] = [
 
 export function allocateZones(
   deckSize: number,
-  prgStream: Generator<number, never>,
+  prgStream: Generator<number, never>
 ): Zone[] {
   if (deckSize <= 0) return []
   const base: Record<number, readonly Zone[]> = {
@@ -323,7 +327,7 @@ export function allocateZones(
       ? base[deckSize].slice()
       : Array.from(
           { length: deckSize },
-          (_, i) => ZONE_PATTERN[i % ZONE_PATTERN.length],
+          (_, i) => ZONE_PATTERN[i % ZONE_PATTERN.length]
         )
   return shuffle(zones, prgStream)
 }
@@ -368,7 +372,7 @@ export interface DeckCardOut {
 export function buildDeck(
   markets: MarketSnapshot[],
   spot: bigint,
-  seed: Uint8Array,
+  seed: Uint8Array
 ): DeckCardOut[] {
   if (env.deckStrikeMode === "svi_quote") {
     throw new Error("svi_quote strike mode not implemented yet")
@@ -384,7 +388,7 @@ export function buildDeck(
     const strikeTick = snapToAdmissionTick(
       rawStrike,
       m.tickSize,
-      m.admissionTickSize,
+      m.admissionTickSize
     )
     const isUpFavored = sign < 0
     return {
@@ -404,11 +408,14 @@ export function buildDeck(
  */
 export function commitDeck(cards: DeckCardOut[]): GeneratedDeck {
   const stored: DeckCard[] = cards.map((c) => ({
-    oracle_id: c.expiryMarketId,
+    expiryMarketId: c.expiryMarketId,
     strike: c.strike,
   }))
   const bytes = DeckBcs.serialize(
-    stored.map((c) => ({ oracle_id: c.oracle_id, strike: c.strike.toString() })),
+    stored.map((c) => ({
+      expiry_market_id: c.expiryMarketId,
+      strike: c.strike.toString(),
+    }))
   ).toBytes()
   const hash = new Uint8Array(createHash("sha256").update(bytes).digest())
   return { cards: stored, hash, hashHex: hashToHex(hash) }
@@ -454,7 +461,7 @@ export function resolveDeckBounds(body: {
  */
 export function decideDeckSize(
   liveCount: number,
-  bounds: { min: number; max: number },
+  bounds: { min: number; max: number }
 ): { ok: boolean; deckSize: number } {
   return {
     ok: liveCount >= bounds.min,
@@ -479,19 +486,28 @@ export interface StoreEntry {
 /** Cards serialize to JSON with strikes as decimal strings (u64 > 2^53). */
 function serializeCards(cards: DeckCard[]): string {
   return JSON.stringify(
-    cards.map((c) => ({ oracle_id: c.oracle_id, strike: c.strike.toString() })),
+    cards.map((c) => ({
+      expiry_market_id: c.expiryMarketId,
+      strike: c.strike.toString(),
+    }))
   )
 }
 
 function deserializeCards(json: string): DeckCard[] {
-  const arr = JSON.parse(json) as Array<{ oracle_id: string; strike: string }>
-  return arr.map((c) => ({ oracle_id: c.oracle_id, strike: BigInt(c.strike) }))
+  const arr = JSON.parse(json) as Array<{
+    expiry_market_id: string
+    strike: string
+  }>
+  return arr.map((c) => ({
+    expiryMarketId: c.expiry_market_id,
+    strike: BigInt(c.strike),
+  }))
 }
 
 export async function rememberDeck(
   hash: Uint8Array,
   cards: DeckCard[],
-  seed?: Uint8Array,
+  seed?: Uint8Array
 ): Promise<string> {
   const hex = hashToHex(hash)
   await upsertDeck(hex, serializeCards(cards), seed ? hashToHex(seed) : null)
@@ -499,14 +515,14 @@ export async function rememberDeck(
 }
 
 export async function fetchDeck(
-  hashHex: string,
+  hashHex: string
 ): Promise<DeckCard[] | undefined> {
   const row = await getDeck(hashHex)
   return row ? deserializeCards(row.cardsJson) : undefined
 }
 
 export async function fetchDeckEntry(
-  hashHex: string,
+  hashHex: string
 ): Promise<StoreEntry | undefined> {
   const row = await getDeck(hashHex)
   if (!row) return undefined
@@ -531,22 +547,20 @@ import { clientIp, consume } from "./ratelimit"
 
 export async function handleDeckmasterRequest(
   req: Request,
-  url: URL,
+  url: URL
 ): Promise<Response | null> {
   if (url.pathname === "/deckmaster/generate" && req.method === "POST") {
     const gate = consume("deckmaster:generate", clientIp(req, null))
     if (!gate.ok) {
       return json({ error: "rate limited", retryMs: gate.retryMs }, 429)
     }
-    const body = (await req.json().catch(() => null)) as
-      | {
-          sender?: string
-          tier?: string
-          deckSize?: number
-          minDeckSize?: number
-          maxDeckSize?: number
-        }
-      | null
+    const body = (await req.json().catch(() => null)) as {
+      sender?: string
+      tier?: string
+      deckSize?: number
+      minDeckSize?: number
+      maxDeckSize?: number
+    } | null
     const sender = body?.sender
     const tier = body?.tier
     // Deck size adapts to live market supply within a band (default [3, 5],
@@ -562,7 +576,7 @@ export async function handleDeckmasterRequest(
             error: "not enough live markets",
             detail: `found ${markets.length} live BTC ExpiryMarkets settling within ${env.deckCardMaxHorizonMs / 60_000}min, need ≥${bounds.min}; retry shortly`,
           },
-          503,
+          503
         )
       }
       const chosen = markets.slice(0, decision.deckSize)
@@ -584,7 +598,7 @@ export async function handleDeckmasterRequest(
       await rememberDeck(deck.hash, deck.cards, seed)
       return json({
         cards: outCards.map((c, i) => ({
-          oracle_id: c.expiryMarketId,
+          expiry_market_id: c.expiryMarketId,
           strike: c.strike.toString(),
           expiry: chosen[i].expiry.toString(),
         })),
@@ -594,10 +608,15 @@ export async function handleDeckmasterRequest(
         liveOracleCount: markets.length,
       })
     } catch (e) {
-      log.error(`generate failed: ${e instanceof Error ? e.message : String(e)}`)
+      log.error(
+        `generate failed: ${e instanceof Error ? e.message : String(e)}`
+      )
       return json(
-        { error: "deckmaster failed", detail: e instanceof Error ? e.message : String(e) },
-        500,
+        {
+          error: "deckmaster failed",
+          detail: e instanceof Error ? e.message : String(e),
+        },
+        500
       )
     }
   }
@@ -609,7 +628,7 @@ export async function handleDeckmasterRequest(
     if (!entry) return json({ error: "unknown hash" }, 404)
     return json({
       cards: entry.cards.map((c) => ({
-        oracle_id: c.oracle_id,
+        expiry_market_id: c.expiryMarketId,
         strike: c.strike.toString(),
       })),
       hash: hash.toLowerCase(),

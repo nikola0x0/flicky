@@ -38,7 +38,8 @@ function* testPrgStream(seed: Uint8Array): Generator<number, never> {
   }
 }
 
-const ZERO = "0x0000000000000000000000000000000000000000000000000000000000000000"
+const ZERO =
+  "0x0000000000000000000000000000000000000000000000000000000000000000"
 function addr(suffix: string): string {
   // Pad a short suffix to a full 32-byte Sui address.
   return ZERO.slice(0, 66 - suffix.length) + suffix
@@ -56,24 +57,63 @@ const ADMISSION_TICK_SIZE = 1_000_000_000n
 const SPOT = 60_000_000_000_000n
 
 const FIVE_MARKETS: MarketSnapshot[] = [
-  { expiryMarketId: addr("01"), expiry: 1_000_000, tickSize: TICK_SIZE, admissionTickSize: ADMISSION_TICK_SIZE },
-  { expiryMarketId: addr("02"), expiry: 2_000_000, tickSize: TICK_SIZE, admissionTickSize: ADMISSION_TICK_SIZE },
-  { expiryMarketId: addr("03"), expiry: 3_000_000, tickSize: TICK_SIZE, admissionTickSize: ADMISSION_TICK_SIZE },
-  { expiryMarketId: addr("04"), expiry: 4_000_000, tickSize: TICK_SIZE, admissionTickSize: ADMISSION_TICK_SIZE },
-  { expiryMarketId: addr("05"), expiry: 5_000_000, tickSize: TICK_SIZE, admissionTickSize: ADMISSION_TICK_SIZE },
+  {
+    expiryMarketId: addr("01"),
+    expiry: 1_000_000,
+    tickSize: TICK_SIZE,
+    admissionTickSize: ADMISSION_TICK_SIZE,
+  },
+  {
+    expiryMarketId: addr("02"),
+    expiry: 2_000_000,
+    tickSize: TICK_SIZE,
+    admissionTickSize: ADMISSION_TICK_SIZE,
+  },
+  {
+    expiryMarketId: addr("03"),
+    expiry: 3_000_000,
+    tickSize: TICK_SIZE,
+    admissionTickSize: ADMISSION_TICK_SIZE,
+  },
+  {
+    expiryMarketId: addr("04"),
+    expiry: 4_000_000,
+    tickSize: TICK_SIZE,
+    admissionTickSize: ADMISSION_TICK_SIZE,
+  },
+  {
+    expiryMarketId: addr("05"),
+    expiry: 5_000_000,
+    tickSize: TICK_SIZE,
+    admissionTickSize: ADMISSION_TICK_SIZE,
+  },
 ]
 
 describe("snapToAdmissionTick", () => {
   test("rounds to the nearest admission_tick_size multiple, returned as a tick index", () => {
     // admission grid: …, 1_000_000_000, 2_000_000_000, … (tick=1e7 → 100 ticks/admission-step)
-    expect(snapToAdmissionTick(1_000_000_000n, TICK_SIZE, ADMISSION_TICK_SIZE)).toBe(100n)
-    expect(snapToAdmissionTick(1_499_999_999n, TICK_SIZE, ADMISSION_TICK_SIZE)).toBe(100n)
-    expect(snapToAdmissionTick(1_500_000_000n, TICK_SIZE, ADMISSION_TICK_SIZE)).toBe(200n)
-    expect(snapToAdmissionTick(1_900_000_000n, TICK_SIZE, ADMISSION_TICK_SIZE)).toBe(200n)
+    expect(
+      snapToAdmissionTick(1_000_000_000n, TICK_SIZE, ADMISSION_TICK_SIZE)
+    ).toBe(100n)
+    expect(
+      snapToAdmissionTick(1_499_999_999n, TICK_SIZE, ADMISSION_TICK_SIZE)
+    ).toBe(100n)
+    expect(
+      snapToAdmissionTick(1_500_000_000n, TICK_SIZE, ADMISSION_TICK_SIZE)
+    ).toBe(200n)
+    expect(
+      snapToAdmissionTick(1_900_000_000n, TICK_SIZE, ADMISSION_TICK_SIZE)
+    ).toBe(200n)
   })
 
   test("output satisfies the on-chain admission grid: (tick*tickSize) % admissionTickSize == 0", () => {
-    for (const raw of [0n, 999_999n, 1_000_001n, 63_837_582_739_850n, 999_999_999_999n]) {
+    for (const raw of [
+      0n,
+      999_999n,
+      1_000_001n,
+      63_837_582_739_850n,
+      999_999_999_999n,
+    ]) {
       const tick = snapToAdmissionTick(raw, TICK_SIZE, ADMISSION_TICK_SIZE)
       const strike = tick * TICK_SIZE
       expect(strike % ADMISSION_TICK_SIZE).toBe(0n)
@@ -81,7 +121,9 @@ describe("snapToAdmissionTick", () => {
   })
 
   test("clamps negative raw strikes to zero", () => {
-    expect(snapToAdmissionTick(-1_000_000n, TICK_SIZE, ADMISSION_TICK_SIZE)).toBe(0n)
+    expect(
+      snapToAdmissionTick(-1_000_000n, TICK_SIZE, ADMISSION_TICK_SIZE)
+    ).toBe(0n)
   })
 
   test("admissionTickSize <= 0 falls back to a plain tick index", () => {
@@ -189,12 +231,12 @@ describe("buildDeck", () => {
 })
 
 describe("commitDeck", () => {
-  test("hashes the price-space deck down to {oracle_id, strike} pairs", () => {
+  test("hashes the price-space deck down to {expiryMarketId, strike} pairs", () => {
     const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
     const deck = commitDeck(cards)
     expect(deck.cards).toHaveLength(5)
     for (let i = 0; i < 5; i++) {
-      expect(deck.cards[i].oracle_id).toBe(cards[i].expiryMarketId)
+      expect(deck.cards[i].expiryMarketId).toBe(cards[i].expiryMarketId)
       expect(deck.cards[i].strike).toBe(cards[i].strike)
     }
   })
@@ -219,7 +261,7 @@ describe("commitDeck", () => {
   // computed inline against the same BCS schema duel.move uses.
   test("hash matches sha2-256 of BCS-serialized Card vector", () => {
     const CardBcs = bcs.struct("Card", {
-      oracle_id: bcs.Address,
+      expiry_market_id: bcs.Address,
       strike: bcs.u64(),
     })
     const DeckBcs = bcs.vector(CardBcs)
@@ -227,11 +269,12 @@ describe("commitDeck", () => {
     const deck = commitDeck(outCards)
     const expectedBytes = DeckBcs.serialize(
       deck.cards.map((c) => ({
-        oracle_id: c.oracle_id,
+        expiry_market_id: c.expiryMarketId,
         strike: c.strike.toString(),
-      })),
+      }))
     ).toBytes()
-    const expected = "0x" + createHash("sha256").update(expectedBytes).digest("hex")
+    const expected =
+      "0x" + createHash("sha256").update(expectedBytes).digest("hex")
     expect(deck.hashHex).toBe(expected)
   })
 })
@@ -358,7 +401,7 @@ describe("allocateZones", () => {
     }
     expect(seen.size).toBeGreaterThan(1)
     expect(allocateZones(5, testPrgStream(SEED_A))).toEqual(
-      allocateZones(5, testPrgStream(SEED_A)),
+      allocateZones(5, testPrgStream(SEED_A))
     )
   })
 })
@@ -631,41 +674,44 @@ describe("selectMarketRows (pure market filter/de-dupe/sort/slice)", () => {
 })
 
 // DB-backed: runs only with a TEST_DATABASE_URL (see test-preload.ts).
-describe.skipIf(!HAS_TEST_DB)("rememberDeck + fetchDeck (Postgres store)", () => {
-  beforeEach(async () => {
-    await resetTables()
-  })
+describe.skipIf(!HAS_TEST_DB)(
+  "rememberDeck + fetchDeck (Postgres store)",
+  () => {
+    beforeEach(async () => {
+      await resetTables()
+    })
 
-  afterAll(async () => {
-    await closeDb()
-  })
+    afterAll(async () => {
+      await closeDb()
+    })
 
-  test("round-trips by hash hex", async () => {
-    const deck = commitDeck(buildDeck(FIVE_MARKETS, SPOT, SEED_A))
-    const hex = await rememberDeck(deck.hash, deck.cards)
-    const fetched = await fetchDeck(hex)
-    expect(fetched).toBeDefined()
-    expect(fetched).toHaveLength(5)
-    for (let i = 0; i < 5; i++) {
-      expect(fetched![i].oracle_id).toBe(deck.cards[i].oracle_id)
-      expect(fetched![i].strike).toBe(deck.cards[i].strike)
-    }
-  })
+    test("round-trips by hash hex", async () => {
+      const deck = commitDeck(buildDeck(FIVE_MARKETS, SPOT, SEED_A))
+      const hex = await rememberDeck(deck.hash, deck.cards)
+      const fetched = await fetchDeck(hex)
+      expect(fetched).toBeDefined()
+      expect(fetched).toHaveLength(5)
+      for (let i = 0; i < 5; i++) {
+        expect(fetched![i].expiryMarketId).toBe(deck.cards[i].expiryMarketId)
+        expect(fetched![i].strike).toBe(deck.cards[i].strike)
+      }
+    })
 
-  test("fetchDeck is case-insensitive on hash hex", async () => {
-    const deck = commitDeck(buildDeck(FIVE_MARKETS, SPOT, SEED_A))
-    await rememberDeck(deck.hash, deck.cards)
-    expect(await fetchDeck(deck.hashHex.toUpperCase())).toBeDefined()
-  })
+    test("fetchDeck is case-insensitive on hash hex", async () => {
+      const deck = commitDeck(buildDeck(FIVE_MARKETS, SPOT, SEED_A))
+      await rememberDeck(deck.hash, deck.cards)
+      expect(await fetchDeck(deck.hashHex.toUpperCase())).toBeDefined()
+    })
 
-  test("fetchDeck returns undefined for unknown hash", async () => {
-    expect(await fetchDeck("0x" + "ee".repeat(32))).toBeUndefined()
-  })
+    test("fetchDeck returns undefined for unknown hash", async () => {
+      expect(await fetchDeck("0x" + "ee".repeat(32))).toBeUndefined()
+    })
 
-  test("knownHashCount reflects store after remember", async () => {
-    const before = await knownHashCount()
-    const deck = commitDeck(buildDeck(FIVE_MARKETS, SPOT, SEED_A))
-    await rememberDeck(deck.hash, deck.cards)
-    expect(await knownHashCount()).toBe(before + 1)
-  })
-})
+    test("knownHashCount reflects store after remember", async () => {
+      const before = await knownHashCount()
+      const deck = commitDeck(buildDeck(FIVE_MARKETS, SPOT, SEED_A))
+      await rememberDeck(deck.hash, deck.cards)
+      expect(await knownHashCount()).toBe(before + 1)
+    })
+  }
+)

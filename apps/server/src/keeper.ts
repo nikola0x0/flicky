@@ -222,9 +222,15 @@ interface MarketSettlementState {
  * future-expiry market, a populated object with `settlement_price` +
  * `kind: "market_settled"` for a past-expiry one).
  *
- * THIN LOCAL READER — Task 6 (indexer/ws field renames) is expected to
- * consolidate this into a shared indexer module; kept as one small exported
- * function so that move is a pure relocation.
+ * THIN LOCAL READER — Task 6 (indexer/ws field renames) added a
+ * `market_settlements` Postgres mirror populated by `indexer.ts`'s own
+ * `MarketSettled` tracker (see `readExpiryMarketSettlements` there), but
+ * deliberately left this HTTP-based reader as the keeper's settle-time
+ * source of truth: settle_card's on-chain effects are irreversible, so the
+ * keeper should read the indexer directly rather than trust a mirror that
+ * could lag behind (the mirror is best-effort, used only for the
+ * indexer's own live-PnL preview). Kept as one small exported function so
+ * a future consolidation stays a pure relocation.
  *
  * Fails closed: any fetch/parse error reports `settled: false` so the keeper
  * never mistakes an indexer hiccup for "not settled yet" vs. accidentally
@@ -379,10 +385,8 @@ export class Keeper {
       tx.moveCall({
         target: `${this.packageId}::duel::new_card`,
         // 6-24 `new_card(expiry_market_id: ID, strike: u64)` takes a plain
-        // ID, not an owned/shared object reference. `DeckCard.oracle_id`
-        // holds the `ExpiryMarket` id (field name predates the 6-24 rename —
-        // see deckmaster.ts; not renamed here to stay in this task's scope).
-        arguments: [tx.pure.id(c.oracle_id), tx.pure.u64(c.strike)],
+        // ID, not an owned/shared object reference.
+        arguments: [tx.pure.id(c.expiryMarketId), tx.pure.u64(c.strike)],
       })
     )
     tx.moveCall({

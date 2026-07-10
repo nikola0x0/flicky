@@ -44,16 +44,25 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
   },
 
   async message(ws, message) {
-    const raw = typeof message === "string" ? message : message.toString("utf-8")
+    const raw =
+      typeof message === "string" ? message : message.toString("utf-8")
     const msg = parseClientMsg(raw)
     if (!msg) {
-      send(ws, { type: "error", code: "bad_message", message: "invalid JSON or missing `type`" })
+      send(ws, {
+        type: "error",
+        code: "bad_message",
+        message: "invalid JSON or missing `type`",
+      })
       return
     }
     switch (msg.type) {
       case "hello": {
         if (typeof msg.address !== "string" || !msg.address.startsWith("0x")) {
-          send(ws, { type: "error", code: "bad_address", message: "address must be a 0x… string" })
+          send(ws, {
+            type: "error",
+            code: "bad_address",
+            message: "address must be a 0x… string",
+          })
           return
         }
         registerAddress(ws, msg.address)
@@ -63,7 +72,11 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
       }
       case "queue_join": {
         if (!isValidTier(msg.tier)) {
-          send(ws, { type: "error", code: "bad_tier", message: `unknown tier: ${msg.tier}` })
+          send(ws, {
+            type: "error",
+            code: "bad_tier",
+            message: `unknown tier: ${msg.tier}`,
+          })
           return
         }
         const rlKey = ws.data.address ?? "anon"
@@ -92,7 +105,10 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         }
         // PRD §Matchmaking: PredictManager balance ≥ 5 dUSDC is required
         // before queueing. Check via devInspect (no signing, no gas).
-        const gate = await checkQueueBalanceGate(getSuiClient(), ws.data.address)
+        const gate = await checkQueueBalanceGate(
+          getSuiClient(),
+          ws.data.address
+        )
         if (!gate.ok) {
           if (gate.reason === "no_manager") {
             send(ws, {
@@ -106,7 +122,10 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
               type: "error",
               code: "insufficient_balance",
               message: `PredictManager balance < ${MIN_BALANCE_FOR_QUEUE} (5 dUSDC) — deposit before queueing`,
-              detail: { need: MIN_BALANCE_FOR_QUEUE.toString(), have: gate.balance.toString() },
+              detail: {
+                need: MIN_BALANCE_FOR_QUEUE.toString(),
+                have: gate.balance.toString(),
+              },
             })
           } else {
             send(ws, {
@@ -137,7 +156,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           }
         } catch (e) {
           log.warn(
-            `oracle preflight failed: ${e instanceof Error ? e.message : String(e)}`,
+            `oracle preflight failed: ${e instanceof Error ? e.message : String(e)}`
           )
           send(ws, {
             type: "error",
@@ -170,7 +189,11 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
       }
       case "room_subscribe": {
         if (typeof msg.duelId !== "string" || !msg.duelId.startsWith("0x")) {
-          send(ws, { type: "error", code: "bad_duel_id", message: "duelId must be a 0x… string" })
+          send(ws, {
+            type: "error",
+            code: "bad_duel_id",
+            message: "duelId must be a 0x… string",
+          })
           return
         }
         subscribeRoom(ws, msg.duelId)
@@ -210,11 +233,11 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         return
       }
       case "oracle_subscribe": {
-        subscribeOracles(ws, msg.oracleIds)
+        subscribeOracles(ws, msg.marketIds)
         return
       }
       case "oracle_unsubscribe": {
-        unsubscribeOracles(ws, msg.oracleIds)
+        unsubscribeOracles(ws, msg.marketIds)
         return
       }
       case "ping": {
@@ -222,7 +245,11 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         return
       }
       default: {
-        send(ws, { type: "error", code: "unknown_type", message: `unknown message type` })
+        send(ws, {
+          type: "error",
+          code: "unknown_type",
+          message: `unknown message type`,
+        })
       }
     }
   },

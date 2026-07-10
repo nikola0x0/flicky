@@ -16,7 +16,14 @@
  * call needed because there's no on-chain duel object to mirror).
  */
 import type { ServerWebSocket } from "bun"
-import { buildDeck, commitDeck, deriveSeed, findDeckMarkets, hashToHex, readBtcSpot } from "../deckmaster"
+import {
+  buildDeck,
+  commitDeck,
+  deriveSeed,
+  findDeckMarkets,
+  hashToHex,
+  readBtcSpot,
+} from "../deckmaster"
 import { makeLogger, shortId } from "../log"
 import type { SocketState } from "./matchmaking"
 import { _sendInternal } from "./matchmaking"
@@ -24,7 +31,7 @@ import { _sendInternal } from "./matchmaking"
 const log = makeLogger("practice")
 
 export async function handlePracticeStart(
-  ws: ServerWebSocket<SocketState>,
+  ws: ServerWebSocket<SocketState>
 ): Promise<void> {
   if (!ws.data.address) {
     _sendInternal(ws, {
@@ -55,11 +62,13 @@ export async function handlePracticeStart(
     const cards = buildDeck(markets, spot, seed)
     const botSwipes = Array.from({ length: 5 }, () => Math.random() > 0.5)
     const { hashHex } = commitDeck(cards)
-    log.info(`practice for ${shortId(ws.data.address)} — deck ${shortId(hashHex)}`)
+    log.info(
+      `practice for ${shortId(ws.data.address)} — deck ${shortId(hashHex)}`
+    )
     _sendInternal(ws, {
       type: "practice_session",
       cards: cards.map((c, i) => ({
-        oracle_id: c.expiryMarketId,
+        expiry_market_id: c.expiryMarketId,
         strike: c.strike.toString(),
         expiry: markets[i].expiry.toString(),
       })),

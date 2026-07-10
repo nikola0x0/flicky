@@ -53,7 +53,7 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
   const markets = await findDeckMarkets(5)
   if (markets.length < 5) {
     throw new Error(
-      `not enough live markets (${markets.length}/5) — retry in a few minutes`,
+      `not enough live markets (${markets.length}/5) — retry in a few minutes`
     )
   }
   const spot = await readBtcSpot()
@@ -90,7 +90,7 @@ export interface SocketState {
   queuedAt: number
   /** Duel IDs the socket is subscribed to (for room broadcasts). */
   subscribedDuels: Set<string>
-  /** Oracle IDs the socket is subscribed to (for live tick streaming). */
+  /** ExpiryMarket ids the socket is subscribed to (for live tick streaming). */
   subscribedOracles: Set<string>
 }
 
@@ -128,7 +128,9 @@ function send(ws: AnyWs, msg: ServerMsg): void {
   try {
     ws.send(JSON.stringify(msg))
   } catch (e) {
-    log.warn(`send to ${shortId(ws.data.address ?? "?")} failed: ${e instanceof Error ? e.message : String(e)}`)
+    log.warn(
+      `send to ${shortId(ws.data.address ?? "?")} failed: ${e instanceof Error ? e.message : String(e)}`
+    )
   }
 }
 
@@ -163,14 +165,19 @@ function unregisterAddress(ws: AnyWs): void {
 
 export async function joinQueue(ws: AnyWs, tier: Tier): Promise<void> {
   if (!ws.data.address) {
-    send(ws, { type: "error", code: "no_address", message: "send `hello` with your address first" })
+    send(ws, {
+      type: "error",
+      code: "no_address",
+      message: "send `hello` with your address first",
+    })
     return
   }
   if (tier === "practice") {
     send(ws, {
       type: "error",
       code: "practice_no_queue",
-      message: "use `practice_start` for solo-vs-bot practice; the queue is human-vs-human",
+      message:
+        "use `practice_start` for solo-vs-bot practice; the queue is human-vs-human",
     })
     return
   }
@@ -192,11 +199,15 @@ export async function joinQueue(ws: AnyWs, tier: Tier): Promise<void> {
     : env.mmrInitialRating
   const candidates = q
     .filter((w) => w.data.address && w.data.address !== ws.data.address)
-    .map((w) => ({ ws: w, address: w.data.address!, queuedAtMs: w.data.queuedAt }))
+    .map((w) => ({
+      ws: w,
+      address: w.data.address!,
+      queuedAtMs: w.data.queuedAt,
+    }))
   const pick = await findClosestOpponent(
     myRating,
     ws.data.queuedAt,
-    candidates.map((c) => ({ address: c.address, queuedAtMs: c.queuedAtMs })),
+    candidates.map((c) => ({ address: c.address, queuedAtMs: c.queuedAtMs }))
   )
   if (pick) {
     const opponent = candidates.find((c) => c.address === pick.address)?.ws
@@ -230,14 +241,14 @@ const MATCH_RETRY_MS = 15_000
 async function matchPair(
   creator: AnyWs,
   challenger: AnyWs,
-  tier: Tier,
+  tier: Tier
 ): Promise<void> {
   creator.data.queuedTier = null
   challenger.data.queuedTier = null
   const creatorAddr = creator.data.address
   const challengerAddr = challenger.data.address
   log.info(
-    `match ${tier}: creator=${shortId(creatorAddr ?? "?")} vs challenger=${shortId(challengerAddr ?? "?")}`,
+    `match ${tier}: creator=${shortId(creatorAddr ?? "?")} vs challenger=${shortId(challengerAddr ?? "?")}`
   )
   // Generate the deck server-side BEFORE announcing the match. The
   // creator gets only the hash (commits it in create_duel); the
@@ -251,7 +262,7 @@ async function matchPair(
     })
   } catch (e) {
     log.warn(
-      `deck-gen failed for ${tier} match: ${e instanceof Error ? e.message : String(e)}`,
+      `deck-gen failed for ${tier} match: ${e instanceof Error ? e.message : String(e)}`
     )
     // Don't drop the players — put them back in the queue so they remain
     // searchable, surface a soft error, and schedule a retry. Without
@@ -261,7 +272,11 @@ async function matchPair(
     requeue(creator, tier)
     requeue(challenger, tier)
     send(creator, { type: "error", code: "match_setup_failed", message: msg })
-    send(challenger, { type: "error", code: "match_setup_failed", message: msg })
+    send(challenger, {
+      type: "error",
+      code: "match_setup_failed",
+      message: msg,
+    })
     scheduleRetryPair(creator, challenger, tier)
     return
   }
@@ -303,7 +318,12 @@ function requeue(ws: AnyWs, tier: Tier): void {
     queues.set(tier, q)
   }
   if (!q.includes(ws)) q.push(ws)
-  send(ws, { type: "queue_status", tier, size: q.length, waitMs: Date.now() - ws.data.queuedAt })
+  send(ws, {
+    type: "queue_status",
+    tier,
+    size: q.length,
+    waitMs: Date.now() - ws.data.queuedAt,
+  })
 }
 
 /**
@@ -408,7 +428,7 @@ export function onSocketClose(ws: AnyWs): void {
 function addressStillInRoom(
   duelId: string,
   address: string,
-  exclude: AnyWs,
+  exclude: AnyWs
 ): boolean {
   const bucket = roomSubscribers.get(duelId)
   if (!bucket) return false
