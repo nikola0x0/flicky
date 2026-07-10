@@ -77,8 +77,7 @@ export const env = {
   bsSviFeedId:
     process.env.BTC_BS_SVI_FEED_ID ??
     "0xdc2f8270676bd05fb28491e8d4a41a495722fda7a454926dd66dbba256a21c69",
-  accumulatorRootId:
-    process.env.ACCUMULATOR_ROOT_ID ?? "0xacc",
+  accumulatorRootId: process.env.ACCUMULATOR_ROOT_ID ?? "0xacc",
   predictIndexerUrl:
     process.env.PREDICT_INDEXER_URL ??
     "https://predict-server-beta.testnet.mystenlabs.com",
@@ -115,7 +114,7 @@ export const env = {
   // already falls back to ATM on probe failure so the deck still
   // generates — just with less difficulty variety on tight-TTL cards.
   deckCardMinHeadroomMs: Number(
-    process.env.DECK_CARD_MIN_HEADROOM_MS ?? 10 * 60 * 1000,
+    process.env.DECK_CARD_MIN_HEADROOM_MS ?? 10 * 60 * 1000
   ),
   // Upper expiry bound for deck oracles: the max acceptable time-to-settle
   // for a duel. A card can only settle once its oracle expires, and
@@ -124,7 +123,7 @@ export const env = {
   // cadence oracles (≤1h45m lifetime) plus any other soon-settling oracle,
   // while excluding multi-day oracles.
   deckCardMaxHorizonMs: Number(
-    process.env.DECK_CARD_MAX_HORIZON_MS ?? 3 * 60 * 60 * 1000,
+    process.env.DECK_CARD_MAX_HORIZON_MS ?? 3 * 60 * 60 * 1000
   ),
   // Deckmaster quote band: a card's implied probability (its UP ask from
   // `predict::get_trade_amounts`) must stay inside [min, max]. Keeps decks
@@ -143,9 +142,21 @@ export const env = {
   // at a modest max_connections; 10 leaves headroom for psql / migrations.
   dbPoolMax: Number(process.env.DB_POOL_MAX ?? 10),
 
-  // Sponsored gas (Enoki).
+  // Sponsored gas (Enoki, primary). Falls back to self-sponsor below when
+  // Enoki is unconfigured or its call fails.
   enokiPrivateKey: process.env.ENOKI_PRIVATE_KEY,
   allowedOrigin: process.env.ALLOWED_ORIGIN, // unset/"" → *
+
+  // Self-sponsor fallback for /sponsor: when Enoki is unconfigured or a
+  // `createSponsoredTransaction`/`executeSponsoredTransaction` call throws,
+  // the server pays gas itself from this address's SUI balance instead of
+  // failing the request. Defaults to the keeper/bot key so a deploy that
+  // already funds the keeper wallet gets the fallback for free; set
+  // SPONSOR_SECRET_KEY explicitly to use a dedicated sponsor wallet.
+  sponsorSecretKey:
+    process.env.SPONSOR_SECRET_KEY ??
+    process.env.KEEPER_SECRET_KEY ??
+    process.env.BOT_SECRET_KEY,
 
   // Matchmaking: sync-only PvP. No bot-fill — Practice Mode covers
   // solo-vs-bot through a separate WS message.
@@ -158,7 +169,9 @@ export const env = {
   // Chat (global room).
   chatHistoryLimit: Number(process.env.CHAT_HISTORY_LIMIT ?? 50),
   chatRetainCount: Number(process.env.CHAT_RETAIN_COUNT ?? 1000),
-  chatPruneIntervalMs: Number(process.env.CHAT_PRUNE_INTERVAL_MS ?? 60 * 60 * 1000),
+  chatPruneIntervalMs: Number(
+    process.env.CHAT_PRUNE_INTERVAL_MS ?? 60 * 60 * 1000
+  ),
 
   // Match clock + live oracle tick streaming.
   matchTickIntervalMs: Number(process.env.MATCH_TICK_INTERVAL_MS ?? 1_000),
@@ -168,7 +181,9 @@ export const env = {
   mmrInitialRating: Number(process.env.MMR_INITIAL_RATING ?? 1000),
   mmrKFactor: Number(process.env.MMR_K_FACTOR ?? 32),
   mmrMatchWindowInitial: Number(process.env.MMR_MATCH_WINDOW_INITIAL ?? 200),
-  mmrMatchWindowExpandPerSec: Number(process.env.MMR_MATCH_WINDOW_EXPAND_PER_SEC ?? 20),
+  mmrMatchWindowExpandPerSec: Number(
+    process.env.MMR_MATCH_WINDOW_EXPAND_PER_SEC ?? 20
+  ),
 
   // Keeper (background settle/redeem/finalize).
   keeperSecretKey: process.env.KEEPER_SECRET_KEY ?? process.env.BOT_SECRET_KEY,
