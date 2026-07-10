@@ -131,6 +131,12 @@ export async function executeSponsored(
   signer: SignerLike,
 ): Promise<{ digest: string }> {
   const sender = signer.toSuiAddress()
+  // Sender-relative build intents (notably `coinWithBalance`, used by the
+  // deposit/swipe PTBs to source the player's dUSDC) resolve against the
+  // sender's owned coins at build time, so the sender MUST be set before
+  // building — even though the transaction-kind bytes exclude it (the
+  // sponsor sets sender + gas on the full tx server-side).
+  tx.setSender(sender)
   const kindBytes = await tx.build({ client, onlyTransactionKind: true })
 
   const createRes = await postSponsorWithRetry({
