@@ -16,8 +16,10 @@ import {
   POS_INF_TICK,
   rememberDeck,
   resolveDeckBounds,
+  selectMarketRows,
   snapToAdmissionTick,
   type DeckCardOut,
+  type MarketRow,
   type MarketSnapshot,
   type Zone,
 } from "./deckmaster"
@@ -413,6 +415,218 @@ describe("decideDeckSize (greedy 3–5)", () => {
 
   test("more live than max → capped at max", () => {
     expect(decideDeckSize(9, band)).toEqual({ ok: true, deckSize: 5 })
+  })
+})
+
+describe("selectMarketRows (pure market filter/de-dupe/sort/slice)", () => {
+  const now = 1_000_000
+  const minHeadroomMs = 100_000
+  const maxHorizonMs = 1_000_000
+  const opts = { now, minHeadroomMs, maxHorizonMs, count: 5 }
+
+  test("excludes markets past maxHorizonMs", () => {
+    const rows: MarketRow[] = [
+      {
+        expiry_market_id: addr("01"),
+        propbook_underlying_id: 1,
+        expiry: now + maxHorizonMs + 1,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+      {
+        expiry_market_id: addr("02"),
+        propbook_underlying_id: 1,
+        expiry: now + maxHorizonMs,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+    ]
+    const result = selectMarketRows(rows, opts)
+    expect(result).toHaveLength(1)
+    expect(result[0].expiryMarketId).toBe(addr("02"))
+  })
+
+  test("excludes markets inside minHeadroomMs (expiry <= now + minHeadroomMs)", () => {
+    const rows: MarketRow[] = [
+      {
+        expiry_market_id: addr("01"),
+        propbook_underlying_id: 1,
+        expiry: now + minHeadroomMs,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+      {
+        expiry_market_id: addr("02"),
+        propbook_underlying_id: 1,
+        expiry: now + minHeadroomMs + 1,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+    ]
+    const result = selectMarketRows(rows, opts)
+    expect(result).toHaveLength(1)
+    expect(result[0].expiryMarketId).toBe(addr("02"))
+  })
+
+  test("excludes propbook_underlying_id !== 1", () => {
+    const rows: MarketRow[] = [
+      {
+        expiry_market_id: addr("01"),
+        propbook_underlying_id: 2,
+        expiry: now + 500_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+      {
+        expiry_market_id: addr("02"),
+        propbook_underlying_id: 1,
+        expiry: now + 500_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+    ]
+    const result = selectMarketRows(rows, opts)
+    expect(result).toHaveLength(1)
+    expect(result[0].expiryMarketId).toBe(addr("02"))
+  })
+
+  test("excludes kind !== market_created", () => {
+    const rows: MarketRow[] = [
+      {
+        expiry_market_id: addr("01"),
+        propbook_underlying_id: 1,
+        expiry: now + 500_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "something_else",
+      },
+      {
+        expiry_market_id: addr("02"),
+        propbook_underlying_id: 1,
+        expiry: now + 500_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+    ]
+    const result = selectMarketRows(rows, opts)
+    expect(result).toHaveLength(1)
+    expect(result[0].expiryMarketId).toBe(addr("02"))
+  })
+
+  test("de-dupes by normalized expiry_market_id (keeps first)", () => {
+    const rows: MarketRow[] = [
+      {
+        expiry_market_id: addr("01"),
+        propbook_underlying_id: 1,
+        expiry: now + 200_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+      {
+        expiry_market_id: addr("01"), // Same as first (after normalization)
+        propbook_underlying_id: 1,
+        expiry: now + 300_000, // Different expiry
+        tick_size: "2",
+        admission_tick_size: "2",
+        kind: "market_created",
+      },
+    ]
+    const result = selectMarketRows(rows, opts)
+    expect(result).toHaveLength(1)
+    expect(result[0].expiry).toBe(now + 200_000)
+    expect(result[0].tickSize).toBe(1n)
+  })
+
+  test("sorts by expiry ascending (soonest-first)", () => {
+    const rows: MarketRow[] = [
+      {
+        expiry_market_id: addr("01"),
+        propbook_underlying_id: 1,
+        expiry: now + 800_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+      {
+        expiry_market_id: addr("02"),
+        propbook_underlying_id: 1,
+        expiry: now + 200_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+      {
+        expiry_market_id: addr("03"),
+        propbook_underlying_id: 1,
+        expiry: now + 500_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+    ]
+    const result = selectMarketRows(rows, opts)
+    expect(result).toHaveLength(3)
+    expect(result[0].expiry).toBe(now + 200_000)
+    expect(result[1].expiry).toBe(now + 500_000)
+    expect(result[2].expiry).toBe(now + 800_000)
+  })
+
+  test("caps result at count", () => {
+    const rows: MarketRow[] = [
+      {
+        expiry_market_id: addr("01"),
+        propbook_underlying_id: 1,
+        expiry: now + 200_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+      {
+        expiry_market_id: addr("02"),
+        propbook_underlying_id: 1,
+        expiry: now + 300_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+      {
+        expiry_market_id: addr("03"),
+        propbook_underlying_id: 1,
+        expiry: now + 400_000,
+        tick_size: "1",
+        admission_tick_size: "1",
+        kind: "market_created",
+      },
+    ]
+    const result = selectMarketRows(rows, { ...opts, count: 2 })
+    expect(result).toHaveLength(2)
+    expect(result[0].expiryMarketId).toBe(addr("01"))
+    expect(result[1].expiryMarketId).toBe(addr("02"))
+  })
+
+  test("converts tick_size and admission_tick_size to BigInt", () => {
+    const rows: MarketRow[] = [
+      {
+        expiry_market_id: addr("01"),
+        propbook_underlying_id: 1,
+        expiry: now + 500_000,
+        tick_size: "10000000",
+        admission_tick_size: "1000000000",
+        kind: "market_created",
+      },
+    ]
+    const result = selectMarketRows(rows, opts)
+    expect(result).toHaveLength(1)
+    expect(result[0].tickSize).toBe(10_000_000n)
+    expect(result[0].admissionTickSize).toBe(1_000_000_000n)
   })
 })
 

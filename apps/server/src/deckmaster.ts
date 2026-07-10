@@ -91,21 +91,17 @@ export interface MarketSnapshot {
 }
 
 /**
- * Fetch the `count` nearest live BTC `ExpiryMarket`s from the predict
- * indexer, i.e. those whose expiry clears `now + minHeadroomMs` but falls
- * within `now + maxHorizonMs`. Sorted soonest-first. De-dupes by
- * `expiry_market_id` (the indexer can return more than one `market_created`
- * row per market on event re-emit — keeps the first).
+ * Pure filter/de-dupe/sort/slice logic for selecting live markets from
+ * indexer rows. Keeps rows where `propbook_underlying_id === 1 &&
+ * kind === "market_created"`, de-dupes by normalized `expiry_market_id`
+ * (keeps first), keeps `expiry > now + minHeadroomMs && expiry ≤ now + maxHorizonMs`,
+ * sorts by `expiry` ascending, slices to `count`, and maps to `MarketSnapshot`.
  */
-export async function findDeckMarkets(
-  count = 5,
-  maxHorizonMs = env.deckCardMaxHorizonMs,
-  minHeadroomMs = env.deckCardMinHeadroomMs,
-): Promise<MarketSnapshot[]> {
-  const res = await fetch(`${env.predictIndexerUrl}/markets`)
-  if (!res.ok) throw new Error(`predict indexer /markets ${res.status}`)
-  const rows = (await res.json()) as MarketRow[]
-  const now = Date.now()
+export function selectMarketRows(
+  rows: MarketRow[],
+  opts: { now: number; minHeadroomMs: number; maxHorizonMs: number; count: number },
+): MarketSnapshot[] {
+  const { now, minHeadroomMs, maxHorizonMs, count } = opts
   const seen = new Set<string>()
   const out: MarketSnapshot[] = []
   for (const r of rows) {
@@ -124,6 +120,29 @@ export async function findDeckMarkets(
   }
   out.sort((a, b) => a.expiry - b.expiry)
   return out.slice(0, count)
+}
+
+/**
+ * Fetch the `count` nearest live BTC `ExpiryMarket`s from the predict
+ * indexer, i.e. those whose expiry clears `now + minHeadroomMs` but falls
+ * within `now + maxHorizonMs`. Sorted soonest-first. De-dupes by
+ * `expiry_market_id` (the indexer can return more than one `market_created`
+ * row per market on event re-emit — keeps the first).
+ */
+export async function findDeckMarkets(
+  count = 5,
+  maxHorizonMs = env.deckCardMaxHorizonMs,
+  minHeadroomMs = env.deckCardMinHeadroomMs,
+): Promise<MarketSnapshot[]> {
+  const res = await fetch(`${env.predictIndexerUrl}/markets`)
+  if (!res.ok) throw new Error(`predict indexer /markets ${res.status}`)
+  const rows = (await res.json()) as MarketRow[]
+  return selectMarketRows(rows, {
+    now: Date.now(),
+    minHeadroomMs,
+    maxHorizonMs,
+    count,
+  })
 }
 
 /**
