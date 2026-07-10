@@ -1,4 +1,4 @@
-# Auto-deploy the `staging` branch to Railway.
+# Auto-deploy the `main` branch to Railway.
 #
 # Why CI instead of Railway's native GitHub integration: connecting a repo in
 # Railway needs the Railway GitHub App installed on `nikola0x0/flicky`, which
@@ -10,11 +10,11 @@
 # apps/server/Dockerfile, apps/web/Dockerfile). `railway up` just uploads the
 # repo (root `.railwayignore` keeps node_modules/.env out); the build happens
 # on Railway's builders, so CI needs only the Railway CLI.
-name: Deploy staging → Railway
+name: Deploy main → Railway
 
 on:
   push:
-    branches: [staging]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -27,7 +27,7 @@ jobs:
     # Per-service group so server + web deploy in parallel, but a newer push
     # supersedes an in-flight deploy of the same service.
     concurrency:
-      group: railway-staging-${{ matrix.service }}
+      group: railway-main-${{ matrix.service }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v5
