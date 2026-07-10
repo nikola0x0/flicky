@@ -51,30 +51,68 @@ import {
   buildJoinDuelDusdcTx,
   buildJoinDuelTx,
   buildRevealDeckTx,
-  buildFinalizeTx,
   buildSwipeTx,
   computeDeckHash,
   fetchDuel,
-  fetchOracleSvi,
-  findLatestOracleSvi,
   listDuelIds,
   oracleStrikes,
   resolveCreatedDuelId,
   type DeckCard,
   type DuelState,
-  type OracleSviInfo,
 } from "@/lib/flicky"
 import {
   DEEPBOOK,
-  buildCreateManagerTx,
+  buildCreateAccountTx,
   buildDepositDusdcTx,
   buildStakedSwipeTx,
-  waitForCreatedManagerId,
-  findPredictManager,
-  getManagerDusdcBalance,
+  fetchAccountState,
+  fetchMarketTickSize,
   getWalletDusdcBalance,
-  writeManagerCache,
+  waitForCreatedWrapper,
 } from "@/lib/deepbook"
+
+/**
+ * `ExpiryMarket` view shape returned by the flicky server's
+ * `GET /oracle/list` (mirrors `apps/server/src/oracle.ts::ExpiryMarketView`,
+ * with numeric fields parsed to bigint). Replaces the pre-6-24
+ * `OracleSVI`/`fetchOracleSvi` client-side discovery — the client reads the
+ * server's indexer-backed view instead of scanning chain state itself.
+ */
+interface OracleView {
+  id: string
+  expiry: bigint
+  spot: bigint
+  forward: bigint
+  isActive: boolean
+  /** 6-24's `/oracle/list` only returns live (unsettled) markets, so this
+   *  is always null in practice — kept for shape-compatibility with the
+   *  settled-price display below. */
+  settlementPrice: bigint | null
+}
+
+/** Nearest-expiry live BTC markets from the flicky server's oracle index. */
+async function fetchOracleList(): Promise<OracleView[]> {
+  const res = await fetch(`${CONFIG.serverHttpUrl}/oracle/list?asset=BTC`)
+  if (!res.ok) throw new Error(`oracle/list HTTP ${res.status}`)
+  const body = (await res.json()) as {
+    markets: Array<{
+      id: string
+      expiry: string
+      spot: string
+      forward: string
+      active: boolean
+      settled: boolean
+    }>
+  }
+  return body.markets.map((m) => ({
+    id: m.id,
+    expiry: BigInt(m.expiry),
+    spot: BigInt(m.spot),
+    forward: BigInt(m.forward),
+    isActive: m.active,
+    settlementPrice: null,
+  }))
+}
 
 // Deckmaster HTTP endpoint. Defaults to the local server during dev.
 const DECKMASTER_BASE_URL =
@@ -488,7 +526,7 @@ async function requestDeck(
       liveOracleCount?: number
     }
     const cards: DeckCard[] = body.cards.map((c) => ({
-      oracleId: c.expiry_market_id,
+      expiryMarketId: c.expiry_market_id,
       strike: BigInt(c.strike),
     }))
     const hashHex = body.hash.replace(/^0x/, "")
@@ -501,7 +539,7 @@ async function requestDeck(
     // reveal must run from this tab via buildRevealDeckTx (not implemented
     // in the lobby UI — Phase 3.5).
     const cards: DeckCard[] = oracleStrikes(reference).map((strike) => ({
-      oracleId,
+      expiryMarketId: oracleId,
       strike,
     }))
     const hash = await computeDeckHash(cards)
@@ -595,19 +633,17 @@ function Footer() {
 // ─── oracle strip (always visible) ──────────────────────────────────────────
 
 function useOracle() {
-  const client = useCurrentClient()
-  const oracleIdQuery = useQuery({
-    queryKey: ["oracle-id"],
-    queryFn: () => findLatestOracleSvi(client),
-    staleTime: 60_000,
-  })
-  const oracleQuery = useQuery({
-    queryKey: ["oracle", oracleIdQuery.data],
-    queryFn: () => fetchOracleSvi(client, oracleIdQuery.data!),
-    enabled: !!oracleIdQuery.data,
+  // Server-driven market discovery (6-24 has no client-readable OracleSVI
+  // equivalent) — reads the flicky server's indexer-backed `/oracle/list`,
+  // nearest-expiry-first, and just takes the first live BTC market.
+  const marketsQuery = useQuery({
+    queryKey: ["oracle-markets"],
+    queryFn: fetchOracleList,
+    staleTime: 5_000,
     refetchInterval: 5_000,
   })
-  return { oracleId: oracleIdQuery.data, oracle: oracleQuery.data }
+  const oracle = marketsQuery.data?.[0]
+  return { oracleId: oracle?.id, oracle }
 }
 
 function OracleStrip() {
@@ -655,7 +691,7 @@ function OracleStrip() {
   )
 }
 
-function expiresIn(o: OracleSviInfo, now: number): string {
+function expiresIn(o: OracleView, now: number): string {
   const ms = Number(o.expiry) - now
   if (ms <= 0) return "expired"
   const min = Math.floor(ms / 60_000)
@@ -686,8 +722,8 @@ function Lobby({
     refetchInterval: 6_000,
   })
 
-  // Probe the player's dUSDC wallet balance + PredictManager state up
-  // front, regardless of which tier is currently selected. The Predict
+  // Probe the player's dUSDC wallet balance + Predict AccountWrapper state
+  // up front, regardless of which tier is currently selected. The Predict
   // setup checklist is surfaced as a persistent panel in the Lobby so
   // the player can fund ahead of switching to Staked — discovery should
   // not be gated behind a tier toggle.
@@ -696,22 +732,13 @@ function Lobby({
     queryFn: () => getWalletDusdcBalance(client, address),
     refetchInterval: 8_000,
   })
-  const managerQuery = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
-    refetchInterval: 12_000,
-  })
-  const managerBalanceQuery = useQuery({
-    queryKey: ["predict-manager-balance", managerQuery.data?.id],
-    queryFn: () =>
-      managerQuery.data
-        ? getManagerDusdcBalance(client, managerQuery.data.id)
-        : Promise.resolve(0n),
-    enabled: !!managerQuery.data,
+  const accountQuery = useQuery({
+    queryKey: ["predict-account", address],
+    queryFn: () => fetchAccountState(address),
     refetchInterval: 10_000,
   })
   const stakedReady =
-    !!managerQuery.data && (managerBalanceQuery.data ?? 0n) > 0n
+    !!accountQuery.data?.wrapperId && (accountQuery.data?.balance ?? 0n) > 0n
 
   async function createDuel(stake: StakeTier) {
     if (!oracleId || !oracle) return
@@ -877,9 +904,9 @@ const DEFAULT_DEPOSIT_DUSDC = 1n
 
 /**
  * Staked-tier onboarding checklist. Surfaces the two prerequisites for
- * real `predict::mint` swipes:
- *   ① PredictManager exists (one-time `predict::create_manager`)
- *   ② Manager holds enough dUSDC to mint positions
+ * real minted swipes:
+ *   ① Predict AccountWrapper exists (one-time `account_registry::new`)
+ *   ② Account holds enough dUSDC to mint positions
  *
  * Both steps emit transactions through the sponsor-or-fallback path so
  * players who only hold dUSDC can still onboard without SUI for gas.
@@ -911,18 +938,9 @@ function DepositPanel({
     return () => clearTimeout(t)
   }, [toast])
 
-  const managerQuery = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
-    refetchInterval: 12_000,
-  })
-  const managerBalanceQuery = useQuery({
-    queryKey: ["predict-manager-balance", managerQuery.data?.id],
-    queryFn: () =>
-      managerQuery.data
-        ? getManagerDusdcBalance(client, managerQuery.data.id)
-        : Promise.resolve(0n),
-    enabled: !!managerQuery.data,
+  const accountQuery = useQuery({
+    queryKey: ["predict-account", address],
+    queryFn: () => fetchAccountState(address),
     refetchInterval: 10_000,
   })
 
@@ -936,37 +954,25 @@ function DepositPanel({
     }
   }
 
-  async function createManager() {
+  async function createAccount() {
     setBusy("create")
     setErr(null)
     setToast(null)
     try {
-      const res = await signAndExec({ transaction: buildCreateManagerTx() })
-      // Wait for indexing + read the tx's created objects so we can
-      // pre-populate the query cache with the new manager id instead of
-      // waiting for the next 12s refetch tick. UI updates within ~1s of
-      // tx finality.
-      const newManagerId = await waitForCreatedManagerId(client, res.digest)
-      if (newManagerId) {
-        // Persist to localStorage so F5 / next session doesn't pay the
-        // event-scan cost and so the UI shows the manager id immediately
-        // before any RPC roundtrip completes.
-        writeManagerCache(address, newManagerId)
-        queryClient.setQueryData(["predict-manager", address], {
-          id: newManagerId,
-        })
-      } else {
-        // Fallback if the digest's objectChanges didn't surface — refetch
-        // forces an immediate event-scan rather than waiting for the
-        // polling interval.
-        await queryClient.refetchQueries({
-          queryKey: ["predict-manager", address],
-        })
-      }
+      const res = await signAndExec({ transaction: buildCreateAccountTx() })
+      // The wrapper address is deterministic but needs the tx to land
+      // before the server can resolve it — wait, then pre-populate the
+      // query cache so the UI updates within ~1s of tx finality instead
+      // of waiting for the next 10s refetch tick.
+      const wrapperId = await waitForCreatedWrapper(client, res.digest, address)
+      queryClient.setQueryData(["predict-account", address], {
+        wrapperId,
+        balance: 0n,
+      })
       setToast({
         kind: "create",
         digest: res.digest,
-        label: "PredictManager created",
+        label: "Predict account created",
       })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -976,7 +982,7 @@ function DepositPanel({
   }
 
   async function deposit() {
-    if (!managerQuery.data) return
+    if (!accountQuery.data?.wrapperId) return
     const dec = Number(depositAmount)
     if (!Number.isFinite(dec) || dec <= 0) {
       setErr("enter a positive dUSDC amount")
@@ -991,18 +997,13 @@ function DepositPanel({
     setErr(null)
     setToast(null)
     try {
-      const tx = await buildDepositDusdcTx(
-        client,
-        address,
-        managerQuery.data.id,
-        micro
-      )
+      const tx = buildDepositDusdcTx(accountQuery.data.wrapperId, micro)
       const res = await signAndExec({ transaction: tx })
       await client.core.waitForTransaction({ digest: res.digest })
       // Force immediate refetch instead of waiting for the polling tick.
       await Promise.all([
         queryClient.refetchQueries({
-          queryKey: ["predict-manager-balance", managerQuery.data.id],
+          queryKey: ["predict-account", address],
         }),
         queryClient.refetchQueries({
           queryKey: ["dusdc-balance", address],
@@ -1020,48 +1021,48 @@ function DepositPanel({
     }
   }
 
-  const hasManager = !!managerQuery.data
-  const managerBalance = managerBalanceQuery.data ?? 0n
-  const hasManagerBalance = managerBalance > 0n
+  const hasAccount = !!accountQuery.data?.wrapperId
+  const accountBalance = accountQuery.data?.balance ?? 0n
+  const hasAccountBalance = accountBalance > 0n
 
   return (
     <div className="space-y-3 rounded-md border border-dashed border-muted/60 bg-muted/20 p-3 text-sm">
       <div className="flex items-center justify-between">
         <span className="tracking-wide text-muted-foreground uppercase">
-          {hasManager ? "Predict wallet" : "Predict setup"}
+          {hasAccount ? "Predict wallet" : "Predict setup"}
         </span>
         <span className="text-xs text-muted-foreground">
-          {hasManager ? "ready for Staked duels" : "two one-time steps"}
+          {hasAccount ? "ready for Staked duels" : "two one-time steps"}
         </span>
       </div>
 
-      {/* ─── Step ① PredictManager ─── */}
+      {/* ─── Step ① Predict AccountWrapper ─── */}
       <ChecklistRow
-        done={hasManager}
+        done={hasAccount}
         index={1}
-        title="PredictManager"
+        title="Predict account"
         detail={
-          hasManager ? (
+          hasAccount ? (
             <a
-              href={objectUrl(managerQuery.data!.id)}
+              href={objectUrl(accountQuery.data!.wrapperId!)}
               target="_blank"
               rel="noreferrer"
               className="font-mono underline-offset-2 hover:underline"
-              title={managerQuery.data!.id}
+              title={accountQuery.data!.wrapperId!}
             >
-              {shortId(managerQuery.data!.id)} ↗
+              {shortId(accountQuery.data!.wrapperId!)} ↗
             </a>
           ) : (
-            "one-time `predict::create_manager` — gasless via sponsor"
+            "one-time `account_registry::new` — gasless via sponsor"
           )
         }
         action={
-          !hasManager && (
+          !hasAccount && (
             <Button
               size="sm"
               variant="default"
               disabled={busy !== null}
-              onClick={createManager}
+              onClick={createAccount}
               className="h-7 px-2 text-sm"
             >
               {busy === "create" ? "creating…" : "Create"}
@@ -1070,20 +1071,20 @@ function DepositPanel({
         }
       />
 
-      {/* ─── Step ② Manager balance ─── */}
+      {/* ─── Step ② Account balance ─── */}
       <ChecklistRow
-        done={hasManagerBalance}
+        done={hasAccountBalance}
         index={2}
-        title="dUSDC in manager"
+        title="dUSDC in account"
         detail={
-          hasManager ? (
-            <span className="font-mono">{fmtDusdc(managerBalance)}</span>
+          hasAccount ? (
+            <span className="font-mono">{fmtDusdc(accountBalance)}</span>
           ) : (
             <span className="opacity-60">unlocked after step ①</span>
           )
         }
         action={
-          hasManager && (
+          hasAccount && (
             <div className="flex items-center gap-1">
               <input
                 type="number"
@@ -1097,8 +1098,8 @@ function DepositPanel({
               />
               <Button
                 size="sm"
-                variant={hasManagerBalance ? "outline" : "default"}
-                disabled={busy !== null || !hasManager}
+                variant={hasAccountBalance ? "outline" : "default"}
+                disabled={busy !== null || !hasAccount}
                 onClick={deposit}
                 className="h-7 px-2 text-sm"
               >
@@ -1305,7 +1306,7 @@ function PhaseDispatcher({
   duel: DuelState
   address: string
   duelId: string
-  oracle: OracleSviInfo | undefined
+  oracle: OracleView | undefined
 }) {
   const isCreator = duel.creator === address
   const isChallenger = duel.challenger === address
@@ -1452,31 +1453,23 @@ function JoinView({
   })
   const plaintextMissing = plaintextQuery.data?.available === false
 
-  // PredictManager gate for dUSDC duels — every staked swipe bundles
-  // `predict::mint` which requires the joiner's manager to exist + hold
-  // dUSDC. Block the join here so the player isn't trapped mid-duel
-  // unable to swipe.
-  const managerQuery = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
+  // Predict AccountWrapper gate for dUSDC duels — every staked swipe
+  // bundles `expiry_market::mint_exact_quantity` which requires the
+  // joiner's account to exist + hold dUSDC. Block the join here so the
+  // player isn't trapped mid-duel unable to swipe.
+  const accountQuery = useQuery({
+    queryKey: ["predict-account", address],
+    queryFn: () => fetchAccountState(address),
     enabled: isDusdc,
     refetchInterval: 12_000,
   })
-  const managerBalanceQuery = useQuery({
-    queryKey: ["predict-manager-balance", managerQuery.data?.id],
-    queryFn: () =>
-      managerQuery.data
-        ? getManagerDusdcBalance(client, managerQuery.data.id)
-        : Promise.resolve(0n),
-    enabled: isDusdc && !!managerQuery.data,
-    refetchInterval: 10_000,
-  })
-  const needsManager = isDusdc && !managerQuery.data && !managerQuery.isLoading
+  const needsManager =
+    isDusdc && !accountQuery.data?.wrapperId && !accountQuery.isLoading
   const needsDeposit =
     isDusdc &&
-    !!managerQuery.data &&
-    (managerBalanceQuery.data ?? 0n) === 0n &&
-    !managerBalanceQuery.isLoading
+    !!accountQuery.data?.wrapperId &&
+    (accountQuery.data?.balance ?? 0n) === 0n &&
+    !accountQuery.isLoading
 
   async function join() {
     setErr(null)
@@ -1517,8 +1510,8 @@ function JoinView({
           <strong>Staked-tier setup required</strong>
           <div className="mt-1 text-xs opacity-90">
             {needsManager
-              ? "You don't have a PredictManager yet — every staked swipe bundles `predict::mint` against it. Go back to the lobby and complete step ① of the Staked-tier setup."
-              : "Your PredictManager has 0 dUSDC. Deposit some via the lobby's Staked-tier setup so each swipe can mint a Predict position."}
+              ? "You don't have a Predict account yet — every staked swipe bundles a real mint against it. Go back to the lobby and complete step ① of the Staked-tier setup."
+              : "Your Predict account has 0 dUSDC. Deposit some via the lobby's Staked-tier setup so each swipe can mint a Predict position."}
           </div>
         </div>
       )}
@@ -1565,12 +1558,11 @@ function SwipingView({
 }: {
   duel: DuelState
   duelId: string
-  oracle: OracleSviInfo | undefined
+  oracle: OracleView | undefined
   myNextIdx: number
   isCreator: boolean
   address: string
 }) {
-  const client = useCurrentClient()
   const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const queryClient = useQueryClient()
   const now = useNow(250)
@@ -1584,34 +1576,26 @@ function SwipingView({
   const speed = speedMultiplier(elapsedMs)
   const [err, setErr] = useState<string | null>(null)
 
-  // For dUSDC duels, look up the player's PredictManager. Per PRD
+  // For dUSDC duels, look up the player's Predict AccountWrapper. Per PRD
   // §Match-anatomy step 2 every staked swipe is an atomic PTB combining
-  // `predict::mint` + `duel::record_swipe`, so the manager (and its
-  // dUSDC balance) is a hard prerequisite — the Lobby / JoinView gates
-  // enforce that, and SwipingView refuses to swipe if either ever falls
-  // back to null (defence in depth).
+  // `expiry_market::mint_exact_quantity` + `duel::record_swipe`, so the
+  // account (and its dUSDC balance) is a hard prerequisite — the Lobby /
+  // JoinView gates enforce that, and SwipingView refuses to swipe if
+  // either ever falls back to null (defence in depth).
   const isDusdc = duel.stakeCoinType === DEEPBOOK.dusdcType
-  const managerQuery = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
+  const accountQuery = useQuery({
+    queryKey: ["predict-account", address],
+    queryFn: () => fetchAccountState(address),
     enabled: isDusdc,
-    staleTime: 30_000,
-  })
-  const managerBalanceQuery = useQuery({
-    queryKey: ["predict-manager-balance", managerQuery.data?.id],
-    queryFn: () =>
-      managerQuery.data
-        ? getManagerDusdcBalance(client, managerQuery.data.id)
-        : Promise.resolve(0n),
-    enabled: isDusdc && !!managerQuery.data,
     staleTime: 10_000,
   })
   // Quantity to mint per swipe — small relative to the duel stake so the
-  // manager doesn't drain across 5 cards. 10% of stake / 5 = 2% per card.
+  // account doesn't drain across 5 cards. 10% of stake / 5 = 2% per card.
   const mintQuantity = (duel.p0Stake * 2n) / 100n
   const managerReady =
     !isDusdc ||
-    (!!managerQuery.data && (managerBalanceQuery.data ?? 0n) >= mintQuantity)
+    (!!accountQuery.data?.wrapperId &&
+      (accountQuery.data?.balance ?? 0n) >= mintQuantity)
 
   // ── drag state ────────────────────────────────────────────────────────
   const cardRef = useRef<HTMLDivElement>(null)
@@ -1635,55 +1619,49 @@ function SwipingView({
       try {
         let tx
         if (isDusdc) {
-          // Hard requirement: dUSDC duel ⇒ manager + balance ⇒ bundled
+          // Hard requirement: dUSDC duel ⇒ account + balance ⇒ bundled
           // mint. The Lobby + JoinView gates make this the steady-state
-          // truth; this branch only fires if state drifted (e.g. manager
-          // withdrew all dUSDC mid-duel).
-          if (!managerQuery.data) {
+          // truth; this branch only fires if state drifted (e.g. the
+          // account withdrew all dUSDC mid-duel).
+          if (!accountQuery.data?.wrapperId) {
             throw new Error(
-              "PredictManager missing — return to lobby to create one"
+              "Predict account missing — return to lobby to create one"
             )
           }
-          if ((managerBalanceQuery.data ?? 0n) < mintQuantity) {
+          if ((accountQuery.data?.balance ?? 0n) < mintQuantity) {
             throw new Error(
-              `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC.`
+              `Account balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC.`
             )
           }
-          if (!oracle) {
-            throw new Error("Oracle not loaded")
-          }
-          // Premium + p_swiped are snapshotted on-chain by the contract
-          // (via predict::get_trade_amounts inside record_swipe) — the FE
-          // only supplies the mint quantity.
+          // tick_size is a fixed market parameter (not a quote) — resolved
+          // from the predict indexer, needed to derive the (lower_tick,
+          // higher_tick] pair for the mint.
+          const tickSize = await fetchMarketTickSize(card.expiryMarketId)
           tx = buildStakedSwipeTx({
             duelId,
-            oracleSviId: card.oracleId,
-            managerId: managerQuery.data.id,
-            oracleExpiry: oracle.expiry,
+            wrapperId: accountQuery.data.wrapperId,
+            marketId: card.expiryMarketId,
             strike: card.strike,
+            tickSize,
+            cardIdx: myNextIdx,
             isUp,
             quantity: mintQuantity,
-            cardIdx: myNextIdx,
           })
         } else {
-          // Legacy non-staked path (free/SUI duels) — PRD has
-          // replaced this with Practice Mode (server-only). The
-          // builder needs a manager + quantity for the new contract;
-          // this branch is effectively dead code in the staked-only world.
+          // Free/SUI duels don't touch Predict at all — no mint, no
+          // account, just the bare `record_swipe_free` call.
           tx = buildSwipeTx({
+            tier: "free",
             duelId,
-            managerId: managerQuery.data?.id ?? "0x0",
-            oracleId: card.oracleId,
             cardIdx: myNextIdx,
             isUp,
-            quantity: 1n,
             stakeCoinType: duel.stakeCoinType,
           })
         }
         await signAndExec({ transaction: tx })
         queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
         queryClient.invalidateQueries({
-          queryKey: ["predict-manager-balance", managerQuery.data?.id],
+          queryKey: ["predict-account", address],
         })
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e))
@@ -1692,14 +1670,13 @@ function SwipingView({
     },
     [
       duelId,
-      card.oracleId,
+      card.expiryMarketId,
       card.strike,
       myNextIdx,
       duel.stakeCoinType,
       isDusdc,
-      managerQuery.data,
-      managerBalanceQuery.data,
-      oracle,
+      accountQuery.data,
+      address,
       mintQuantity,
       signAndExec,
       queryClient,
@@ -1770,7 +1747,7 @@ function SwipingView({
           {isDusdc && managerReady && (
             <span
               className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs tracking-wide text-emerald-500 uppercase"
-              title={`mints ${fmtDusdc(mintQuantity)} per swipe into your PredictManager`}
+              title={`mints ${fmtDusdc(mintQuantity)} per swipe against your Predict account`}
             >
               + predict mint
             </span>
@@ -1914,9 +1891,9 @@ function SwipingView({
 
       {isDusdc && !managerReady && (
         <p className="rounded border-l-2 border-amber-500 bg-amber-500/5 p-2 text-sm text-amber-600">
-          {managerQuery.data
-            ? `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC via the lobby setup.`
-            : "PredictManager not found. Return to the lobby and complete Staked-tier setup."}
+          {accountQuery.data?.wrapperId
+            ? `Account balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC via the lobby setup.`
+            : "Predict account not found. Return to the lobby and complete Staked-tier setup."}
         </p>
       )}
 
@@ -1966,7 +1943,7 @@ function RevealingView({
         cards: Array<{ expiry_market_id: string; strike: string }>
       }
       return body.cards.map((c) => ({
-        oracleId: c.expiry_market_id,
+        expiryMarketId: c.expiry_market_id,
         strike: BigInt(c.strike),
       }))
     },
@@ -2054,76 +2031,26 @@ function LockupView({
   )
 }
 
-function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
-  const { mutateAsync: signAndExec, isPending } = useFlickySign()
-  const client = useCurrentClient()
-  const queryClient = useQueryClient()
-  const [err, setErr] = useState<string | null>(null)
-  const [digest, setDigest] = useState<string | null>(null)
-
-  async function settle() {
-    setErr(null)
-    try {
-      // Two-phase: settle_card × deck_size reads both players' Predict
-      // managers for anti-replay (and that card's oracle for the
-      // settlement_price), then finalize compares the accumulated PnL.
-      // All chained into one PTB by `buildFinalizeTx`.
-      const [p0Manager, p1Manager] = await Promise.all([
-        findPredictManager(client, duel.creator),
-        findPredictManager(client, duel.challenger),
-      ])
-      if (!p0Manager || !p1Manager)
-        throw new Error("could not resolve both players' PredictManagers")
-      const tx = buildFinalizeTx(
-        duelId,
-        duel.cards,
-        p0Manager.id,
-        p1Manager.id,
-        duel.stakeCoinType
-      )
-      const res = await signAndExec({ transaction: tx })
-      setDigest(res.digest)
-      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    }
-  }
-
+/**
+ * Both players have finished swiping and the oracle has settled. There's
+ * nothing left for either player to sign — `settle_card` × deck_size +
+ * `finalize` are keeper-only now (see reference doc's "flicky settle
+ * (keeper...)" recipe), so this is a passive waiting state. The polling
+ * `duelQuery` in `DuelView` picks up `status: COMPLETE` on its own and
+ * routes into `ResultView` once the keeper lands the finalize tx — no
+ * WS in this (unrouted) polling-based view, but the same "duel state
+ * flips to COMPLETE" signal the routed `ActiveDuel` gets from
+ * `DuelFinalized` / `room_state`.
+ */
+function SettlingView(_: { duel: DuelState; duelId: string }) {
   return (
     <div className="space-y-4 py-6 text-center">
       <Badge variant="default">oracle settled</Badge>
-      <p className="text-lg">paying out…</p>
+      <p className="text-lg">settling…</p>
       <p className="text-base text-muted-foreground">
-        the keeper auto-closes settled duels — payouts appear within ~10s.
+        the keeper closes settled duels automatically — payouts appear within
+        ~10s.
       </p>
-      <details className="mx-auto max-w-sm text-left text-sm text-muted-foreground">
-        <summary className="cursor-pointer text-center underline-offset-2 hover:underline">
-          impatient? settle manually
-        </summary>
-        <div className="mt-3 space-y-2">
-          <Button
-            size="sm"
-            onClick={settle}
-            disabled={isPending}
-            className="w-full"
-          >
-            settle + finalize
-          </Button>
-          {digest && (
-            <p>
-              tx{" "}
-              <ExplorerLink href={txExplorerUrl(digest)}>
-                {shortId(digest)}
-              </ExplorerLink>
-            </p>
-          )}
-          {err && (
-            <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-red-500">
-              {err}
-            </p>
-          )}
-        </div>
-      </details>
     </div>
   )
 }

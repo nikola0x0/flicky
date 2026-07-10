@@ -14,17 +14,16 @@ import type { Unsubscribe } from "@/hooks/use-flicky-socket"
 import {
   buildCreateDuelDusdcTx,
   buildJoinDuelDusdcTx,
-  fetchOracleSvi,
   resolveCreatedDuelId,
 } from "@/lib/flicky"
-import { DEEPBOOK, buildStakedSwipeTx, quoteSwipePremium } from "@/lib/deepbook"
-import { useFlickySign } from "@/lib/use-flicky-sign"
 import {
-  liveCardPnl,
-  fmtDusdcSigned,
-  fmtPnlPct,
-  type SwipeLite,
-} from "@/lib/pnl"
+  DEEPBOOK,
+  buildStakedSwipeTx,
+  fetchMarketTickSize,
+  fmtDusdc,
+} from "@/lib/deepbook"
+import { useFlickySign } from "@/lib/use-flicky-sign"
+import { liveCardPnl, fmtPnlPct, type SwipeLite } from "@/lib/pnl"
 import { SWIPE_WINDOW_MS, swipeWindowRemainingMs } from "@/lib/swipe-window"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
 import { WsErrorBanner } from "@/components/ws-error-banner"
@@ -191,12 +190,17 @@ export function ActiveDuel({
   // clock so the swipe-window countdown tracks the chain-enforced deadline
   // even when the player's system clock is skewed. 0 until the first tick.
   const [serverClockOffsetMs, setServerClockOffsetMs] = useState(0)
-  // Live market prices, keyed by expiry_market_id. Powers mark-to-market PnL.
-  const [ticks, setTicks] = useState<Record<string, { spot: string }>>({})
-  // Market expiries, keyed by expiry_market_id. Needed to build MarketKey
-  // for swipe quotes and the swipe PTB. Resolved once per unique market
-  // when the deck arrives.
-  const [expiries, setExpiries] = useState<Record<string, bigint>>({})
+  // Live market prices + expiry, keyed by expiry_market_id. The
+  // `oracle_tick` WS message carries both — no separate on-chain/server
+  // expiry lookup needed. Powers mark-to-market PnL + the settle countdown.
+  const [ticks, setTicks] = useState<
+    Record<string, { spot: string; expiry: string }>
+  >({})
+  // Market `tick_size`, keyed by expiry_market_id. Needed to build the
+  // swipe PTB's (lower_tick, higher_tick] pair. Resolved once per unique
+  // market (from the predict indexer, via `fetchMarketTickSize`) when the
+  // deck arrives.
+  const [tickSizes, setTickSizes] = useState<Record<string, bigint>>({})
   // Refs so the WS handler can read latest state without re-subscribing.
   const phaseRef = useRef(phase)
   phaseRef.current = phase
@@ -245,13 +249,14 @@ export function ActiveDuel({
     return () => send({ type: "room_unsubscribe", duelId: resumeDuelId })
   }, [resumeDuelId, send])
 
-  // Stream market ticks into local state. Used by mark-to-market PnL.
+  // Stream market ticks into local state. Used by mark-to-market PnL and
+  // the per-card settle countdown (`expiry`).
   useEffect(() => {
     return onMessage((msg) => {
       if (msg.type !== "oracle_tick") return
       setTicks((prev) => ({
         ...prev,
-        [msg.expiryMarketId]: { spot: msg.spot },
+        [msg.expiryMarketId]: { spot: msg.spot, expiry: msg.expiry },
       }))
     })
   }, [onMessage])
@@ -264,8 +269,11 @@ export function ActiveDuel({
     })
   }, [onMessage])
 
-  // When the deck arrives, fetch each unique oracle's expiry (needed to
-  // build MarketKey for quotes + swipes) and subscribe to ticks.
+  // When the deck arrives, prefetch each unique market's `tick_size`
+  // (needed to build the swipe PTB — see `deriveTicks` in lib/deepbook.ts)
+  // and subscribe to its live ticks. Expiry is NOT fetched here — it rides
+  // in on the `oracle_tick` WS message itself (see `ticks` above), so the
+  // client never discovers markets on its own.
   const oraclesReady = roomState?.cards.length === 5 ? roomState.cards : null
   useEffect(() => {
     if (!oraclesReady) return
@@ -277,21 +285,20 @@ export function ActiveDuel({
       const next: Record<string, bigint> = {}
       for (const id of unique) {
         try {
-          const info = await fetchOracleSvi(client, id)
-          next[id] = info.expiry
+          next[id] = await fetchMarketTickSize(id)
         } catch (e) {
-          console.warn(`fetchOracleSvi(${id}) failed`, e)
+          console.warn(`fetchMarketTickSize(${id}) failed`, e)
         }
       }
       if (cancelled) return
-      setExpiries((prev) => ({ ...prev, ...next }))
+      setTickSizes((prev) => ({ ...prev, ...next }))
       send({ type: "oracle_subscribe", marketIds: unique })
     })()
     return () => {
       cancelled = true
       send({ type: "oracle_unsubscribe", marketIds: unique })
     }
-  }, [oraclesReady, client, send])
+  }, [oraclesReady, send])
 
   // Creator: fire create_duel as soon as we mount with the deckHash
   // already captured from match_found at the pvp.tsx level. Subscribing
@@ -448,7 +455,7 @@ export function ActiveDuel({
           cardIdx={phase.cardIdx}
           roomState={roomState}
           managerId={managerId}
-          expiries={expiries}
+          tickSizes={tickSizes}
           ticks={ticks}
           myAddress={account.address}
           isWindowExpired={isWindowExpired}
@@ -550,7 +557,7 @@ function PhaseSwiping({
   cardIdx,
   roomState,
   managerId,
-  expiries,
+  tickSizes,
   ticks,
   myAddress,
   isWindowExpired,
@@ -561,31 +568,22 @@ function PhaseSwiping({
   cardIdx: number
   roomState: RoomState
   managerId: string
-  expiries: Record<string, bigint>
-  ticks: Record<string, { spot: string }>
+  tickSizes: Record<string, bigint>
+  ticks: Record<string, { spot: string; expiry: string }>
   myAddress: string
   isWindowExpired: boolean
   sign: ReturnType<typeof useFlickySign>
   onSwipeDone: () => void
 }) {
   const card = roomState.cards[cardIdx]
-  const expiry = card ? expiries[card.expiry_market_id] : undefined
-  const [quoteUp, setQuoteUp] = useState<{
-    premium: bigint
-    pImplied: bigint
-  } | null>(null)
-  const [quoteDown, setQuoteDown] = useState<{
-    premium: bigint
-    pImplied: bigint
-  } | null>(null)
+  const tick = card ? ticks[card.expiry_market_id] : undefined
+  const expiry = tick ? BigInt(tick.expiry) : undefined
+  const tickSize = card ? tickSizes[card.expiry_market_id] : undefined
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [chartModal, setChartModal] = useState<null | "btc" | "pnl">(null)
-  const client = useCurrentClient()
 
-  // 1 Hz wall-clock so the "settles in …" countdown ticks. Keyed off nothing
-  // but the interval — does NOT re-quote (that effect keys on the card), so
-  // it won't hammer devInspect.
+  // 1 Hz wall-clock so the "settles in …" countdown ticks.
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1000)
@@ -605,45 +603,6 @@ function PhaseSwiping({
   useEffect(() => {
     setDrag({ x: 0, active: false, flying: null })
   }, [cardIdx])
-
-  // Pre-quote both directions when the card changes. Frozen for the
-  // duration of this card — re-quoting on every oracle_tick would hammer
-  // devInspect. Contract still snapshots the real premium at swipe time.
-  useEffect(() => {
-    if (!card || !expiry) return
-    let cancelled = false
-    setQuoteUp(null)
-    setQuoteDown(null)
-    setError(null)
-    ;(async () => {
-      try {
-        const [up, down] = await Promise.all([
-          quoteSwipePremium(client, {
-            oracleSviId: card.expiry_market_id,
-            oracleExpiry: expiry,
-            strike: BigInt(card.strike),
-            isUp: true,
-            quantity: SWIPE_QUANTITY,
-          }),
-          quoteSwipePremium(client, {
-            oracleSviId: card.expiry_market_id,
-            oracleExpiry: expiry,
-            strike: BigInt(card.strike),
-            isUp: false,
-            quantity: SWIPE_QUANTITY,
-          }),
-        ])
-        if (cancelled) return
-        setQuoteUp(up)
-        setQuoteDown(down)
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [card?.expiry_market_id, card?.strike, expiry, client])
 
   const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
   const opponent = myIsP0 ? roomState.challenger : roomState.creator
@@ -667,22 +626,24 @@ function PhaseSwiping({
     )
   }
 
-  const tick = ticks[card.expiry_market_id]
-
   const doSwipe = async (isUp: boolean) => {
     if (isWindowExpired) return
+    if (!tickSize) {
+      setError("market tick size not loaded yet — try again in a moment")
+      return
+    }
     setBusy(true)
     setError(null)
     try {
       const tx = buildStakedSwipeTx({
         duelId,
-        oracleSviId: card.expiry_market_id,
-        managerId,
-        oracleExpiry: expiry,
+        wrapperId: managerId,
+        marketId: card.expiry_market_id,
         strike: BigInt(card.strike),
+        tickSize,
+        cardIdx,
         isUp,
         quantity: SWIPE_QUANTITY,
-        cardIdx,
       })
       await sign.mutateAsync({ transaction: tx })
       onSwipeDone()
@@ -737,11 +698,11 @@ function PhaseSwiping({
   const yesGlow = drag.x > 0 ? progress : 0
   const noGlow = drag.x < 0 ? progress : 0
 
-  const yesCost = quoteUp ? fmtDusdcSigned(-quoteUp.premium).trim() : "…"
-  const noCost = quoteDown ? fmtDusdcSigned(-quoteDown.premium).trim() : "…"
-  const yesOdds = quoteUp
-    ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(0)}%`
-    : "…"
+  // 6-24 exposes no public on-chain quote (`load_live_pricer` runs inside
+  // the swipe PTB itself), so there's no real premium/odds to show
+  // pre-swipe. Both directions mint the same fixed `SWIPE_QUANTITY` of
+  // contracts — that's a stake size, not a quote, so it's honest to show.
+  const stakeLabel = fmtDusdc(SWIPE_QUANTITY)
   const hasNext = cardIdx + 1 < roomState.cards.length
 
   // Live settle countdown — the horizon the player is predicting over.
@@ -920,10 +881,10 @@ function PhaseSwiping({
               />
               <div className="min-w-0">
                 <p className="font-pixel text-xs tracking-[0.2em] text-white/40 uppercase">
-                  yes odds
+                  stake
                 </p>
                 <p className="font-pixel text-lg text-emerald-300 tabular-nums">
-                  {yesOdds}
+                  {stakeLabel}
                 </p>
               </div>
             </div>
@@ -941,14 +902,8 @@ function PhaseSwiping({
               <span className="font-pixel text-lg text-rose-300 uppercase">
                 no
               </span>
-              <span className="font-pixel text-sm text-rose-200/70 tabular-nums">
-                {noCost}
-              </span>
             </div>
             <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#163a26] px-2 py-2">
-              <span className="font-pixel text-sm text-emerald-200/70 tabular-nums">
-                {yesCost}
-              </span>
               <span className="font-pixel text-lg text-emerald-300 uppercase">
                 yes
               </span>

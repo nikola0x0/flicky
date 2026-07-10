@@ -6,7 +6,6 @@ import {
   buildJoinDuelDusdcTx,
   buildJoinDuelTx,
   buildRevealDeckTx,
-  buildFinalizeTx,
   buildSwipeTx,
   computeDeckHash,
   oracleStrikes,
@@ -14,6 +13,7 @@ import {
   type DeckCard,
 } from "./flicky"
 import { CONFIG } from "./config"
+import { DEEPBOOK } from "./deepbook"
 
 // Minimal gRPC client mock for the dUSDC builders. They only call
 // `client.core.listCoins({ owner, coinType })`; nothing else.
@@ -29,7 +29,8 @@ function mockClient(coins: Array<{ objectId: string; balance: string }>) {
   } as unknown as Parameters<typeof buildCreateDuelDusdcTx>[0]
 }
 
-const DUSDC = "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC"
+const DUSDC =
+  "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC"
 
 // === oracleStrikes ===
 
@@ -48,7 +49,11 @@ describe("oracleStrikes", () => {
   test("honors a custom percentage grid", () => {
     const ref = 100_000_000_000n
     const strikes = oracleStrikes(ref, [90n, 100n, 110n])
-    expect(strikes).toEqual([90_000_000_000n, 100_000_000_000n, 110_000_000_000n])
+    expect(strikes).toEqual([
+      90_000_000_000n,
+      100_000_000_000n,
+      110_000_000_000n,
+    ])
   })
 
   test("strikes are strictly monotonic", () => {
@@ -67,7 +72,7 @@ const DUEL_TYPE = `${CONFIG.packageId}::duel::Duel<0x2::sui::SUI>`
 // no `.fields` nesting, bare `id`, `Balance` as a bare string, `vector<u8>`
 // as number[] (or base64), `Option<Swipe>` as the swipe or null.
 function makeDuelFields(
-  overrides: Partial<Record<string, unknown>> = {},
+  overrides: Partial<Record<string, unknown>> = {}
 ): Record<string, unknown> {
   return {
     id: "0xabc000000000000000000000000000000000000000000000000000000000beef",
@@ -76,7 +81,7 @@ function makeDuelFields(
     deck_size: "5",
     deck_hash: new Array(32).fill(0xab),
     cards: Array.from({ length: 5 }, (_, i) => ({
-      oracle_id: "0xdeadbeef",
+      expiry_market_id: "0xdeadbeef",
       strike: String(80_000_000_000_000n + BigInt(i) * 1_000_000_000n),
     })),
     creator: "0xaaaaaa",
@@ -96,7 +101,11 @@ function makeDuelFields(
     p1_next_card_idx: "1",
     started_at_ms: "1000",
     p0_swipes: [
-      { is_up: true, quantity: "20000", premium: "8000", p_swiped: "400000000" },
+      {
+        is_up: true,
+        quantity: "20000",
+        order_id: "424242",
+      },
       null,
       null,
       null,
@@ -147,8 +156,7 @@ describe("parseDuel", () => {
     expect(d.p0Swipes[0]).toEqual({
       isUp: true,
       quantity: 20_000n,
-      premium: 8_000n,
-      pSwiped: 400_000_000n,
+      orderId: 424_242n,
     })
     expect(d.p0Swipes[1]).toBeNull()
     expect(d.p1Swipes.every((s) => s === null)).toBe(true)
@@ -186,14 +194,19 @@ function moveCallTargets(tx: Transaction): string[] {
 }
 
 describe("PTB builders", () => {
-  const oracleId = "0xdeadbeef0000000000000000000000000000000000000000000000000000beef"
-  const duelId = "0xfeedface0000000000000000000000000000000000000000000000000000face"
+  const marketId =
+    "0xdeadbeef0000000000000000000000000000000000000000000000000000beef"
+  const duelId =
+    "0xfeedface0000000000000000000000000000000000000000000000000000face"
   const strikes: bigint[] = [95n, 98n, 100n, 102n, 105n].map(
-    (p) => (80_000_000_000_000n * p) / 100n,
+    (p) => (80_000_000_000_000n * p) / 100n
   )
 
   test("buildCreateDuelTx emits exactly one duel::create_duel call", async () => {
-    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const cards: DeckCard[] = strikes.map((strike) => ({
+      expiryMarketId: marketId,
+      strike,
+    }))
     const hash = await computeDeckHash(cards)
     const tx = buildCreateDuelTx(hash, 10_000_000n)
     const targets = moveCallTargets(tx)
@@ -207,7 +220,10 @@ describe("PTB builders", () => {
   })
 
   test("buildCreateDuelDusdcTx emits one create_duel with dUSDC type arg", async () => {
-    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const cards: DeckCard[] = strikes.map((strike) => ({
+      expiryMarketId: marketId,
+      strike,
+    }))
     const hash = await computeDeckHash(cards)
     const client = mockClient([
       { objectId: "0xc0", balance: "10000000" },
@@ -218,42 +234,64 @@ describe("PTB builders", () => {
       "0x86fcc7fdc63be1a6b31c5288e7b87a6b985f16d1af490fcb54f2501d5fa8e78c",
       hash,
       5_000_000n,
-      DUSDC,
+      DUSDC
     )
     const data = tx.getData()
     const createDuel = data.commands.find(
-      (c) => "MoveCall" in c && c.MoveCall?.function === "create_duel",
+      (c) => "MoveCall" in c && c.MoveCall?.function === "create_duel"
     )
     expect(createDuel).toBeDefined()
-    expect((createDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall.typeArguments).toEqual([DUSDC])
+    expect(
+      (createDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall
+        .typeArguments
+    ).toEqual([DUSDC])
   })
 
   test("buildCreateDuelDusdcTx throws when wallet has no dUSDC", async () => {
-    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const cards: DeckCard[] = strikes.map((strike) => ({
+      expiryMarketId: marketId,
+      strike,
+    }))
     const hash = await computeDeckHash(cards)
     const client = mockClient([])
     await expect(
-      buildCreateDuelDusdcTx(client, "0xabc", hash, 1_000_000n, DUSDC),
+      buildCreateDuelDusdcTx(client, "0xabc", hash, 1_000_000n, DUSDC)
     ).rejects.toThrow(/no .*DUSDC coins/)
   })
 
   test("buildJoinDuelDusdcTx emits one join_duel with dUSDC type arg", async () => {
     const client = mockClient([{ objectId: "0xc0", balance: "10000000" }])
-    const tx = await buildJoinDuelDusdcTx(client, "0xabc", duelId, 1_000_000n, DUSDC)
+    const tx = await buildJoinDuelDusdcTx(
+      client,
+      "0xabc",
+      duelId,
+      1_000_000n,
+      DUSDC
+    )
     const data = tx.getData()
     const joinDuel = data.commands.find(
-      (c) => "MoveCall" in c && c.MoveCall?.function === "join_duel",
+      (c) => "MoveCall" in c && c.MoveCall?.function === "join_duel"
     )
     expect(joinDuel).toBeDefined()
-    expect((joinDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall.typeArguments).toEqual([DUSDC])
+    expect(
+      (joinDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall
+        .typeArguments
+    ).toEqual([DUSDC])
   })
 
   test("buildRevealDeckTx emits 5 new_card + 1 reveal_deck", () => {
-    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const cards: DeckCard[] = strikes.map((strike) => ({
+      expiryMarketId: marketId,
+      strike,
+    }))
     const tx = buildRevealDeckTx(duelId, cards)
     const targets = moveCallTargets(tx)
-    expect(targets.filter((t) => t.endsWith("::duel::new_card"))).toHaveLength(5)
-    expect(targets.filter((t) => t.endsWith("::duel::reveal_deck"))).toHaveLength(1)
+    expect(targets.filter((t) => t.endsWith("::duel::new_card"))).toHaveLength(
+      5
+    )
+    expect(
+      targets.filter((t) => t.endsWith("::duel::reveal_deck"))
+    ).toHaveLength(1)
   })
 
   test("buildRevealDeckTx rejects wrong card count", () => {
@@ -261,7 +299,10 @@ describe("PTB builders", () => {
   })
 
   test("computeDeckHash returns 32 bytes deterministically", async () => {
-    const cards: DeckCard[] = strikes.map((strike) => ({ oracleId, strike }))
+    const cards: DeckCard[] = strikes.map((strike) => ({
+      expiryMarketId: marketId,
+      strike,
+    }))
     const a = await computeDeckHash(cards)
     const b = await computeDeckHash(cards)
     expect(a).toHaveLength(32)
@@ -269,7 +310,7 @@ describe("PTB builders", () => {
     // Different deck → different hash.
     const c = await computeDeckHash([
       ...cards.slice(0, 4),
-      { oracleId, strike: cards[4].strike + 1n },
+      { expiryMarketId: marketId, strike: cards[4].strike + 1n },
     ])
     expect(Array.from(a)).not.toEqual(Array.from(c))
   })
@@ -277,42 +318,78 @@ describe("PTB builders", () => {
   test("buildJoinDuelTx emits exactly one duel::join_duel call", () => {
     const tx = buildJoinDuelTx(duelId, 10_000_000n)
     const targets = moveCallTargets(tx)
-    expect(targets.filter((t) => t.endsWith("::duel::join_duel"))).toHaveLength(1)
+    expect(targets.filter((t) => t.endsWith("::duel::join_duel"))).toHaveLength(
+      1
+    )
   })
 
-  const swipeArgs = {
+  // Staked-tier swipe: bundles the DeepBook mint (generate_auth,
+  // load_live_pricer, mint_exact_quantity) + flicky's record_swipe in one
+  // PTB — see buildStakedSwipeTx in lib/deepbook.ts.
+  const stakedSwipeArgs = {
+    tier: "staked" as const,
     duelId,
-    managerId: "0x2",
-    oracleId,
+    wrapperId: "0x2",
+    marketId,
+    strike: 80_000_000_000_000n,
+    tickSize: 1_000_000_000n,
     cardIdx: 0,
     isUp: true,
     quantity: 20_000n,
   }
-  const finalizeCards: DeckCard[] = Array.from({ length: 5 }, () => ({
-    oracleId,
-    strike: 100_000_000_000n,
-  }))
 
-  test("buildSwipeTx emits exactly one duel::record_swipe call", () => {
-    const tx = buildSwipeTx(swipeArgs)
+  test("buildSwipeTx (staked) emits exactly one duel::record_swipe call", () => {
+    const tx = buildSwipeTx(stakedSwipeArgs)
     const targets = moveCallTargets(tx)
-    expect(targets).toHaveLength(1)
-    expect(targets[0]).toMatch(/::duel::record_swipe$/)
+    expect(
+      targets.filter((t) => t.endsWith("::duel::record_swipe"))
+    ).toHaveLength(1)
   })
 
-  test("buildFinalizeTx emits N settle_card calls + exactly one finalize", () => {
-    const tx = buildFinalizeTx(duelId, finalizeCards, "0x10", "0x11")
+  test("buildSwipeTx (staked) bundles the DeepBook mint before record_swipe", () => {
+    const tx = buildSwipeTx(stakedSwipeArgs)
     const targets = moveCallTargets(tx)
-    const settles = targets.filter((t) => t.endsWith("::duel::settle_card"))
-    const finalizes = targets.filter((t) => t.endsWith("::duel::finalize"))
-    expect(settles).toHaveLength(finalizeCards.length)
-    expect(finalizes).toHaveLength(1)
-    expect(targets).toHaveLength(finalizeCards.length + 1)
+    expect(targets.some((t) => t.endsWith("::account::generate_auth"))).toBe(
+      true
+    )
+    expect(
+      targets.some((t) => t.endsWith("::expiry_market::load_live_pricer"))
+    ).toBe(true)
+    expect(
+      targets.some((t) => t.endsWith("::expiry_market::mint_exact_quantity"))
+    ).toBe(true)
+    // record_swipe is the last command, chaining the mint's order id.
+    expect(targets[targets.length - 1]).toMatch(/::duel::record_swipe$/)
+  })
+
+  test("buildSwipeTx (free) emits exactly one record_swipe_free call, no mint", () => {
+    const tx = buildSwipeTx({
+      tier: "free",
+      duelId,
+      cardIdx: 0,
+      isUp: true,
+    })
+    const targets = moveCallTargets(tx)
+    expect(targets).toHaveLength(1)
+    expect(targets[0]).toMatch(/::duel::record_swipe_free$/)
   })
 
   test("builders bake the configured package address into the call target", () => {
-    const tx = buildSwipeTx(swipeArgs)
+    const tx = buildSwipeTx({
+      tier: "free",
+      duelId,
+      cardIdx: 0,
+      isUp: true,
+    })
     const targets = moveCallTargets(tx)
     expect(targets[0].startsWith(CONFIG.packageId)).toBe(true)
+  })
+
+  test("buildSwipeTx (staked) bakes the DeepBook predict package into the mint calls", () => {
+    const tx = buildSwipeTx(stakedSwipeArgs)
+    const targets = moveCallTargets(tx)
+    expect(
+      targets.some((t) => t.startsWith(DEEPBOOK.deepbookPredictPackageId))
+    ).toBe(true)
   })
 })

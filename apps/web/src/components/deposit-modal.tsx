@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react"
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
 import { createPaymentTransactionUri } from "@mysten/payment-kit"
 import { useCurrentClient } from "@mysten/dapp-kit-react"
@@ -22,10 +16,9 @@ import {
   SUI_DECIMALS,
 } from "@/lib/swap"
 import {
-  buildCreateManagerTx,
+  buildCreateAccountTx,
   buildDepositDusdcTx,
-  resolveCreatedManagerId,
-  writeManagerCache,
+  waitForCreatedWrapper,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import { PixelButton } from "@/components/pixel-button"
@@ -196,12 +189,12 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
           type="button"
           onClick={onClose}
           aria-label="close"
-          className="absolute right-3 top-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
+          className="absolute top-3 right-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
         >
           ✕
         </button>
 
-        <header className="px-6 pb-2 pt-7 text-center">
+        <header className="px-6 pt-7 pb-2 text-center">
           <h2
             id="deposit-title"
             className="text-lg tracking-[0.18em] uppercase"
@@ -246,7 +239,7 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
 
               <div className="flex items-center justify-between text-xs tracking-wider text-white/55 uppercase">
                 <span>current balance</span>
-                <span className="text-base tabular-nums text-white">
+                <span className="text-base text-white tabular-nums">
                   {currentBalance.toFixed(4)} {receiveMeta.label}
                 </span>
               </div>
@@ -254,15 +247,12 @@ export function DepositModal({ open, address, onClose }: DepositModalProps) {
           )}
 
           {tab === "MANAGER" && (
-            <ManagerDepositTab
-              address={address}
-              walletDusdc={dusdcBalance}
-            />
+            <ManagerDepositTab address={address} walletDusdc={dusdcBalance} />
           )}
         </div>
       </div>
     </div>,
-    document.body,
+    document.body
   )
 }
 
@@ -280,7 +270,11 @@ function TabRow({
       label: RECEIVE_META.DUSDC.label,
       icon: RECEIVE_META.DUSDC.icon,
     },
-    { id: "MANAGER", label: MANAGER_TAB_META.label, icon: MANAGER_TAB_META.icon },
+    {
+      id: "MANAGER",
+      label: MANAGER_TAB_META.label,
+      icon: MANAGER_TAB_META.icon,
+    },
   ]
   return (
     <div className="grid grid-cols-3 gap-2">
@@ -337,9 +331,9 @@ function AmountField({
           inputMode="decimal"
           min={0}
           step="any"
-          className="w-full bg-transparent text-2xl tabular-nums text-white focus:outline-none"
+          className="w-full bg-transparent text-2xl text-white tabular-nums focus:outline-none"
         />
-        <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pl-1.5 pr-2">
+        <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pr-2 pl-1.5">
           <img
             src={token.icon}
             alt=""
@@ -445,7 +439,7 @@ function AddressRow({
       style={BLUE_BRAND_STYLE}
       className="flex w-full items-center justify-between gap-2 rounded-xl bg-black/35 px-3 py-2 text-left ring-1 ring-white/5 transition hover:bg-black/45"
     >
-      <span className="font-mono text-sm tabular-nums text-white/80">
+      <span className="font-mono text-sm text-white/80 tabular-nums">
         {short}
       </span>
       <span className="text-xs tracking-wider text-white/55 uppercase">
@@ -488,34 +482,23 @@ function ManagerDepositTab({
     setError(null)
     setSuccess(null)
     try {
-      // 1. Resolve a manager id — create one if missing. The new manager
-      //    starts at 0 dUSDC; we then deposit in step 2.
-      let mgrId = managerId
-      if (!mgrId) {
-        const createTx = buildCreateManagerTx()
+      // 1. Resolve a wrapper id — create the AccountWrapper if missing.
+      //    The new wrapper starts at 0 dUSDC; we then deposit in step 2.
+      let wrapperId = managerId
+      if (!wrapperId) {
+        const createTx = buildCreateAccountTx()
         const res = (await sign.mutateAsync({ transaction: createTx })) as {
           digest: string
         }
-        // Sponsored-gas path returns only { digest }; re-fetch the tx
-        // block to read objectChanges.
-        mgrId = await resolveCreatedManagerId(client, res.digest, address)
-        if (!mgrId) {
-          throw new Error(
-            "create_manager succeeded but PredictManager id not found in tx block",
-          )
-        }
-        writeManagerCache(address, mgrId)
+        // Sponsored-gas path returns only { digest }; the wrapper address
+        // is deterministic but needs the tx to land before the server can
+        // resolve it.
+        wrapperId = await waitForCreatedWrapper(client, res.digest, address)
       }
-      // 2. Build + sign the deposit. `buildDepositDusdcTx` reads the
-      //    user's dUSDC coins from chain, merges if needed, splits the
-      //    deposit amount.
+      // 2. Build + sign the deposit. `buildDepositDusdcTx` sources the
+      //    dUSDC coin from the player's owned coins via `coinWithBalance`.
       const microAmount = BigInt(Math.floor(parsed * 1e6))
-      const depositTx = await buildDepositDusdcTx(
-        client,
-        address,
-        mgrId,
-        microAmount,
-      )
+      const depositTx = buildDepositDusdcTx(wrapperId, microAmount)
       await sign.mutateAsync({ transaction: depositTx })
       setSuccess(parsed)
       setAmount("0")
@@ -546,9 +529,9 @@ function ManagerDepositTab({
             inputMode="decimal"
             min={0}
             step="any"
-            className="w-full bg-transparent text-2xl tabular-nums text-white focus:outline-none"
+            className="w-full bg-transparent text-2xl text-white tabular-nums focus:outline-none"
           />
-          <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pl-1.5 pr-2">
+          <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pr-2 pl-1.5">
             <img
               src="/tokens/manager-usdc.png"
               alt=""
@@ -565,13 +548,13 @@ function ManagerDepositTab({
       <div className="rounded-xl bg-white/5 px-3 py-2 text-xs tracking-wider text-white/55 uppercase">
         <div className="flex justify-between">
           <span>wallet dUSDC</span>
-          <span className="text-base tabular-nums text-white">
+          <span className="text-base text-white tabular-nums">
             {walletDusdc.toFixed(4)}
           </span>
         </div>
         <div className="flex justify-between">
           <span>manager dUSDC</span>
-          <span className="text-base tabular-nums text-white">
+          <span className="text-base text-white tabular-nums">
             {managerBalance.toFixed(4)}
           </span>
         </div>
@@ -610,4 +593,3 @@ function ManagerDepositTab({
     </div>
   )
 }
-

@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react"
 import { createPortal } from "react-dom"
 import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import {
-  buildCreateManagerTx,
+  buildCreateAccountTx,
   buildDepositDusdcTx,
-  findPredictManager,
+  fetchAccountState,
   fmtDusdc,
-  getManagerDusdcBalance,
   getWalletDusdcBalance,
-  resolveCreatedManagerId,
-  writeManagerCache,
+  waitForCreatedWrapper,
 } from "@/lib/deepbook"
 import { DepositModal } from "@/components/deposit-modal"
 import { PixelButton } from "@/components/pixel-button"
@@ -85,14 +89,15 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
     try {
       const wallet = await getWalletDusdcBalance(client, account.address)
       setWalletDusdc(wallet)
-      const mgr = await findPredictManager(client, account.address)
-      const mgrBal = mgr
-        ? await getManagerDusdcBalance(client, mgr.id)
-        : 0n
-      // How much MORE dUSDC must move from wallet into the manager.
+      const { wrapperId, balance: wrapperBal } = await fetchAccountState(
+        account.address
+      )
+      // How much MORE dUSDC must move from wallet into the account.
       const topup =
-        mgrBal >= MIN_MANAGER_BALANCE ? 0n : MIN_MANAGER_BALANCE - mgrBal
-      // Wallet must cover both the stake escrow AND the manager top-up.
+        wrapperBal >= MIN_MANAGER_BALANCE
+          ? 0n
+          : MIN_MANAGER_BALANCE - wrapperBal
+      // Wallet must cover both the stake escrow AND the account top-up.
       const walletNeeded = stake + topup
       if (wallet < walletNeeded) {
         setPhase({
@@ -102,19 +107,19 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         })
         return
       }
-      if (!mgr) {
+      if (!wrapperId) {
         setPhase({ kind: "needs_manager" })
         return
       }
-      if (mgrBal < MIN_MANAGER_BALANCE) {
+      if (wrapperBal < MIN_MANAGER_BALANCE) {
         setPhase({
           kind: "needs_manager_deposit",
-          managerId: mgr.id,
-          current: mgrBal,
+          managerId: wrapperId,
+          current: wrapperBal,
         })
         return
       }
-      setPhase({ kind: "ready", managerId: mgr.id })
+      setPhase({ kind: "ready", managerId: wrapperId })
     } catch (e) {
       setPhase({
         kind: "error",
@@ -175,7 +180,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
           type="button"
           onClick={onClose}
           aria-label="close"
-          className="absolute right-3 top-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
+          className="absolute top-3 right-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
         >
           ✕
         </button>
@@ -207,27 +212,22 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
             onCreate={async () => {
               if (!account) return
               try {
-                const tx = buildCreateManagerTx()
+                const tx = buildCreateAccountTx()
                 const res = (await sign.mutateAsync({ transaction: tx })) as {
                   digest: string
                 }
-                // Sponsored-gas path returns only { digest }; re-fetch the
-                // tx block to read objectChanges.
-                const mgrId = await resolveCreatedManagerId(
+                // Sponsored-gas path returns only { digest }; the wrapper
+                // address is deterministic but needs the tx to land before
+                // the server can resolve it.
+                const wrapperId = await waitForCreatedWrapper(
                   client,
                   res.digest,
-                  account.address,
+                  account.address
                 )
-                if (!mgrId) {
-                  throw new Error(
-                    "create_manager tx succeeded but PredictManager id not found in tx block",
-                  )
-                }
-                writeManagerCache(account.address, mgrId)
-                // New manager always has 0 balance — go straight to deposit.
+                // New account always has 0 balance — go straight to deposit.
                 setPhase({
                   kind: "needs_manager_deposit",
-                  managerId: mgrId,
+                  managerId: wrapperId,
                   current: 0n,
                 })
               } catch (e) {
@@ -247,12 +247,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
               if (!account) return
               const needed = MIN_MANAGER_BALANCE - phase.current
               try {
-                const tx = await buildDepositDusdcTx(
-                  client,
-                  account.address,
-                  phase.managerId,
-                  needed,
-                )
+                const tx = buildDepositDusdcTx(phase.managerId, needed)
                 await sign.mutateAsync({ transaction: tx })
                 setPhase({ kind: "ready", managerId: phase.managerId })
               } catch (e) {
@@ -307,7 +302,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         />
       )}
     </div>,
-    document.body,
+    document.body
   )
 }
 
@@ -374,8 +369,7 @@ function NeedsWalletStep({
       </div>
       <p className="text-base text-white/80">
         Your wallet needs <strong>{fmtDusdc(needed)}</strong> total to play this
-        stake: {fmtDusdc(stake)} for the duel escrow plus the manager top-up to
-        {" "}
+        stake: {fmtDusdc(stake)} for the duel escrow plus the manager top-up to{" "}
         {fmtDusdc(MIN_MANAGER_BALANCE)}.
       </p>
       <p className="text-sm text-white/55">

@@ -144,6 +144,57 @@ export async function getWalletDusdcBalance(
   return BigInt(res.balance.balance)
 }
 
+/**
+ * Resolve wrapper id + dUSDC AccountWrapper balance in one server
+ * round-trip (`GET /manager` returns both). Unlike `resolveWrapper`, this
+ * always hits the server — balance isn't cacheable client-side the way a
+ * permanent wrapper id is — but it still warms the wrapper-id cache when
+ * a wrapper is found.
+ */
+export async function fetchAccountState(
+  owner: string
+): Promise<{ wrapperId: string | null; balance: bigint }> {
+  const res = await fetch(
+    `${CONFIG.serverHttpUrl}/manager?owner=${encodeURIComponent(owner)}`
+  )
+  if (!res.ok) {
+    throw new Error(`fetchAccountState: /manager HTTP ${res.status}`)
+  }
+  const body = (await res.json()) as {
+    ok?: boolean
+    wrapper?: string | null
+    balance?: string | null
+  }
+  if (!body.ok) throw new Error("fetchAccountState: /manager returned !ok")
+  if (body.wrapper) {
+    const id = normalizeSuiObjectId(body.wrapper)
+    writeWrapperCache(owner, id)
+    return { wrapperId: id, balance: BigInt(body.balance ?? "0") }
+  }
+  return { wrapperId: null, balance: 0n }
+}
+
+/**
+ * Wait for a `buildCreateAccountTx` transaction to finalize, then resolve
+ * the newly created (deterministic) wrapper id. The `AccountWrapper`
+ * address is derived purely from `(AccountRegistry, owner)`, but the
+ * server's lookup needs the tx to have actually landed first — poll
+ * `resolveWrapper` a few times to absorb propagation lag.
+ */
+export async function waitForCreatedWrapper(
+  client: SuiClient,
+  digest: string,
+  owner: string
+): Promise<string> {
+  await client.core.waitForTransaction({ digest, include: { effects: true } })
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const id = await resolveWrapper(owner)
+    if (id) return id
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  throw new Error("account created but wrapper id not resolved yet — try again")
+}
+
 // === Tick derivation + market metadata ===
 
 /** Positive-infinity sentinel tick: `(1 << 30) - 1`. Open upper bound. */
