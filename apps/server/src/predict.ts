@@ -12,7 +12,11 @@
  * Task 6 — `keeper.ts` fully migrated to the account model in Task 5, and
  * grep confirmed no remaining importers. The `predict_manager` Postgres
  * table is still live: it's reused as the owner→wrapper cache for
- * `deriveWrapperFor` below.
+ * `deriveWrapperFor` below, but under a namespaced key
+ * (`WRAPPER_CACHE_PREFIX`) so a legacy 4-16 row — keyed by bare owner
+ * address, written by the now-deleted `findManagerFor` on a REUSED
+ * Postgres — can never be mistaken for a validated 6-24 wrapper. See the
+ * SAFETY note above `deriveWrapperFor`.
  */
 import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { Transaction } from "@mysten/sui/transactions"
@@ -62,13 +66,36 @@ export const MIN_BALANCE_FOR_QUEUE = 5_000_000n // 5 dUSDC, 6 decimals
 // needed, just two devInspect reads (existence, then address), memoized
 // in the same `predict_manager` Postgres table the deleted 4-16
 // `findManagerFor` used to populate.
+//
+// SAFETY: on a REUSED Postgres (the deploy target), `predict_manager` may
+// still carry rows from the 4-16 era, keyed by bare owner address and
+// holding a legacy `PredictManager` id — NOT a 6-24 `AccountWrapper`. If
+// `deriveWrapperFor` read/wrote under the bare `owner` key, a stale 4-16
+// row would short-circuit the cache as if it were a validated wrapper
+// (no devInspect re-check), and that id would then be fed into
+// `settle_card`/`redeem_settled` (abort → keeper stuck) or
+// `readAccountBalance` (breaks the balance gate). `WRAPPER_CACHE_PREFIX`
+// namespaces every read/write this file does to the table under a key a
+// bare-owner legacy row can never match, so a legacy row can never be
+// returned as a wrapper — it just becomes permanently invisible to this
+// cache path, forcing a fresh (correct) devInspect derivation instead.
+
+/**
+ * Cache-key namespace for the 6-24 wrapper cache, so a legacy 4-16 row
+ * (keyed by bare owner address, written by the deleted `findManagerFor`)
+ * can never be matched by `deriveWrapperFor`'s cache read. See the SAFETY
+ * note above. Exported only so `predict.test.ts` can construct/assert
+ * against the exact namespaced key without duplicating the literal.
+ */
+export const WRAPPER_CACHE_PREFIX = "wrapper:v2:"
 
 /**
  * Resolve the `AccountWrapper` address logically owned by `owner`.
  *
- * Fast path: a persistent Postgres cache (owner → wrapper address). The
- * wrapper address is deterministic and permanent once derived, so a hit
- * is authoritative and skips all RPC.
+ * Fast path: a persistent Postgres cache (namespaced `wrapper:v2:${owner}`
+ * → wrapper address — see `WRAPPER_CACHE_PREFIX`). The wrapper address is
+ * deterministic and permanent once derived, so a hit is authoritative and
+ * skips all RPC.
  *
  * Slow path (cache miss): devInspect `derived_wrapper_exists(registry,
  * owner)`. If false, the registry has no wrapper for this owner yet —
@@ -89,7 +116,7 @@ export async function deriveWrapperFor(
   client: SuiGrpcClient,
   owner: string
 ): Promise<string | null> {
-  const cached = await getCachedManager(owner)
+  const cached = await getCachedManager(WRAPPER_CACHE_PREFIX + owner)
   if (cached) return cached
 
   // No try/catch: a devInspect rejection propagates so the caller can
@@ -119,7 +146,7 @@ export async function deriveWrapperFor(
     )
   }
   const wrapper = normalizeSuiObjectId(bcs.Address.parse(addrBytes))
-  await cacheManager(owner, wrapper)
+  await cacheManager(WRAPPER_CACHE_PREFIX + owner, wrapper)
   return wrapper
 }
 

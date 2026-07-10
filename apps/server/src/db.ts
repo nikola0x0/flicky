@@ -149,10 +149,15 @@ async function ensureSchema(): Promise<void> {
       created_at BIGINT NOT NULL
     )
   `
-  // Owner → AccountWrapper (6-24) / legacy PredictManager id cache. The
-  // 6-24 wrapper is deterministic (derived from AccountRegistry + owner via
-  // devInspect — see predict.ts::deriveWrapperFor), so a hit is permanent
-  // and skips the devInspect round-trip.
+  // Key → cached id. Generic owner-keyed cache table, reused across eras:
+  // the deleted 4-16 `findManagerFor` wrote legacy `PredictManager` ids
+  // here under the bare owner address; the 6-24 `predict.ts::deriveWrapperFor`
+  // now writes/reads `AccountWrapper` ids under a namespaced
+  // `wrapper:v2:${owner}` key (see `WRAPPER_CACHE_PREFIX` in predict.ts) so
+  // a legacy bare-owner row surviving on a REUSED Postgres can never be
+  // read back as a validated 6-24 wrapper. The 6-24 wrapper is
+  // deterministic (derived from AccountRegistry + owner via devInspect), so
+  // a hit is permanent and skips the devInspect round-trip.
   await sql`
     CREATE TABLE IF NOT EXISTS predict_manager (
       owner      TEXT PRIMARY KEY,

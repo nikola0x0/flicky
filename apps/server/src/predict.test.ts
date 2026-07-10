@@ -31,13 +31,14 @@ const WRAPPER = "0x" + "42".repeat(32)
  * scripted queue also throws.
  */
 function clientFromReturns(
-  returns: Array<Uint8Array | "throw">,
+  returns: Array<Uint8Array | "throw">
 ): SuiGrpcClient {
   let i = 0
   return {
     core: {
       simulateTransaction: async () => {
-        if (i >= returns.length) throw new Error("over-read past scripted devInspect calls")
+        if (i >= returns.length)
+          throw new Error("over-read past scripted devInspect calls")
         const next = returns[i++]
         if (next === "throw") throw new Error("RPC unavailable")
         return { commandResults: [{ returnValues: [{ bcs: next }] }] }
@@ -67,25 +68,55 @@ describe.skipIf(!HAS_TEST_DB)("deriveWrapperFor return contract", () => {
 
   test("THROWS on an RPC error during derived_wrapper_exists — never a false null", async () => {
     const c = clientFromReturns(["throw"])
-    expect(predict.deriveWrapperFor(c, "0xowner")).rejects.toThrow("RPC unavailable")
+    expect(predict.deriveWrapperFor(c, "0xowner")).rejects.toThrow(
+      "RPC unavailable"
+    )
   })
 
   test("THROWS on an RPC error during derived_wrapper_address (after exists=true)", async () => {
     const c = clientFromReturns([boolBytes(true), "throw"])
-    expect(predict.deriveWrapperFor(c, "0xowner")).rejects.toThrow("RPC unavailable")
+    expect(predict.deriveWrapperFor(c, "0xowner")).rejects.toThrow(
+      "RPC unavailable"
+    )
   })
 
   test("a cache hit short-circuits without touching the client", async () => {
-    await db.cacheManager("0xcached", WRAPPER)
+    // Written under the namespaced key, exactly as deriveWrapperFor itself
+    // would write it (see the memoize test below) — simulates a
+    // previously-resolved 6-24 wrapper, not a raw DB poke.
+    await db.cacheManager(predict.WRAPPER_CACHE_PREFIX + "0xcached", WRAPPER)
     // A client with no scripted responses would throw (over-read) if any
     // devInspect ran; the cache must win before that.
     const c = clientFromReturns([])
     expect(await predict.deriveWrapperFor(c, "0xcached")).toBe(WRAPPER)
   })
 
-  test("memoizes a freshly-derived wrapper into the cache", async () => {
+  test("memoizes a freshly-derived wrapper into the cache under the namespaced key", async () => {
     const c = clientFromReturns([boolBytes(true), addrBytes(WRAPPER)])
     await predict.deriveWrapperFor(c, "0xfresh")
-    expect(await db.getCachedManager("0xfresh")).toBe(WRAPPER)
+    expect(
+      await db.getCachedManager(predict.WRAPPER_CACHE_PREFIX + "0xfresh")
+    ).toBe(WRAPPER)
+    // And NOT under the bare owner key — that's the legacy 4-16 shape.
+    expect(await db.getCachedManager("0xfresh")).toBeNull()
+  })
+
+  test("a legacy 4-16 row keyed by bare owner address is NEVER returned as a wrapper", async () => {
+    // Simulates a REUSED Postgres carrying a stale row from the deleted
+    // `findManagerFor`: a `PredictManager` id keyed by bare owner address,
+    // with no namespace prefix. If deriveWrapperFor's cache read matched
+    // this row, the legacy PredictManager id would leak out as if it were
+    // a validated 6-24 AccountWrapper — see the SAFETY note in predict.ts.
+    const legacyManagerId = "0x" + "99".repeat(32)
+    await db.cacheManager("0xlegacy", legacyManagerId)
+
+    // The cache miss must fall through to a real devInspect derivation
+    // (scripted responses below) rather than short-circuiting on the
+    // legacy row, and the result must be the freshly-derived wrapper, not
+    // the legacy id.
+    const c = clientFromReturns([boolBytes(true), addrBytes(WRAPPER)])
+    const resolved = await predict.deriveWrapperFor(c, "0xlegacy")
+    expect(resolved).toBe(WRAPPER)
+    expect(resolved).not.toBe(legacyManagerId)
   })
 })
