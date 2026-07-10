@@ -19,10 +19,12 @@ import type { ServerWebSocket } from "bun"
 import {
   buildDeck,
   commitDeck,
+  decideDeckSize,
   deriveSeed,
   findDeckMarkets,
   hashToHex,
   readBtcSpot,
+  resolveDeckBounds,
 } from "../deckmaster"
 import { makeLogger, shortId } from "../log"
 import type { SocketState } from "./matchmaking"
@@ -43,7 +45,11 @@ export async function handlePracticeStart(
   }
   try {
     const markets = await findDeckMarkets(5)
-    if (markets.length < 5) {
+    // Multi-card-per-market: a full deck needs only >= 2 live markets
+    // (decideDeckSize's floor); cards distribute across them with distinct
+    // strikes. Matches the real matchmaking deck-gen.
+    const decision = decideDeckSize(markets.length, resolveDeckBounds({}))
+    if (!decision.ok) {
       _sendInternal(ws, {
         type: "error",
         code: "no_oracles",
@@ -59,8 +65,11 @@ export async function handlePracticeStart(
       timestampMs: Date.now(),
       nonceHex,
     })
-    const cards = buildDeck(markets, spot, seed)
-    const botSwipes = Array.from({ length: 5 }, () => Math.random() > 0.5)
+    const cards = buildDeck(markets, spot, seed, decision.deckSize)
+    const botSwipes = Array.from(
+      { length: decision.deckSize },
+      () => Math.random() > 0.5
+    )
     const { hashHex } = commitDeck(cards)
     log.info(
       `practice for ${shortId(ws.data.address)} — deck ${shortId(hashHex)}`

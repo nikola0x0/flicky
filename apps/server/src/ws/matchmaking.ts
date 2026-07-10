@@ -26,11 +26,13 @@ import { getPlayerRating } from "../db"
 import {
   buildDeck,
   commitDeck,
+  decideDeckSize,
   deriveSeed,
   findDeckMarkets,
   hashToHex,
   readBtcSpot,
   rememberDeck,
+  resolveDeckBounds,
 } from "../deckmaster"
 import { env } from "../env"
 import { makeLogger, shortId } from "../log"
@@ -51,9 +53,13 @@ type DeckHashProvider = (opts: {
 
 let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
   const markets = await findDeckMarkets(5)
-  if (markets.length < 5) {
+  // Multi-card-per-market: distribute deckSize cards round-robin across the
+  // live markets (each with a distinct strike). A full deck needs only >= 2
+  // markets (decideDeckSize's floor), not 5 — the strike grid does the rest.
+  const decision = decideDeckSize(markets.length, resolveDeckBounds({}))
+  if (!decision.ok) {
     throw new Error(
-      `not enough live markets (${markets.length}/5) — retry in a few minutes`
+      `not enough live markets (${markets.length}/2) — retry in a couple of minutes`
     )
   }
   const spot = await readBtcSpot()
@@ -65,7 +71,7 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
     timestampMs: Date.now(),
     nonceHex,
   })
-  const cards = buildDeck(markets, spot, seed)
+  const cards = buildDeck(markets, spot, seed, decision.deckSize)
   const deck = commitDeck(cards)
   await rememberDeck(deck.hash, deck.cards, seed)
   // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields
