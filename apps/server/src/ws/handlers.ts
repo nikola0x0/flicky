@@ -139,19 +139,22 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         }
         // Pre-flight the BTC market pool so players get a clear "try
         // again in a few" instead of silently entering a queue that's
-        // going to fail at deck-gen. Upstream Predict creates markets
-        // on a cron with occasional skipped ticks — when the cron drops
-        // we sit at 4/5 eligible markets until the next beat. Letting
-        // the match form anyway leads to a retry loop that the player
-        // sees as a permanent "searching".
+        // going to fail at deck-gen. Deck-gen now distributes multiple
+        // cards per market (round-robin + strike dedup — see buildDeck
+        // in deckmaster.ts), so it no longer needs one distinct market
+        // per card — but a deck built entirely from ONE market (every
+        // card sharing an expiry) feels degenerate, so we still require
+        // at least 2 live markets to spread across. Fetch up to 5 for a
+        // fuller spread when supply allows.
         try {
+          const MIN_DECK_MARKETS = 2
           const markets = await findDeckMarkets(5)
-          if (markets.length < 5) {
+          if (markets.length < MIN_DECK_MARKETS) {
             send(ws, {
               type: "error",
               code: "oracles_unavailable",
-              message: `Only ${markets.length}/5 BTC markets are live right now. The upstream cron should produce another in a few minutes — try again then.`,
-              detail: { available: markets.length, required: 5 },
+              message: `Only ${markets.length}/${MIN_DECK_MARKETS} BTC markets live right now — try again in a couple of minutes.`,
+              detail: { available: markets.length, required: MIN_DECK_MARKETS },
             })
             return
           }

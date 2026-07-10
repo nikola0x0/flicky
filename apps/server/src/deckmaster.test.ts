@@ -136,8 +136,8 @@ describe("snapToAdmissionTick", () => {
 })
 
 describe("buildDeck", () => {
-  test("returns one card per market, in order", () => {
-    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+  test("returns one card per market, in order (deckSize == markets.length)", () => {
+    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
     expect(cards).toHaveLength(5)
     for (let i = 0; i < 5; i++) {
       expect(cards[i].expiryMarketId).toBe(FIVE_MARKETS[i].expiryMarketId)
@@ -145,14 +145,14 @@ describe("buildDeck", () => {
   })
 
   test("every card's strike sits on the market's admission grid", () => {
-    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
     for (const c of cards) {
       expect(c.strike % ADMISSION_TICK_SIZE).toBe(0n)
     }
   })
 
   test("UP-favored → lowerTick = strikeTick, higherTick = POS_INF_TICK", () => {
-    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
     for (const c of cards) {
       const strikeTick = c.strike / TICK_SIZE
       if (c.isUpFavored) {
@@ -163,7 +163,7 @@ describe("buildDeck", () => {
   })
 
   test("DOWN-favored → lowerTick = 0, higherTick = strikeTick", () => {
-    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
     for (const c of cards) {
       const strikeTick = c.strike / TICK_SIZE
       if (!c.isUpFavored) {
@@ -174,7 +174,7 @@ describe("buildDeck", () => {
   })
 
   test("isUpFavored matches strike being below spot, DOWN-favored above", () => {
-    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
     for (const c of cards) {
       if (c.isUpFavored) expect(c.strike < SPOT).toBe(true)
       else expect(c.strike > SPOT).toBe(true)
@@ -182,7 +182,7 @@ describe("buildDeck", () => {
   })
 
   test("alternating-signed strike offsets — signs balance like allocateSignBalance", () => {
-    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
     const upCount = cards.filter((c) => c.isUpFavored).length
     const downCount = cards.filter((c) => !c.isUpFavored).length
     // N=5 (odd) → 3/2 split either way.
@@ -190,21 +190,21 @@ describe("buildDeck", () => {
     expect(Math.min(upCount, downCount)).toBe(2)
   })
 
-  test("each card's expiryMarketId is distinct", () => {
-    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+  test("each card's expiryMarketId is distinct when deckSize == markets.length", () => {
+    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
     const ids = new Set(cards.map((c) => c.expiryMarketId))
     expect(ids.size).toBe(5)
   })
 
   test("deterministic — same seed, same output", () => {
-    const a = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
-    const b = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+    const a = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
+    const b = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
     expect(a).toEqual(b)
   })
 
   test("different seed → different deck shape", () => {
-    const a = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
-    const b = buildDeck(FIVE_MARKETS, SPOT, SEED_B)
+    const a = buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)
+    const b = buildDeck(FIVE_MARKETS, SPOT, SEED_B, 5)
     const aKey = a.map((c) => `${c.strike}:${c.isUpFavored}`).join(",")
     const bKey = b.map((c) => `${c.strike}:${c.isUpFavored}`).join(",")
     expect(aKey).not.toBe(bKey)
@@ -212,9 +212,14 @@ describe("buildDeck", () => {
 
   test("works for smaller deck sizes (3-4 cards, auto-deck-size)", () => {
     for (const n of [3, 4]) {
-      const cards = buildDeck(FIVE_MARKETS.slice(0, n), SPOT, SEED_A)
+      const cards = buildDeck(FIVE_MARKETS.slice(0, n), SPOT, SEED_A, n)
       expect(cards).toHaveLength(n)
     }
+  })
+
+  test("deckSize defaults to markets.length when omitted", () => {
+    const cards = buildDeck(FIVE_MARKETS, SPOT, SEED_A)
+    expect(cards).toHaveLength(5)
   })
 
   test("throws when env.deckStrikeMode is svi_quote (not implemented yet)", () => {
@@ -222,11 +227,68 @@ describe("buildDeck", () => {
     // @ts-expect-error — test-only mutation of a readonly env field.
     env.deckStrikeMode = "svi_quote"
     try {
-      expect(() => buildDeck(FIVE_MARKETS, SPOT, SEED_A)).toThrow(/svi_quote/)
+      expect(() => buildDeck(FIVE_MARKETS, SPOT, SEED_A, 5)).toThrow(
+        /svi_quote/
+      )
     } finally {
       // @ts-expect-error — restore.
       env.deckStrikeMode = original
     }
+  })
+
+  test("throws when markets is empty", () => {
+    expect(() => buildDeck([], SPOT, SEED_A, 5)).toThrow()
+  })
+
+  test("deckSize <= 0 returns []", () => {
+    expect(buildDeck(FIVE_MARKETS, SPOT, SEED_A, 0)).toEqual([])
+    expect(buildDeck(FIVE_MARKETS, SPOT, SEED_A, -1)).toEqual([])
+  })
+
+  test("one market, deckSize 5 → all 5 cards on that market, 5 distinct strikes", () => {
+    const oneMarket = [FIVE_MARKETS[0]]
+    const cards = buildDeck(oneMarket, SPOT, SEED_A, 5)
+    expect(cards).toHaveLength(5)
+    for (const c of cards) {
+      expect(c.expiryMarketId).toBe(FIVE_MARKETS[0].expiryMarketId)
+    }
+    expect(new Set(cards.map((c) => c.strike)).size).toBe(5)
+  })
+
+  test("three markets, deckSize 5 → round-robin distribution, distinct (market,strike) pairs", () => {
+    const threeMarkets = FIVE_MARKETS.slice(0, 3)
+    const cards = buildDeck(threeMarkets, SPOT, SEED_A, 5)
+    expect(cards).toHaveLength(5)
+    // Round-robin: markets[0,1,2,0,1] for indices 0..4.
+    expect(cards[0].expiryMarketId).toBe(threeMarkets[0].expiryMarketId)
+    expect(cards[1].expiryMarketId).toBe(threeMarkets[1].expiryMarketId)
+    expect(cards[2].expiryMarketId).toBe(threeMarkets[2].expiryMarketId)
+    expect(cards[3].expiryMarketId).toBe(threeMarkets[0].expiryMarketId)
+    expect(cards[4].expiryMarketId).toBe(threeMarkets[1].expiryMarketId)
+    // Every market used.
+    const usedMarkets = new Set(cards.map((c) => c.expiryMarketId))
+    expect(usedMarkets.size).toBe(3)
+    // Distinct (market, strike) pairs — no duplicate on-chain cards.
+    const pairs = new Set(cards.map((c) => `${c.expiryMarketId}:${c.strike}`))
+    expect(pairs.size).toBe(5)
+  })
+
+  test("two markets, deckSize 5 → 3+2 split, distinct strikes within each market", () => {
+    const twoMarkets = FIVE_MARKETS.slice(0, 2)
+    const cards = buildDeck(twoMarkets, SPOT, SEED_A, 5)
+    expect(cards).toHaveLength(5)
+    const byMarket = new Map<string, bigint[]>()
+    for (const c of cards) {
+      const arr = byMarket.get(c.expiryMarketId) ?? []
+      arr.push(c.strike)
+      byMarket.set(c.expiryMarketId, arr)
+    }
+    expect(byMarket.size).toBe(2)
+    for (const strikes of byMarket.values()) {
+      expect(new Set(strikes).size).toBe(strikes.length)
+    }
+    const pairs = new Set(cards.map((c) => `${c.expiryMarketId}:${c.strike}`))
+    expect(pairs.size).toBe(5)
   })
 })
 
@@ -437,27 +499,43 @@ describe("resolveDeckBounds", () => {
   })
 })
 
-describe("decideDeckSize (greedy 3–5)", () => {
+describe("decideDeckSize (deck size decoupled from market count)", () => {
   const band = { min: 3, max: 5 }
 
-  test("5 live → deck of 5", () => {
+  test("5 live → deck of max (5), built via multi-card-per-market round-robin", () => {
     expect(decideDeckSize(5, band)).toEqual({ ok: true, deckSize: 5 })
   })
 
-  test("4 live → deck of 4", () => {
-    expect(decideDeckSize(4, band)).toEqual({ ok: true, deckSize: 4 })
+  test("4 live → still deck of max (5)", () => {
+    expect(decideDeckSize(4, band)).toEqual({ ok: true, deckSize: 5 })
   })
 
-  test("3 live → deck of 3", () => {
-    expect(decideDeckSize(3, band)).toEqual({ ok: true, deckSize: 3 })
+  test("3 live → still deck of max (5)", () => {
+    expect(decideDeckSize(3, band)).toEqual({ ok: true, deckSize: 5 })
   })
 
-  test("2 live → not ok (below min)", () => {
-    expect(decideDeckSize(2, band).ok).toBe(false)
+  test("2 live → ok, deck of max (5) — multi-card-per-market covers the gap", () => {
+    expect(decideDeckSize(2, band)).toEqual({ ok: true, deckSize: 5 })
   })
 
-  test("more live than max → capped at max", () => {
+  test("1 live → not ok (below the 2-market minimum spread)", () => {
+    expect(decideDeckSize(1, band).ok).toBe(false)
+  })
+
+  test("0 live → not ok", () => {
+    expect(decideDeckSize(0, band).ok).toBe(false)
+  })
+
+  test("more live than max → still capped at max", () => {
     expect(decideDeckSize(9, band)).toEqual({ ok: true, deckSize: 5 })
+  })
+
+  test("explicit deckSize band (min==max==n) → deckSize n, ok once ≥2 live", () => {
+    expect(decideDeckSize(2, { min: 3, max: 3 })).toEqual({
+      ok: true,
+      deckSize: 3,
+    })
+    expect(decideDeckSize(1, { min: 3, max: 3 }).ok).toBe(false)
   })
 })
 

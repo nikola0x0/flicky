@@ -361,10 +361,24 @@ export interface DeckCardOut {
   isUpFavored: boolean
 }
 
+/** Bps added to a colliding card's zone offset on each dedup retry, and the
+ *  cumulative cap on how far a single card's offset may be widened before
+ *  we give up trying to find a fresh (market, strikeTick) pair. */
+const DEDUP_BUMP_STEP_BPS = 25
+const DEDUP_MAX_BUMP_BPS = 2000
+
 /**
- * Build a price-space deck: one card per market, strike = spot ± a
- * zone-scaled bps offset, sign-balanced across the deck, snapped to each
- * market's admission grid.
+ * Build a price-space deck of `deckSize` cards distributed round-robin
+ * across `markets` (so a full deck can be built from as few as ONE live
+ * market), strike = spot ± a zone-scaled bps offset, sign-balanced across
+ * the deck, snapped to each card's market's admission grid.
+ *
+ * `Card` on chain is `(expiry_market_id, strike)` only — two cards sharing
+ * a (market, strikeTick) pair would be identical commitments, so cards
+ * landing on the same market are guaranteed distinct strikes: on a
+ * collision the card's offset is widened by `DEDUP_BUMP_STEP_BPS` and
+ * retried (direction/sign is preserved), up to `DEDUP_MAX_BUMP_BPS` total
+ * added bps.
  *
  * Guards `env.deckStrikeMode === "svi_quote"` — that mode (an off-chain
  * SVI-informed picker) isn't implemented yet.
@@ -372,27 +386,45 @@ export interface DeckCardOut {
 export function buildDeck(
   markets: MarketSnapshot[],
   spot: bigint,
-  seed: Uint8Array
+  seed: Uint8Array,
+  deckSize: number = markets.length
 ): DeckCardOut[] {
   if (env.deckStrikeMode === "svi_quote") {
     throw new Error("svi_quote strike mode not implemented yet")
   }
+  if (markets.length === 0) {
+    throw new Error("buildDeck: no markets supplied")
+  }
+  if (deckSize <= 0) return []
   const stream = prgStream(seed)
-  const signs = allocateSignBalance(markets.length, stream)
-  const zones = allocateZones(markets.length, stream)
-  return markets.map((m, i) => {
+  const signs = allocateSignBalance(deckSize, stream)
+  const zones = allocateZones(deckSize, stream)
+  const seen = new Set<string>()
+  return Array.from({ length: deckSize }, (_, i) => {
+    const m = markets[i % markets.length]
+    const marketId = normalizeSuiAddress(m.expiryMarketId)
     const sign = signs[i]
-    const offsetBps = BigInt(ZONE_OFFSET_BPS[zones[i]])
-    const offset = (spot * offsetBps) / 10_000n
-    const rawStrike = sign > 0 ? spot + offset : spot - offset
-    const strikeTick = snapToAdmissionTick(
-      rawStrike,
-      m.tickSize,
-      m.admissionTickSize
-    )
+    const baseOffsetBps = ZONE_OFFSET_BPS[zones[i]]
+    let bumpBps = 0
+    let strikeTick: bigint
+    let key: string
+    for (;;) {
+      const offsetBps = BigInt(baseOffsetBps + bumpBps)
+      const offset = (spot * offsetBps) / 10_000n
+      const rawStrike = sign > 0 ? spot + offset : spot - offset
+      strikeTick = snapToAdmissionTick(
+        rawStrike,
+        m.tickSize,
+        m.admissionTickSize
+      )
+      key = `${marketId}:${strikeTick}`
+      if (!seen.has(key) || bumpBps >= DEDUP_MAX_BUMP_BPS) break
+      bumpBps += DEDUP_BUMP_STEP_BPS
+    }
+    seen.add(key)
     const isUpFavored = sign < 0
     return {
-      expiryMarketId: normalizeSuiAddress(m.expiryMarketId),
+      expiryMarketId: marketId,
       strike: strikeTick * m.tickSize,
       lowerTick: isUpFavored ? strikeTick : 0n,
       higherTick: isUpFavored ? POS_INF_TICK : strikeTick,
@@ -455,17 +487,22 @@ export function resolveDeckBounds(body: {
 }
 
 /**
- * Greedy sizing: build the largest deck supply allows, capped at `max`.
- * `ok` is false when fewer than `min` markets are live — the only failure
- * case (surfaces as a 503). `deckSize` is meaningful only when `ok`.
+ * Deck size no longer tracks live market count: `buildDeck` distributes
+ * `deckSize` cards round-robin across whatever markets are live,
+ * guaranteeing distinct (market, strike) pairs. So the market pool no
+ * longer needs to be as large as the deck — but a deck built from a
+ * single market (every card sharing an expiry) is degenerate, so `ok`
+ * still requires at least 2 live markets to spread across. `deckSize` is
+ * always the band's `max` (an explicit `deckSize` request collapses
+ * `resolveDeckBounds` to `{min: n, max: n}`, so this still returns `n`).
  */
 export function decideDeckSize(
   liveCount: number,
   bounds: { min: number; max: number }
 ): { ok: boolean; deckSize: number } {
   return {
-    ok: liveCount >= bounds.min,
-    deckSize: Math.min(liveCount, bounds.max),
+    ok: liveCount >= 2,
+    deckSize: bounds.max,
   }
 }
 
@@ -568,18 +605,21 @@ export async function handleDeckmasterRequest(
     // the band for back-compat.
     const bounds = resolveDeckBounds(body ?? {})
     try {
+      // findDeckMarkets fetches up to bounds.max markets for spread — but
+      // buildDeck no longer needs one distinct market per card, so a
+      // single live market is enough to build the full deckSize (cards
+      // round-robin across whatever's live; see buildDeck's dedup logic).
       const markets = await findDeckMarkets(bounds.max)
       const decision = decideDeckSize(markets.length, bounds)
       if (!decision.ok) {
         return json(
           {
             error: "not enough live markets",
-            detail: `found ${markets.length} live BTC ExpiryMarkets settling within ${env.deckCardMaxHorizonMs / 60_000}min, need ≥${bounds.min}; retry shortly`,
+            detail: `found ${markets.length} live BTC ExpiryMarkets settling within ${env.deckCardMaxHorizonMs / 60_000}min, need ≥2; retry shortly`,
           },
           503
         )
       }
-      const chosen = markets.slice(0, decision.deckSize)
       const spot = await readBtcSpot()
       // Derive a deterministic seed for this generation. The seed is
       // saved alongside the plaintext so anyone with (seed, market list)
@@ -593,14 +633,14 @@ export async function handleDeckmasterRequest(
         timestampMs: Date.now(),
         nonceHex,
       })
-      const outCards = buildDeck(chosen, spot, seed)
+      const outCards = buildDeck(markets, spot, seed, decision.deckSize)
       const deck = commitDeck(outCards)
       await rememberDeck(deck.hash, deck.cards, seed)
       return json({
         cards: outCards.map((c, i) => ({
           expiry_market_id: c.expiryMarketId,
           strike: c.strike.toString(),
-          expiry: chosen[i].expiry.toString(),
+          expiry: markets[i % markets.length].expiry.toString(),
         })),
         hash: deck.hashHex,
         seed: hashToHex(seed),
