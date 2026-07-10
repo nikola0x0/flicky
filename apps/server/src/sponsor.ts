@@ -26,6 +26,8 @@ import { env } from "./env"
 import { makeLogger } from "./log"
 import { clientIp, consume } from "./ratelimit"
 
+export { env }
+
 const log = makeLogger("sponsor")
 
 // ─── Allowlist of MoveCall targets ──────────────────────────────────────────
@@ -54,7 +56,7 @@ const FLICKY_FNS = [
   "duel::settle_card_free",
   "duel::finalize",
   "duel::finalize_free",
-  "duel::finalize_test_one_oracle",
+  "duel::finalize_test_one_price",
 ]
 
 /**
@@ -71,15 +73,25 @@ const SWAP_FNS = [
   "swap::swap_y_for_x",
 ]
 
+/**
+ * Account registry functions (6-24 protocol).
+ *
+ * Player accounts in Enoki ZkLogin context — registry for account discovery
+ * and account-level operations (funding, withdrawals, auth generation).
+ */
+const ACCOUNT_FNS = [
+  "account_registry::new",
+  "account::share",
+  "account::generate_auth",
+  "account::deposit_funds",
+  "account::withdraw_funds",
+]
+
 const DEEPBOOK_PREDICT_FNS = [
-  "predict::create_manager",
-  "predict::mint",
-  "predict::redeem",
-  "predict::redeem_permissionless",
-  "predict_manager::deposit",
-  "predict_manager::withdraw",
-  "market_key::up",
-  "market_key::down",
+  "expiry_market::load_live_pricer",
+  "expiry_market::mint_exact_quantity",
+  "expiry_market::mint_exact_amount",
+  "expiry_market::redeem_live",
 ]
 
 export type EnokiNetwork = "testnet" | "mainnet"
@@ -114,6 +126,16 @@ function resolveFlickyPackage(network: EnokiNetwork): string {
   )
 }
 
+function resolveAccountPackage(network: EnokiNetwork): string {
+  const override = process.env[`ACCOUNT_PACKAGE_${network.toUpperCase()}`]
+  if (override) return override
+  if (network === "testnet" && env.accountPackageId) return env.accountPackageId
+  throw new Error(
+    `Cannot resolve account package for ${network} — set ACCOUNT_PACKAGE_${network.toUpperCase()} ` +
+      `(or publish via apps/contracts on testnet to populate deployed.json).`,
+  )
+}
+
 function resolveSwapPackage(network: EnokiNetwork): string | null {
   const override = process.env[`SWAP_PACKAGE_${network.toUpperCase()}`]
   if (override) return override
@@ -125,10 +147,12 @@ function resolveSwapPackage(network: EnokiNetwork): string | null {
 
 export function buildAllowedTargets(network: EnokiNetwork): string[] {
   const flicky = resolveFlickyPackage(network)
+  const account = resolveAccountPackage(network)
   const deepbook = resolveDeepbookPackage(network)
   const swap = resolveSwapPackage(network)
   const targets = [
     ...FLICKY_FNS.map((fn) => `${flicky}::${fn}`),
+    ...ACCOUNT_FNS.map((fn) => `${account}::${fn}`),
     ...DEEPBOOK_PREDICT_FNS.map((fn) => `${deepbook}::${fn}`),
   ]
   if (swap) targets.push(...SWAP_FNS.map((fn) => `${swap}::${fn}`))

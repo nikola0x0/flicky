@@ -13,6 +13,7 @@ let sponsor: typeof import("./sponsor")
 
 const originalAllowedOrigin = process.env.ALLOWED_ORIGIN
 const originalFlickyMainnet = process.env.FLICKY_PACKAGE_MAINNET
+const originalAccountMainnet = process.env.ACCOUNT_PACKAGE_MAINNET
 const originalDeepbookMainnet = process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET
 
 beforeAll(async () => {
@@ -26,11 +27,23 @@ afterAll(() => {
   else process.env.ALLOWED_ORIGIN = originalAllowedOrigin
   if (originalFlickyMainnet === undefined) delete process.env.FLICKY_PACKAGE_MAINNET
   else process.env.FLICKY_PACKAGE_MAINNET = originalFlickyMainnet
+  if (originalAccountMainnet === undefined) delete process.env.ACCOUNT_PACKAGE_MAINNET
+  else process.env.ACCOUNT_PACKAGE_MAINNET = originalAccountMainnet
   if (originalDeepbookMainnet === undefined) delete process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET
   else process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET = originalDeepbookMainnet
 })
 
 describe("buildAllowedTargets", () => {
+  test("allowlist covers 6-24 account + expiry_market targets, not 4-16 predict", () => {
+    const targets = sponsor.buildAllowedTargets("testnet")
+    expect(targets).toContain(`${sponsor.env.accountPackageId}::account_registry::new`)
+    expect(targets).toContain(`${sponsor.env.accountPackageId}::account::deposit_funds`)
+    expect(targets).toContain(`${sponsor.env.deepbookPredictPackageId}::expiry_market::mint_exact_quantity`)
+    expect(targets).toContain(`${sponsor.env.flickyPackageId}::duel::finalize_test_one_price`)
+    expect(targets.some((t) => t.includes("::predict::mint"))).toBe(false)
+    expect(targets.some((t) => t.includes("finalize_test_one_oracle"))).toBe(false)
+  })
+
   test("testnet — covers every flicky duel entry + every DeepBook fn", () => {
     const targets = sponsor.buildAllowedTargets("testnet")
     // flicky duel functions (swap is a separate package — checked below)
@@ -49,9 +62,21 @@ describe("buildAllowedTargets", () => {
       "duel::settle_card_free",
       "duel::finalize",
       "duel::finalize_free",
-      "duel::finalize_test_one_oracle",
+      "duel::finalize_test_one_price",
     ]
     for (const fn of expectedFlickyFns) {
+      const matching = targets.filter((t) => t.endsWith(`::${fn}`))
+      expect(matching).toHaveLength(1)
+    }
+    // Account functions allowlisted under the account package.
+    const expectedAccountFns = [
+      "account_registry::new",
+      "account::share",
+      "account::generate_auth",
+      "account::deposit_funds",
+      "account::withdraw_funds",
+    ]
+    for (const fn of expectedAccountFns) {
       const matching = targets.filter((t) => t.endsWith(`::${fn}`))
       expect(matching).toHaveLength(1)
     }
@@ -62,16 +87,12 @@ describe("buildAllowedTargets", () => {
     expect(swapTargets.map((t) => t.split("::").slice(1).join("::"))).toEqual(
       expect.arrayContaining(["swap::swap_x_for_y", "swap::swap_y_for_x"]),
     )
-    // DeepBook Predict functions
+    // DeepBook Predict functions (6-24 set)
     const expectedDeepbookFns = [
-      "predict::create_manager",
-      "predict::mint",
-      "predict::redeem",
-      "predict::redeem_permissionless",
-      "predict_manager::deposit",
-      "predict_manager::withdraw",
-      "market_key::up",
-      "market_key::down",
+      "expiry_market::load_live_pricer",
+      "expiry_market::mint_exact_quantity",
+      "expiry_market::mint_exact_amount",
+      "expiry_market::redeem_live",
     ]
     for (const fn of expectedDeepbookFns) {
       const matching = targets.filter((t) => t.endsWith(`::${fn}`))
@@ -86,15 +107,6 @@ describe("buildAllowedTargets", () => {
     }
   })
 
-  test("mainnet — throws clearly when DEEPBOOK_PREDICT_PACKAGE_MAINNET unset", () => {
-    delete process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET
-    // Also need a flicky mainnet override or it throws first on that.
-    process.env.FLICKY_PACKAGE_MAINNET = "0xdeadbeef"
-    expect(() => sponsor.buildAllowedTargets("mainnet")).toThrow(
-      /DEEPBOOK_PREDICT_PACKAGE_MAINNET/,
-    )
-  })
-
   test("mainnet — throws clearly when FLICKY_PACKAGE_MAINNET unset", () => {
     delete process.env.FLICKY_PACKAGE_MAINNET
     expect(() => sponsor.buildAllowedTargets("mainnet")).toThrow(
@@ -102,12 +114,33 @@ describe("buildAllowedTargets", () => {
     )
   })
 
-  test("mainnet — succeeds when both env overrides are set", () => {
+  test("mainnet — throws clearly when ACCOUNT_PACKAGE_MAINNET unset", () => {
+    delete process.env.ACCOUNT_PACKAGE_MAINNET
+    // Set flicky to pass first check
     process.env.FLICKY_PACKAGE_MAINNET = "0xflickymainnetpkg"
+    expect(() => sponsor.buildAllowedTargets("mainnet")).toThrow(
+      /ACCOUNT_PACKAGE_MAINNET/,
+    )
+  })
+
+  test("mainnet — throws clearly when DEEPBOOK_PREDICT_PACKAGE_MAINNET unset", () => {
+    delete process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET
+    // Set flicky and account to pass first checks
+    process.env.FLICKY_PACKAGE_MAINNET = "0xflickymainnetpkg"
+    process.env.ACCOUNT_PACKAGE_MAINNET = "0xaccountmainnetpkg"
+    expect(() => sponsor.buildAllowedTargets("mainnet")).toThrow(
+      /DEEPBOOK_PREDICT_PACKAGE_MAINNET/,
+    )
+  })
+
+  test("mainnet — succeeds when all three env overrides are set", () => {
+    process.env.FLICKY_PACKAGE_MAINNET = "0xflickymainnetpkg"
+    process.env.ACCOUNT_PACKAGE_MAINNET = "0xaccountmainnetpkg"
     process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET = "0xdeepbookmainnetpkg"
     const targets = sponsor.buildAllowedTargets("mainnet")
     expect(targets.length).toBeGreaterThan(0)
     expect(targets.some((t) => t.startsWith("0xflickymainnetpkg::"))).toBe(true)
+    expect(targets.some((t) => t.startsWith("0xaccountmainnetpkg::"))).toBe(true)
     expect(targets.some((t) => t.startsWith("0xdeepbookmainnetpkg::"))).toBe(true)
   })
 })
