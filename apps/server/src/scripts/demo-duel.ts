@@ -21,7 +21,12 @@
 import { Transaction } from "@mysten/sui/transactions"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { SUI_CLOCK_OBJECT_ID, normalizeSuiObjectId } from "@mysten/sui/utils"
-import { getAdminKeypair, getSuiClient, requireEnv } from "../lib/sui"
+import {
+  getAdminKeypair,
+  getGraphQLClient,
+  getSuiClient,
+  requireEnv,
+} from "../lib/sui"
 
 const DEEPBOOK_PREDICT_PACKAGE =
   "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
@@ -51,35 +56,57 @@ interface OracleSVIInfo {
 
 async function findLatestOracle(): Promise<OracleSVIInfo> {
   const client = getSuiClient()
-  const evts = await client.queryEvents({
-    query: { MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::registry::OracleCreated` },
-    limit: 10,
-    order: "descending",
-  })
-  for (const e of evts.data) {
-    const parsed = e.parsedJson as {
+  // gRPC has no filtered event API — discover via GraphQL (mirrors keeper.ts /
+  // indexer.ts). `last: N` returns the N most-recent events in ASCENDING order,
+  // so reverse to scan newest-first (the old `order: "descending"` semantics).
+  const res = (await getGraphQLClient().query({
+    query: `query Ev($type: String!) {
+      events(filter: { type: $type }, last: 10) {
+        nodes { contents { json } }
+      }
+    }`,
+    variables: { type: `${DEEPBOOK_PREDICT_PACKAGE}::registry::OracleCreated` },
+  })) as {
+    data?: {
+      events?: { nodes?: Array<{ contents: { json: Record<string, unknown> } }> }
+    }
+  }
+  const nodes = [...(res.data?.events?.nodes ?? [])].reverse()
+  for (const node of nodes) {
+    const parsed = node.contents.json as {
       oracle_id: string
       underlying_asset: string
     }
     if (parsed.underlying_asset !== "BTC") continue
-    const obj = await client.getObject({
-      id: parsed.oracle_id,
-      options: { showContent: true },
+    const obj = await client.core.getObject({
+      objectId: parsed.oracle_id,
+      include: { json: true },
     })
-    if (obj.data?.content?.dataType !== "moveObject") continue
-    const f = obj.data.content.fields as {
-      prices: { fields: { spot: string; forward: string } }
-      expiry: string
-      settlement_price: string | null
+    // gRPC json flattens the Move struct: `prices.spot` (not `prices.fields.spot`),
+    // and Option<u64> `settlement_price` is a bare string, `{fields:{vec:[…]}}`,
+    // or null (same shapes keeper.ts readOracleSettled handles).
+    const f = obj.object?.json as
+      | {
+          prices: { spot: string; forward: string }
+          expiry: string
+          settlement_price: string | null | { fields?: { vec?: string[] } }
+        }
+      | undefined
+    if (!f) continue
+    let settlementPrice: bigint | null = null
+    if (typeof f.settlement_price === "string") {
+      settlementPrice = BigInt(f.settlement_price)
+    } else if (f.settlement_price && typeof f.settlement_price === "object") {
+      const vec = f.settlement_price.fields?.vec ?? []
+      if (vec.length > 0) settlementPrice = BigInt(vec[0])
     }
     return {
       id: normalizeSuiObjectId(parsed.oracle_id),
-      spot: BigInt(f.prices.fields.spot),
-      forward: BigInt(f.prices.fields.forward),
+      spot: BigInt(f.prices.spot),
+      forward: BigInt(f.prices.forward),
       expiry: BigInt(f.expiry),
-      settled: f.settlement_price !== null,
-      settlementPrice:
-        f.settlement_price !== null ? BigInt(f.settlement_price as string) : null,
+      settled: settlementPrice !== null,
+      settlementPrice,
     }
   }
   throw new Error("no recent BTC OracleSVI found")
@@ -117,10 +144,11 @@ async function main() {
     const res = await client.signAndExecuteTransaction({
       transaction: tx,
       signer: admin,
-      options: { showEffects: true },
     })
-    if (res.effects?.status.status !== "success") throw new Error("fund failed")
-    await client.waitForTransaction({ digest: res.digest })
+    if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
+      throw new Error("fund failed")
+    }
+    await client.waitForTransaction({ digest: res.Transaction.digest })
     console.log(`\nfunded challenger with ${fmtSui(CHALLENGER_FUND_MIST)}`)
   }
 
@@ -150,16 +178,23 @@ async function main() {
     const res = await client.signAndExecuteTransaction({
       transaction: tx,
       signer: admin,
-      options: { showObjectChanges: true, showEffects: true },
+      // Need the created Duel object + its type — gRPC surfaces created objects
+      // via effects.changedObjects (idOperation === "Created") and resolves each
+      // id's type through objectTypes[id] (replaces v1 objectChanges).
+      include: { effects: true, objectTypes: true },
     })
-    if (res.effects?.status.status !== "success") {
-      throw new Error(`create_duel failed: ${JSON.stringify(res.effects?.status)}`)
+    if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
+      const reason = res.Transaction?.status.error?.message ?? "unknown"
+      throw new Error(`create_duel failed: ${reason}`)
     }
-    await client.waitForTransaction({ digest: res.digest })
-    const created = res.objectChanges?.find(
-      (c) => c.type === "created" && c.objectType.includes("::duel::Duel<"),
+    await client.waitForTransaction({ digest: res.Transaction.digest })
+    const t = res.Transaction
+    const created = t.effects.changedObjects.find(
+      (c) =>
+        c.idOperation === "Created" &&
+        (t.objectTypes[c.objectId] ?? "").includes("::duel::Duel<"),
     )
-    if (!created || created.type !== "created") throw new Error("Duel not found")
+    if (!created) throw new Error("Duel not found")
     duelId = normalizeSuiObjectId(created.objectId)
     console.log(`\nduel created: ${duelId}  (admin staked ${fmtSui(STAKE_MIST)})`)
   }
@@ -176,12 +211,12 @@ async function main() {
     const res = await client.signAndExecuteTransaction({
       transaction: tx,
       signer: challenger,
-      options: { showEffects: true },
     })
-    if (res.effects?.status.status !== "success") {
-      throw new Error(`join_duel failed: ${JSON.stringify(res.effects?.status)}`)
+    if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
+      const reason = res.Transaction?.status.error?.message ?? "unknown"
+      throw new Error(`join_duel failed: ${reason}`)
     }
-    await client.waitForTransaction({ digest: res.digest })
+    await client.waitForTransaction({ digest: res.Transaction.digest })
     console.log(`challenger joined and staked ${fmtSui(STAKE_MIST)}`)
   }
 
@@ -207,12 +242,12 @@ async function main() {
       const res = await client.signAndExecuteTransaction({
         transaction: tx,
         signer,
-        options: { showEffects: true },
       })
-      if (res.effects?.status.status !== "success") {
-        throw new Error(`swipe failed (card ${i}, ${name}): ${JSON.stringify(res.effects?.status)}`)
+      if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
+        const reason = res.Transaction?.status.error?.message ?? "unknown"
+        throw new Error(`swipe failed (card ${i}, ${name}): ${reason}`)
       }
-      await client.waitForTransaction({ digest: res.digest })
+      await client.waitForTransaction({ digest: res.Transaction.digest })
       console.log(`  card ${i}: ${name.padEnd(10)} → ${isUp ? "UP  " : "DOWN"}`)
     }
   }
@@ -231,20 +266,25 @@ async function main() {
     const res = await client.signAndExecuteTransaction({
       transaction: tx,
       signer: admin,
-      options: { showEffects: true, showEvents: true },
+      // Read emitted CardSettled events directly off the execution result.
+      include: { events: true },
     })
-    if (res.effects?.status.status !== "success") {
-      throw new Error(`settle batch failed: ${JSON.stringify(res.effects?.status)}`)
+    if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
+      const reason = res.Transaction?.status.error?.message ?? "unknown"
+      throw new Error(`settle batch failed: ${reason}`)
     }
-    await client.waitForTransaction({ digest: res.digest })
-    const settled = res.events?.filter((e) => e.type.endsWith("::duel::CardSettled")) ?? []
+    await client.waitForTransaction({ digest: res.Transaction.digest })
+    const settled = res.Transaction.events.filter((e) =>
+      e.eventType.endsWith("::duel::CardSettled"),
+    )
     for (const ev of settled) {
-      const p = ev.parsedJson as {
+      const p = ev.json as {
         card_idx: string
         settlement_price: string
         p0_card_score: string
         p1_card_score: string
-      }
+      } | null
+      if (!p) continue
       console.log(
         `  card ${p.card_idx}: strike=${fmtUsd(strikes[Number(p.card_idx)])}  ` +
           `settle=${fmtUsd(BigInt(p.settlement_price))}  ` +
@@ -265,15 +305,18 @@ async function main() {
     const res = await client.signAndExecuteTransaction({
       transaction: tx,
       signer: admin,
-      options: { showEffects: true, showEvents: true },
+      include: { events: true },
     })
-    if (res.effects?.status.status !== "success") {
-      throw new Error(`finalize failed: ${JSON.stringify(res.effects?.status)}`)
+    if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
+      const reason = res.Transaction?.status.error?.message ?? "unknown"
+      throw new Error(`finalize failed: ${reason}`)
     }
-    await client.waitForTransaction({ digest: res.digest })
-    const ev = res.events?.find((e) => e.type.endsWith("::duel::DuelFinalized"))
-    if (ev) {
-      const p = ev.parsedJson as {
+    await client.waitForTransaction({ digest: res.Transaction.digest })
+    const ev = res.Transaction.events.find((e) =>
+      e.eventType.endsWith("::duel::DuelFinalized"),
+    )
+    if (ev && ev.json) {
+      const p = ev.json as {
         p0_score: string
         p1_score: string
         winner: string

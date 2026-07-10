@@ -34,8 +34,8 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography"
 import { bcs } from "@mysten/sui/bcs"
 import { SUI_CLOCK_OBJECT_ID, normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc"
-import { getSuiClient } from "../lib/sui"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
+import { getGraphQLClient, getSuiClient } from "../lib/sui"
 
 const CardBcs = bcs.struct("Card", {
   oracle_id: bcs.Address,
@@ -83,28 +83,43 @@ function loadPackageId(): string | null {
   }
 }
 
-async function findSettledBtcOracle(client: SuiJsonRpcClient): Promise<OracleSVI | null> {
-  const evts = await client.queryEvents({
-    query: { MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::registry::OracleCreated` },
-    limit: 30,
-    order: "descending",
-  })
-  for (const e of evts.data) {
-    const parsed = e.parsedJson as { oracle_id: string; underlying_asset: string }
-    if (parsed.underlying_asset !== "BTC") continue
-    const obj = await client.getObject({
-      id: parsed.oracle_id,
-      options: { showContent: true },
-    })
-    if (obj.data?.content?.dataType !== "moveObject") continue
-    const f = obj.data.content.fields as {
-      prices: { fields: { spot: string; forward: string } }
-      expiry: string
-      settlement_price:
-        | string
-        | null
-        | { fields: { vec: string[] } }
+// gRPC has no filtered event API — discover via GraphQL (mirrors keeper.ts /
+// indexer.ts). `last: N` returns the N most-recent events in ASCENDING order,
+// so reverse each result set to scan newest-first (old `order: "descending"`).
+async function findSettledBtcOracle(client: SuiGrpcClient): Promise<OracleSVI | null> {
+  const res = (await getGraphQLClient().query({
+    query: `query Ev($type: String!) {
+      events(filter: { type: $type }, last: 30) {
+        nodes { contents { json } }
+      }
+    }`,
+    variables: { type: `${DEEPBOOK_PREDICT_PACKAGE}::registry::OracleCreated` },
+  })) as {
+    data?: {
+      events?: { nodes?: Array<{ contents: { json: Record<string, unknown> } }> }
     }
+  }
+  const nodes = [...(res.data?.events?.nodes ?? [])].reverse()
+  for (const node of nodes) {
+    const parsed = node.contents.json as { oracle_id: string; underlying_asset: string }
+    if (parsed.underlying_asset !== "BTC") continue
+    const obj = await client.core.getObject({
+      objectId: parsed.oracle_id,
+      include: { json: true },
+    })
+    // gRPC json flattens the Move struct: `prices.spot` (not `prices.fields.spot`),
+    // and Option<u64> `settlement_price` is a bare string, `{fields:{vec:[…]}}`, or null.
+    const f = obj.object?.json as
+      | {
+          prices: { spot: string; forward: string }
+          expiry: string
+          settlement_price:
+            | string
+            | null
+            | { fields?: { vec?: string[] } }
+        }
+      | undefined
+    if (!f) continue
     let settlementPrice: bigint | null = null
     if (typeof f.settlement_price === "string") {
       settlementPrice = BigInt(f.settlement_price)
@@ -115,8 +130,8 @@ async function findSettledBtcOracle(client: SuiJsonRpcClient): Promise<OracleSVI
     if (settlementPrice === null) continue // skip unsettled
     return {
       id: normalizeSuiObjectId(parsed.oracle_id),
-      spot: BigInt(f.prices.fields.spot),
-      forward: BigInt(f.prices.fields.forward),
+      spot: BigInt(f.prices.spot),
+      forward: BigInt(f.prices.forward),
       expiry: BigInt(f.expiry),
       settlementPrice,
     }
@@ -130,19 +145,28 @@ async function findSettledBtcOracle(client: SuiJsonRpcClient): Promise<OracleSVI
  * Returns null when no manager exists for that owner — caller skips.
  */
 async function findManagerObject(
-  client: SuiJsonRpcClient,
+  client: SuiGrpcClient,
   owner: string,
 ): Promise<string | null> {
-  const evts = await client.queryEvents({
-    query: {
-      MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::predict_manager::PredictManagerCreated`,
+  void client // discovery is via GraphQL events; client kept for signature parity
+  const res = (await getGraphQLClient().query({
+    query: `query Ev($type: String!) {
+      events(filter: { type: $type }, last: 50) {
+        nodes { contents { json } }
+      }
+    }`,
+    variables: {
+      type: `${DEEPBOOK_PREDICT_PACKAGE}::predict_manager::PredictManagerCreated`,
     },
-    limit: 50,
-    order: "descending",
-  })
+  })) as {
+    data?: {
+      events?: { nodes?: Array<{ contents: { json: Record<string, unknown> } }> }
+    }
+  }
+  const nodes = [...(res.data?.events?.nodes ?? [])].reverse()
   const normalized = normalizeSuiAddress(owner).toLowerCase()
-  for (const e of evts.data) {
-    const p = e.parsedJson as { manager_id: string; owner: string }
+  for (const node of nodes) {
+    const p = node.contents.json as { manager_id: string; owner: string }
     if (normalizeSuiAddress(p.owner).toLowerCase() === normalized) {
       return normalizeSuiObjectId(p.manager_id)
     }
@@ -158,7 +182,7 @@ async function findManagerObject(
  * real object id to pass.
  */
 async function ensureManagerObject(
-  client: SuiJsonRpcClient,
+  client: SuiGrpcClient,
   signer: Ed25519Keypair,
 ): Promise<string> {
   const owner = signer.toSuiAddress()
@@ -172,24 +196,29 @@ async function ensureManagerObject(
   const res = await client.signAndExecuteTransaction({
     transaction: tx,
     signer,
-    options: { showObjectChanges: true, showEffects: true },
+    // Created PredictManager surfaces via effects.changedObjects (idOperation
+    // === "Created"); resolve its type through objectTypes[id].
+    include: { effects: true, objectTypes: true },
   })
-  if (res.effects?.status.status !== "success") {
-    throw new Error(`create_manager failed: ${res.effects?.status.error}`)
+  if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
+    const reason = res.Transaction?.status.error?.message ?? "unknown"
+    throw new Error(`create_manager failed: ${reason}`)
   }
-  await client.waitForTransaction({ digest: res.digest })
-  const created = (res.objectChanges ?? []).find(
+  await client.waitForTransaction({ digest: res.Transaction.digest })
+  const t = res.Transaction
+  const created = t.effects.changedObjects.find(
     (c) =>
-      c.type === "created" && c.objectType.includes("::predict_manager::PredictManager"),
-  ) as { objectId: string } | undefined
-  if (!created) throw new Error("PredictManager not in objectChanges")
+      c.idOperation === "Created" &&
+      (t.objectTypes[c.objectId] ?? "").includes("::predict_manager::PredictManager"),
+  )
+  if (!created) throw new Error("PredictManager not in changed objects")
   return normalizeSuiObjectId(created.objectId)
 }
 
 const describeFn = hasAdmin ? describe : describe.skip
 
 describeFn("e2e duel against testnet", () => {
-  let client: SuiJsonRpcClient
+  let client: SuiGrpcClient
   let packageId: string
   let admin: Ed25519Keypair
   let challenger: Ed25519Keypair
@@ -242,10 +271,10 @@ describeFn("e2e duel against testnet", () => {
       const res = await client.signAndExecuteTransaction({
         transaction: tx,
         signer: admin,
-        options: { showEffects: true },
       })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
+      expect(res.$kind === "Transaction" && res.Transaction.status.success).toBe(true)
+      if (res.$kind !== "Transaction") return
+      await client.waitForTransaction({ digest: res.Transaction.digest })
     },
     30_000,
   )
@@ -274,16 +303,20 @@ describeFn("e2e duel against testnet", () => {
       const res = await client.signAndExecuteTransaction({
         transaction: tx,
         signer: admin,
-        options: { showObjectChanges: true, showEffects: true },
+        include: { effects: true, objectTypes: true },
       })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
+      expect(res.$kind === "Transaction" && res.Transaction.status.success).toBe(true)
+      if (res.$kind !== "Transaction") return
+      await client.waitForTransaction({ digest: res.Transaction.digest })
 
-      const created = res.objectChanges?.find(
-        (c) => c.type === "created" && c.objectType.includes("::duel::Duel<"),
+      const t = res.Transaction
+      const created = t.effects.changedObjects.find(
+        (c) =>
+          c.idOperation === "Created" &&
+          (t.objectTypes[c.objectId] ?? "").includes("::duel::Duel<"),
       )
-      expect(created?.type).toBe("created")
-      if (created?.type !== "created") throw new Error("no Duel object created")
+      expect(created).toBeDefined()
+      if (!created) throw new Error("no Duel object created")
       duelId = normalizeSuiObjectId(created.objectId)
       console.log(`duel: ${duelId}`)
       // Stash the plaintext for the reveal step below.
@@ -308,10 +341,10 @@ describeFn("e2e duel against testnet", () => {
         const res = await client.signAndExecuteTransaction({
           transaction: tx,
           signer: challenger,
-          options: { showEffects: true },
         })
-        expect(res.effects?.status.status).toBe("success")
-        await client.waitForTransaction({ digest: res.digest })
+        expect(res.$kind === "Transaction" && res.Transaction.status.success).toBe(true)
+        if (res.$kind !== "Transaction") return
+        await client.waitForTransaction({ digest: res.Transaction.digest })
       }
       // Reveal the deck so settle_card can index `cards`.
       const tx = new Transaction()
@@ -335,10 +368,10 @@ describeFn("e2e duel against testnet", () => {
       const res = await client.signAndExecuteTransaction({
         transaction: tx,
         signer: admin,
-        options: { showEffects: true },
       })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
+      expect(res.$kind === "Transaction" && res.Transaction.status.success).toBe(true)
+      if (res.$kind !== "Transaction") return
+      await client.waitForTransaction({ digest: res.Transaction.digest })
     },
     60_000,
   )
@@ -396,27 +429,27 @@ describeFn("e2e duel against testnet", () => {
       const res = await client.signAndExecuteTransaction({
         transaction: tx,
         signer: admin,
-        options: { showEffects: true },
       })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
+      expect(res.$kind === "Transaction" && res.Transaction.status.success).toBe(true)
+      if (res.$kind !== "Transaction") return
+      await client.waitForTransaction({ digest: res.Transaction.digest })
 
       // Verify on-chain: settled_count == deck_size, every cards_settled[i] true.
-      const after = await client.getObject({
-        id: duelId,
-        options: { showContent: true },
+      const after = await client.core.getObject({
+        objectId: duelId,
+        include: { json: true },
       })
-      if (after.data?.content?.dataType !== "moveObject") {
+      if (!after.object?.json) {
         throw new Error("duel object disappeared after settle")
       }
-      const fields = after.data.content.fields as {
+      const fields = after.object.json as {
         settled_count: string
         cards_settled: boolean[]
       }
       expect(BigInt(fields.settled_count)).toBe(BigInt(revealCards.length))
       expect(fields.cards_settled.every((b) => b === true)).toBe(true)
       console.log(
-        `settle_card × ${revealCards.length} OK · digest ${res.digest.slice(0, 10)}…`,
+        `settle_card × ${revealCards.length} OK · digest ${res.Transaction.digest.slice(0, 10)}…`,
       )
     },
     120_000,
@@ -427,8 +460,11 @@ describeFn("e2e duel against testnet", () => {
     // doesn't pile up in throwaway keypairs across runs.
     if (!hasAdmin) return
     try {
-      const balance = await client.getBalance({ owner: challengerAddr })
-      const total = BigInt(balance.totalBalance)
+      const balance = await client.core.getBalance({
+        owner: challengerAddr,
+        coinType: "0x2::sui::SUI",
+      })
+      const total = BigInt(balance.balance?.balance ?? "0")
       if (total <= 2_000_000n) return
       const tx = new Transaction()
       tx.setGasBudget(2_000_000n)
@@ -436,10 +472,9 @@ describeFn("e2e duel against testnet", () => {
       const res = await client.signAndExecuteTransaction({
         transaction: tx,
         signer: challenger,
-        options: { showEffects: true },
       })
-      if (res.effects?.status.status === "success") {
-        await client.waitForTransaction({ digest: res.digest })
+      if (res.$kind === "Transaction" && res.Transaction.status.success) {
+        await client.waitForTransaction({ digest: res.Transaction.digest })
       }
     } catch {
       // best-effort
