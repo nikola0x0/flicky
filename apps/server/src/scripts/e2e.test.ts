@@ -36,16 +36,17 @@
  *     `selectMarketRows` / `snapToAdmissionTick` / `readBtcSpot` directly
  *     rather than reimplementing.
  *
- * DEVIATION from the task brief's literal wording ("extract the Duel id
- * from objectChanges"): the gRPC `signAndExecuteTransaction` response shape
- * for created-object introspection isn't exercised by any existing repo
- * file, so guessing at its field names would violate the anti-stall
- * directive. Instead this file resolves the created `Duel<T>` id (and later
- * reads the `DuelFinalized` event) via the SAME GraphQL event-query pattern
- * `keeper.ts`'s `sweep()` already uses in production (`events(filter: {
- * type }, last: N) { nodes { contents { json } } }`) — a proven, already-
- * working shape in this codebase. See `queryEventsJson`/`findDuelCreatedId`/
- * `findDuelFinalizedEvent` below.
+ * Duel id resolution / DuelFinalized lookup: reads `effects.changedObjects`
+ * (+ `objectTypes`) and `events` straight off the SAME `create_duel` /
+ * `finalize_test_one_price` transaction's `signAndExecuteTransaction`
+ * result (see `signAndWait`'s doc comment). An EARLIER version of this file
+ * used a GraphQL "last N events, filter by type, then filter by field"
+ * poll instead (mirroring `keeper.ts`'s `sweep()`) — confirmed live
+ * 2026-07-10 that poll can return a STALE match (e.g. a `Duel` from a
+ * previous run with the same creator address, not yet superseded in the
+ * indexer) and cause `join_duel` to abort against the wrong object
+ * (`EDuelNotPending`). Reading off the executing tx's own result has no
+ * such indexer-lag race.
  *
  * Required env (apps/server/.env / .env.local) — checked in this priority
  * order (SUI_DEPLOYER_PRIVATE_KEY / SUI_KEEPER_PRIVATE_KEY per the task
@@ -70,7 +71,7 @@ import { decodeSuiPrivateKey } from "@mysten/sui/cryptography"
 import { bcs } from "@mysten/sui/bcs"
 import { normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
 import type { SuiGrpcClient } from "@mysten/sui/grpc"
-import { getSuiClient, getGraphQLClient } from "../lib/sui"
+import { getSuiClient } from "../lib/sui"
 import { env } from "../env"
 import {
   readBtcSpot,
@@ -116,10 +117,22 @@ const canRun = hasKey && hasPackage
 // ─── Amounts (kept small — this spends real testnet dUSDC/SUI) ─────────────
 
 const STAKE = 1_000_000n // 1 dUSDC per side
-const DEPOSIT = 5_000_000n // 5 dUSDC — each player's AccountWrapper premium float
+const DEPOSIT = 8_000_000n // 8 dUSDC — each player's AccountWrapper premium float
 const P1_FUND_SUI = 500_000_000n // 0.5 SUI — gas for ~8 player-1-signed txs
-const P1_FUND_DUSDC = 10_000_000n // 10 dUSDC — covers stake(1) + deposit(5) + buffer
-const SWIPE_QTY = 1n // 1 contract per swipe — minimal real mint
+const P1_FUND_DUSDC = 10_000_000n // 10 dUSDC — covers stake(1) + deposit(8) + buffer
+// `quantity` is NOT "1 contract" — it's raw DUSDC-notional units (same base
+// as `net_premium`/`Coin<DUSDC>`, 1e6 = $1). `strike_exposure_config::
+// assert_mint_admission` (predict pkg, abort code 4 = ENetPremiumBelowMinimum)
+// requires `net_premium = entry_probability * quantity / leverage >= 1_000_000`
+// (min_net_premium, $1). Confirmed live 2026-07-10 via devInspect probe
+// against a real ATM BTC ExpiryMarket (entry_probability ~0.50, both UP and
+// DOWN): quantity=1_000_000 (the value apps/web's SWIPE_QUANTITY currently
+// uses) aborts with code 4 (net_premium ~500k, half the minimum);
+// quantity=2_000_000 clears it right at the edge (net_premium ~1.015M);
+// quantity=3_000_000 clears it with ~50% margin (net_premium ~1.49-1.51M
+// either side, + ~30k trading fee) — used here for headroom against
+// per-market entry_probability drift.
+const SWIPE_QTY = 3_000_000n
 const DECK_SIZE = 5
 const MARKET_HEADROOM_MS = 5 * 60_000 // markets must clear "now + 5min"
 
@@ -136,30 +149,90 @@ function deriveTicks(strike: bigint, isUp: boolean, tickSize: bigint) {
     : { lowerTick: 0n, higherTick: strikeTick }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
 // ─── gRPC tx helpers (mirrors keeper.ts's signAndExecuteTransaction /
 // waitForTransaction call shape verbatim) ───────────────────────────────
 
+interface SignAndWaitResult {
+  digest: string
+  /** `objectId -> Move type string` for every object touched by the tx
+   *  (only populated when `include.objectTypes` — always requested here). */
+  objectTypes: Record<string, string>
+  /** Created object ids (a subset of `objectTypes`' keys). */
+  createdObjectIds: string[]
+  /** Emitted events' `.json` payloads (only populated when
+   *  `include.events` — always requested here). */
+  events: Record<string, unknown>[]
+}
+
+/**
+ * gRPC signAndExecuteTransaction + waitForTransaction, requesting
+ * `effects`/`objectTypes`/`events` on the FIRST call so callers can read
+ * created-object ids and emitted events straight off the executing
+ * transaction — no separate GraphQL event query, hence no indexer-lag
+ * window. (An earlier version of this file used a GraphQL "last N events
+ * by type, filter by field" poll for both the created `Duel` id and the
+ * `DuelFinalized` event; confirmed live 2026-07-10 that poll can return a
+ * STALE match — e.g. an older `Duel` from a previous test run with the
+ * same creator address — while the freshly created one hadn't been
+ * indexed yet, causing `join_duel` to abort with `EDuelNotPending`
+ * against the wrong object. Reading straight off this tx's own effects
+ * has no such race.)
+ */
 async function signAndWait(
   client: SuiGrpcClient,
   signer: Ed25519Keypair,
   tx: Transaction,
   label: string
-): Promise<string> {
+): Promise<SignAndWaitResult> {
   const res = await client.signAndExecuteTransaction({
     transaction: tx,
     signer,
+    include: { effects: true, objectTypes: true, events: true },
   })
-  if (!(res.$kind === "Transaction" && res.Transaction.status.success)) {
-    const reason = res.Transaction?.status.error?.message ?? "unknown"
+  if (res.$kind !== "Transaction" || !res.Transaction.status.success) {
+    // NOTE: on an aborted (but executed) tx, the response is `{ $kind:
+    // "FailedTransaction", FailedTransaction: {...} }` — the failure
+    // detail lives under `FailedTransaction`, NOT `Transaction` (which is
+    // absent). An earlier version of this helper read `res.Transaction?.
+    // status.error?.message` unconditionally, which is always undefined
+    // in this branch — confirmed live 2026-07-10, it silently printed
+    // "unknown" for every on-chain abort instead of the real reason.
+    const failed =
+      res.$kind === "FailedTransaction" ? res.FailedTransaction : undefined
+    const reason = failed?.status.error?.message ?? "unknown"
     throw new Error(`${label} failed: ${reason}`)
   }
   const digest = res.Transaction.digest
   await client.waitForTransaction({ digest })
-  return digest
+  const objectTypes = res.Transaction.objectTypes ?? {}
+  const createdObjectIds = (res.Transaction.effects?.changedObjects ?? [])
+    .filter((c) => c.idOperation === "Created")
+    .map((c) => c.objectId)
+  const events = (res.Transaction.events ?? [])
+    .map((e) => e.json)
+    .filter((j): j is Record<string, unknown> => j != null)
+  return { digest, objectTypes, createdObjectIds, events }
+}
+
+/** Find the single created object id whose Move type contains `typeFragment`
+ *  (e.g. `::duel::Duel<`). Throws if zero or more-than-one match — a
+ *  PTB that creates exactly one such object is expected at every call
+ *  site below. */
+function findCreatedObjectId(
+  result: SignAndWaitResult,
+  typeFragment: string,
+  label: string
+): string {
+  const matches = result.createdObjectIds.filter((id) =>
+    result.objectTypes[id]?.includes(typeFragment)
+  )
+  if (matches.length !== 1) {
+    throw new Error(
+      `${label}: expected exactly 1 created object matching "${typeFragment}", found ${matches.length} ` +
+        `(createdObjectIds=${JSON.stringify(result.createdObjectIds)}, objectTypes=${JSON.stringify(result.objectTypes)})`
+    )
+  }
+  return normalizeSuiObjectId(matches[0])
 }
 
 // ─── Wrapper resolution — mirrors predict.ts's deriveWrapperFor's
@@ -181,6 +254,14 @@ async function devInspectReturn(
   const res = await client.core.simulateTransaction({
     transaction: tx,
     include: { commandResults: true },
+    // `accountBalance` chains a `&Account` reference return (from
+    // `load_account`) into a second command — the default simulate
+    // "checks" mode rejects that intermediate command with
+    // `InvalidPublicFunctionReturnType` (confirmed live 2026-07-10) since
+    // it tries to validate/serialize every command's return type, not
+    // just the last one's. `checksEnabled: false` matches plain devInspect
+    // behavior and is safe here: this helper never executes for real.
+    checksEnabled: false,
   })
   return res.commandResults?.[commandIndex]?.returnValues?.[0]?.bcs
 }
@@ -217,13 +298,48 @@ async function derivedWrapperAddress(
   return normalizeSuiObjectId(bcs.Address.parse(bytes))
 }
 
+/** Read `kp`'s AccountWrapper's settled dUSDC balance (0 if no wrapper yet). */
+async function accountBalance(
+  client: SuiGrpcClient,
+  owner: string,
+  wrapperId: string
+): Promise<bigint> {
+  const bytes = await devInspectReturn(
+    client,
+    owner,
+    (tx) => {
+      const account = tx.moveCall({
+        target: `${env.accountPackageId}::account::load_account`,
+        arguments: [tx.object(wrapperId)],
+      })
+      tx.moveCall({
+        target: `${env.accountPackageId}::account::balance`,
+        typeArguments: [env.dusdcCoinType],
+        arguments: [
+          account,
+          tx.object(env.accumulatorRootId),
+          tx.object(CLOCK),
+        ],
+      })
+    },
+    1
+  )
+  if (!bytes) throw new Error(`accountBalance(${owner}): no return value`)
+  return BigInt(bcs.u64().parse(bytes))
+}
+
 /**
- * Ensure `kp`'s AccountWrapper exists (create + share if absent) and has a
- * fresh `DEPOSIT` dUSDC funding pass. Returns the wrapper id.
+ * Ensure `kp`'s AccountWrapper exists (create + share if absent) and holds
+ * at least `minBalance` settled dUSDC — tops up the shortfall only (this
+ * suite reuses the SAME persistent `p0` key across repeated live runs
+ * while iterating, so blindly re-depositing `minBalance` every run burns
+ * real testnet dUSDC that's often already sitting in the wrapper from an
+ * earlier partially-failed run). Returns the wrapper id.
  */
 async function setupAccount(
   client: SuiGrpcClient,
-  kp: Ed25519Keypair
+  kp: Ed25519Keypair,
+  minBalance: bigint
 ): Promise<string> {
   const owner = kp.toSuiAddress()
   const exists = await derivedWrapperExists(client, owner)
@@ -241,25 +357,33 @@ async function setupAccount(
   }
   const wrapperId = await derivedWrapperAddress(client, owner)
 
-  const depositTx = new Transaction()
-  const auth = depositTx.moveCall({
-    target: `${env.accountPackageId}::account::generate_auth`,
-  })
-  const coin = depositTx.add(
-    coinWithBalance({ balance: DEPOSIT, type: env.dusdcCoinType })
-  )
-  depositTx.moveCall({
-    target: `${env.accountPackageId}::account::deposit_funds`,
-    typeArguments: [env.dusdcCoinType],
-    arguments: [
-      depositTx.object(wrapperId),
-      auth,
-      coin,
-      depositTx.object(env.accumulatorRootId),
-      depositTx.object(CLOCK),
-    ],
-  })
-  await signAndWait(client, kp, depositTx, `setupAccount(${owner}) deposit`)
+  const current = exists ? await accountBalance(client, owner, wrapperId) : 0n
+  const shortfall = minBalance - current
+  if (shortfall > 0n) {
+    const depositTx = new Transaction()
+    const auth = depositTx.moveCall({
+      target: `${env.accountPackageId}::account::generate_auth`,
+    })
+    const coin = depositTx.add(
+      coinWithBalance({ balance: shortfall, type: env.dusdcCoinType })
+    )
+    depositTx.moveCall({
+      target: `${env.accountPackageId}::account::deposit_funds`,
+      typeArguments: [env.dusdcCoinType],
+      arguments: [
+        depositTx.object(wrapperId),
+        auth,
+        coin,
+        depositTx.object(env.accumulatorRootId),
+        depositTx.object(CLOCK),
+      ],
+    })
+    await signAndWait(client, kp, depositTx, `setupAccount(${owner}) deposit`)
+  } else {
+    console.log(
+      `setupAccount(${owner}): already has ${current} dUSDC >= ${minBalance}, skipping deposit`
+    )
+  }
 
   return wrapperId
 }
@@ -274,7 +398,15 @@ interface DeckCard {
 }
 
 async function discoverMarkets(n: number): Promise<DeckCard[]> {
-  const res = await fetch(`${env.predictIndexerUrl}/markets`)
+  // NOTE: the default (unpaginated) page size on this indexer is small
+  // enough that it can omit longer-cadence future markets (e.g. the
+  // ~1h/~2h ones) in favor of the dense near-term 1-min-cadence rows —
+  // confirmed live 2026-07-10: no-limit fetch returned only 2 markets
+  // clearing a 5-min headroom, while `?limit=500` reliably surfaces all
+  // ~8 currently-live BTC markets (3 short-cadence + longer-cadence
+  // ones), of which 5 clear the headroom. Bump the page size rather than
+  // loosen the headroom filter itself.
+  const res = await fetch(`${env.predictIndexerUrl}/markets?limit=500`)
   if (!res.ok) throw new Error(`GET /markets ${res.status}`)
   const rows = (await res.json()) as MarketRow[]
   const snapshots = selectMarketRows(rows, {
@@ -303,50 +435,10 @@ async function discoverMarkets(n: number): Promise<DeckCard[]> {
   })
 }
 
-// ─── GraphQL event lookups — mirrors keeper.ts's sweep() query shape ───────
-
-async function queryEventsJson(
-  eventType: string,
-  last: number
-): Promise<Record<string, unknown>[]> {
-  const gql = getGraphQLClient()
-  const query = `query Ev($type: String!, $last: Int!) {
-    events(filter: { type: $type }, last: $last) {
-      nodes { contents { json } }
-    }
-  }`
-  const res = (await gql.query({
-    query,
-    variables: { type: eventType, last },
-  })) as {
-    data?: {
-      events?: {
-        nodes?: Array<{ contents: { json: Record<string, unknown> } }>
-      }
-    }
-  }
-  return (res.data?.events?.nodes ?? []).map((node) => node.contents.json)
-}
-
-async function findDuelCreatedId(
-  packageId: string,
-  creator: string
-): Promise<string> {
-  const normalizedCreator = normalizeSuiAddress(creator)
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const events = await queryEventsJson(`${packageId}::duel::DuelCreated`, 10)
-    for (let i = events.length - 1; i >= 0; i--) {
-      const j = events[i] as { duel_id: string; creator: string }
-      if (normalizeSuiAddress(j.creator) === normalizedCreator) {
-        return normalizeSuiObjectId(j.duel_id)
-      }
-    }
-    await sleep(1_000)
-  }
-  throw new Error(
-    "findDuelCreatedId: no DuelCreated event found for creator (indexer lag?)"
-  )
-}
+// ─── Event extraction — reads events straight off the SAME transaction's
+// `signAndWait` result (see its doc comment for why: a GraphQL "last N
+// events, filter by field" poll can return a stale match when the same
+// creator address runs this suite repeatedly). ─────────────────────────────
 
 interface DuelFinalizedJson {
   duel_id: string
@@ -355,23 +447,23 @@ interface DuelFinalizedJson {
   payout_to_p1: string
 }
 
-async function findDuelFinalizedEvent(
-  packageId: string,
+function extractDuelFinalizedEvent(
+  result: SignAndWaitResult,
   duelId: string
-): Promise<DuelFinalizedJson> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const events = await queryEventsJson(
-      `${packageId}::duel::DuelFinalized`,
-      10
-    )
-    for (let i = events.length - 1; i >= 0; i--) {
-      const j = events[i] as unknown as DuelFinalizedJson
-      if (normalizeSuiObjectId(j.duel_id) === duelId) return j
+): DuelFinalizedJson {
+  const normalizedDuelId = normalizeSuiObjectId(duelId)
+  for (const json of result.events) {
+    const j = json as unknown as DuelFinalizedJson
+    if (
+      typeof j.duel_id === "string" &&
+      normalizeSuiObjectId(j.duel_id) === normalizedDuelId
+    ) {
+      return j
     }
-    await sleep(1_000)
   }
   throw new Error(
-    "findDuelFinalizedEvent: no DuelFinalized event found (indexer lag?)"
+    `extractDuelFinalizedEvent: no DuelFinalized event for duel ${duelId} in this tx's events ` +
+      `(${JSON.stringify(result.events)})`
   )
 }
 
@@ -397,8 +489,8 @@ async function createDuel(
       tx.pure.u64(BigInt(deckSize)),
     ],
   })
-  await signAndWait(client, p0, tx, "create_duel")
-  return findDuelCreatedId(packageId, p0.toSuiAddress())
+  const result = await signAndWait(client, p0, tx, "create_duel")
+  return findCreatedObjectId(result, `${packageId}::duel::Duel<`, "create_duel")
 }
 
 async function joinDuel(
@@ -526,14 +618,14 @@ async function settleAndFinalize(
   packageId: string,
   duelId: string,
   price: bigint
-): Promise<void> {
+): Promise<SignAndWaitResult> {
   const tx = new Transaction()
   tx.moveCall({
     target: `${packageId}::duel::finalize_test_one_price`,
     typeArguments: [env.dusdcCoinType],
     arguments: [tx.object(duelId), tx.pure.u64(price), tx.object(CLOCK)],
   })
-  await signAndWait(client, p0, tx, "finalize_test_one_price")
+  return signAndWait(client, p0, tx, "finalize_test_one_price")
 }
 
 // ─── Suite ──────────────────────────────────────────────────────────────
@@ -580,8 +672,8 @@ describeFn("e2e duel — predict-testnet-6-24 flow", () => {
   }, 60_000)
 
   test("sets up both players' AccountWrapper + deposits dUSDC premium float", async () => {
-    p0Wrapper = await setupAccount(client, p0)
-    p1Wrapper = await setupAccount(client, p1)
+    p0Wrapper = await setupAccount(client, p0, DEPOSIT)
+    p1Wrapper = await setupAccount(client, p1, DEPOSIT)
     expect(p0Wrapper).toBeTruthy()
     expect(p1Wrapper).toBeTruthy()
     console.log(`p0 wrapper: ${p0Wrapper}`)
@@ -640,8 +732,8 @@ describeFn("e2e duel — predict-testnet-6-24 flow", () => {
     // 5 with no possible tie in card count — a strict winner is guaranteed.
     let price = await readBtcSpot().catch(() => 0n)
     if (price <= 0n) price = cards[0].strike
-    await settleAndFinalize(client, p0, packageId, duelId, price)
-    const ev = await findDuelFinalizedEvent(packageId, duelId)
+    const result = await settleAndFinalize(client, p0, packageId, duelId, price)
+    const ev = extractDuelFinalizedEvent(result, duelId)
     expect([p0Addr, p1Addr]).toContain(normalizeSuiAddress(ev.winner))
     console.log(
       `winner: ${normalizeSuiAddress(ev.winner) === p0Addr ? "p0" : "p1"}  ` +
