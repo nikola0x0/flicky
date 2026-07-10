@@ -12,8 +12,10 @@ export const CONFIG = {
    *
    * Settlement: per-card `settle_card(card_idx, &oracle)` × `deck_size`
    * accumulates payout/premium onto the Duel, then `finalize` distributes
-   * the pot. `record_swipe` snapshots premium + p_swiped on-chain via
-   * `predict::get_trade_amounts` inside the swipe PTB.
+   * the pot. `record_swipe` records the swipe's DeepBook `order_id`
+   * on-chain (chained from the mint in the same PTB); premium is fed in
+   * later by the keeper at settlement, not snapshotted at swipe time —
+   * 6-24 dropped the `predict::get_trade_amounts` / `p_swiped` mechanism.
    */
   packageId:
     import.meta.env.VITE_FLICKY_PACKAGE_ID_TESTNET ??
@@ -100,4 +102,4 @@ export const CONFIG = {
 
   /** Minimum allowed stake (must be > 0). */
   minStakeMist: 1_000_000n,
-} as const;
+} as const

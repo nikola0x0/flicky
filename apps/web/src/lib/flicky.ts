@@ -345,6 +345,8 @@ export function buildSwipeTx(
         cardIdx: number
         isUp: boolean
         quantity: bigint
+        /** The Duel's escrow coin type — must match on-chain `Duel<T>`. */
+        stakeCoinType: string
       }
     | {
         tier: "free"
@@ -364,6 +366,7 @@ export function buildSwipeTx(
       cardIdx: args.cardIdx,
       isUp: args.isUp,
       quantity: args.quantity,
+      stakeCoinType: args.stakeCoinType,
     })
   }
   const tx = new Transaction()

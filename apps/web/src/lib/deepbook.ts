@@ -271,6 +271,9 @@ export function buildStakedSwipeTx(args: {
   cardIdx: number
   isUp: boolean
   quantity: bigint
+  /** The `Duel<T>`'s escrow coin type — must match the duel's own `T` (e.g.
+   * dUSDC for staked duels), NOT the account/premium coin type. */
+  stakeCoinType: string
 }): Transaction {
   const tx = new Transaction()
   const { lowerTick, higherTick } = deriveTicks(
@@ -331,7 +334,7 @@ export function buildStakedSwipeTx(args: {
         tx.pure.u64(args.quantity),
         order,
       ],
-      typeArguments: [CONFIG.stakeType],
+      typeArguments: [args.stakeCoinType],
     })
   )
 

@@ -336,6 +336,7 @@ describe("PTB builders", () => {
     cardIdx: 0,
     isUp: true,
     quantity: 20_000n,
+    stakeCoinType: DUSDC,
   }
 
   test("buildSwipeTx (staked) emits exactly one duel::record_swipe call", () => {
@@ -360,6 +361,22 @@ describe("PTB builders", () => {
     ).toBe(true)
     // record_swipe is the last command, chaining the mint's order id.
     expect(targets[targets.length - 1]).toMatch(/::duel::record_swipe$/)
+  })
+
+  test("buildSwipeTx (staked) record_swipe type arg matches the duel's stake coin type, not SUI", () => {
+    // Regression: record_swipe<T> must match the Duel<T>'s escrow coin.
+    // Staked duels are created exclusively as Duel<DUSDC> — passing
+    // CONFIG.stakeType (SUI) here would abort every staked swipe on chain.
+    const tx = buildSwipeTx(stakedSwipeArgs)
+    const data = tx.getData()
+    const recordSwipe = data.commands.find(
+      (c) => "MoveCall" in c && c.MoveCall?.function === "record_swipe"
+    )
+    expect(recordSwipe).toBeDefined()
+    const typeArgs = (recordSwipe as { MoveCall: { typeArguments?: string[] } })
+      .MoveCall.typeArguments
+    expect(typeArgs).toEqual([stakedSwipeArgs.stakeCoinType])
+    expect(typeArgs).not.toEqual([CONFIG.stakeType])
   })
 
   test("buildSwipeTx (free) emits exactly one record_swipe_free call, no mint", () => {

@@ -644,6 +644,7 @@ function PhaseSwiping({
         cardIdx,
         isUp,
         quantity: SWIPE_QUANTITY,
+        stakeCoinType: roomState.stakeCoinType,
       })
       await sign.mutateAsync({ transaction: tx })
       onSwipeDone()

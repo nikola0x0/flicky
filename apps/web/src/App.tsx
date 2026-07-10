@@ -1646,6 +1646,7 @@ function SwipingView({
             cardIdx: myNextIdx,
             isUp,
             quantity: mintQuantity,
+            stakeCoinType: duel.stakeCoinType,
           })
         } else {
           // Free/SUI duels don't touch Predict at all — no mint, no
