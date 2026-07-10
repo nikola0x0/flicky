@@ -2,8 +2,9 @@
  * Web-side helpers for the flicky duel flow. Thin wrappers around generated
  * codegen bindings + JSON parsers for shared-object reads.
  *
- * Every duel references a DeepBook `OracleSVI` directly — there's no
- * FlickyOracle path anymore. Staked swipes (predict::mint + record_swipe in
+ * Every duel card pins a DeepBook Predict (6-24) `ExpiryMarket` directly
+ * (`Card.expiry_market_id`) — there's no FlickyOracle or OracleSVI path.
+ * Staked swipes (`expiry_market::mint_exact_quantity` + `record_swipe` in
  * one PTB) live in `./deepbook.ts`.
  */
 import { Transaction } from "@mysten/sui/transactions"
@@ -19,10 +20,10 @@ type SuiClient = ClientWithCoreApi
 
 import * as duelGen from "@/sui/gen/flicky/duel"
 import { CONFIG } from "./config"
-import { DEEPBOOK } from "./deepbook"
+import { buildStakedSwipeTx } from "./deepbook"
 import { getGraphQLClient } from "./graphql"
 
-const { packageId, deepbookPredictPackageId } = CONFIG
+const { packageId } = CONFIG
 
 // === Types ===
 
@@ -31,19 +32,22 @@ const { packageId, deepbookPredictPackageId } = CONFIG
 type DuelStatus = "PENDING" | "ACTIVE" | "COMPLETE"
 
 interface DuelCard {
-  oracleId: string
+  /** The 6-24 `ExpiryMarket` this card is bet on. */
+  expiryMarketId: string
   strike: bigint
 }
 
 interface DuelSwipe {
   isUp: boolean
-  /** dUSDC micro-units the player committed (= predict::mint quantity). */
+  /** Contracts minted (= `expiry_market::mint_exact_quantity` quantity). */
   quantity: bigint
-  /** dUSDC micro-units the player paid as premium (snapshotted on-chain
-   *  inside the swipe PTB via `get_trade_amounts`). */
-  premium: bigint
-  /** Probability of the swiped direction at swipe time, scaled by 1e9. */
-  pSwiped: bigint
+  /**
+   * The `order_id` returned by `mint_exact_quantity`, chained from the mint
+   * command in the same player-signed PTB. `0` for free-tier swipes (no
+   * mint). Premium/p_swiped are no longer snapshotted here — 6-24 exposes
+   * no public on-chain quote; premium is keeper-fed at settle time.
+   */
+  orderId: bigint
 }
 
 export interface DuelState {
@@ -95,18 +99,20 @@ const STATUS_MAP: Record<string, DuelStatus> = {
 // === Deck commit-reveal helpers ===
 
 export interface DeckCard {
-  oracleId: string
+  /** The 6-24 `ExpiryMarket` this card is bet on. */
+  expiryMarketId: string
   strike: bigint
 }
 
 /**
  * BCS schema matching the on-chain `flicky::duel::Card` layout
- * (`oracle_id: ID, strike: u64`). The vector serialization + sha2-256
- * here must reproduce what `bcs::to_bytes(&cards)` + `hash::sha2_256`
- * produce in Move — see `apps/contracts/sources/duel.move::reveal_deck`.
+ * (`expiry_market_id: ID, strike: u64`). The vector serialization +
+ * sha2-256 here must reproduce what `bcs::to_bytes(&cards)` +
+ * `hash::sha2_256` produce in Move — see
+ * `apps/contracts/sources/duel.move::reveal_deck`.
  */
 const CardBcs = bcs.struct("Card", {
-  oracle_id: bcs.Address,
+  expiry_market_id: bcs.Address,
   strike: bcs.u64(),
 })
 const DeckBcs = bcs.vector(CardBcs)
@@ -114,9 +120,9 @@ const DeckBcs = bcs.vector(CardBcs)
 function serializeDeck(cards: DeckCard[]): Uint8Array {
   return DeckBcs.serialize(
     cards.map((c) => ({
-      oracle_id: normalizeSuiAddress(c.oracleId),
+      expiry_market_id: normalizeSuiAddress(c.expiryMarketId),
       strike: c.strike.toString(),
-    })),
+    }))
   ).toBytes()
 }
 
@@ -146,9 +152,10 @@ export function buildCreateDuelTx(
   deckHash: Uint8Array,
   stakeAmount: bigint,
   stakeCoinType: string = CONFIG.stakeType,
-  deckSize: number = DEFAULT_DECK_SIZE,
+  deckSize: number = DEFAULT_DECK_SIZE
 ): Transaction {
-  if (deckHash.length !== 32) throw new Error("deck hash must be 32 bytes (sha-256)")
+  if (deckHash.length !== 32)
+    throw new Error("deck hash must be 32 bytes (sha-256)")
 
   const tx = new Transaction()
   const [stake] = tx.splitCoins(tx.gas, [tx.pure.u64(stakeAmount)])
@@ -162,7 +169,7 @@ export function buildCreateDuelTx(
         BigInt(deckSize),
       ],
       typeArguments: [stakeCoinType],
-    }),
+    })
   )
   return tx
 }
@@ -181,7 +188,7 @@ export const DEFAULT_DECK_SIZE = 5
 export function buildRevealDeckTx(
   duelId: string,
   cards: DeckCard[],
-  stakeCoinType: string = CONFIG.stakeType,
+  stakeCoinType: string = CONFIG.stakeType
 ): Transaction {
   if (cards.length !== 5) throw new Error("must reveal exactly 5 cards")
   const tx = new Transaction()
@@ -190,19 +197,22 @@ export function buildRevealDeckTx(
     tx.add(
       duelGen.newCard({
         package: packageId,
-        arguments: [c.oracleId, c.strike],
-      }),
-    ),
+        arguments: [c.expiryMarketId, c.strike],
+      })
+    )
   )
   tx.add(
     duelGen.revealDeck({
       package: packageId,
       arguments: [
         duelId,
-        tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cardArgs }),
+        tx.makeMoveVec({
+          type: `${packageId}::duel::Card`,
+          elements: cardArgs,
+        }),
       ],
       typeArguments: [stakeCoinType],
-    }),
+    })
   )
   return tx
 }
@@ -218,7 +228,7 @@ async function takeCoinFromOwner(
   tx: Transaction,
   owner: string,
   coinType: string,
-  amount: bigint,
+  amount: bigint
 ) {
   const coins = await client.core.listCoins({ owner, coinType })
   if (coins.objects.length === 0) {
@@ -241,11 +251,18 @@ export async function buildCreateDuelDusdcTx(
   deckHash: Uint8Array,
   stakeAmount: bigint,
   stakeCoinType: string,
-  deckSize: number = DEFAULT_DECK_SIZE,
+  deckSize: number = DEFAULT_DECK_SIZE
 ): Promise<Transaction> {
-  if (deckHash.length !== 32) throw new Error("deck hash must be 32 bytes (sha-256)")
+  if (deckHash.length !== 32)
+    throw new Error("deck hash must be 32 bytes (sha-256)")
   const tx = new Transaction()
-  const stake = await takeCoinFromOwner(client, tx, owner, stakeCoinType, stakeAmount)
+  const stake = await takeCoinFromOwner(
+    client,
+    tx,
+    owner,
+    stakeCoinType,
+    stakeAmount
+  )
   tx.add(
     duelGen.createDuel({
       package: packageId,
@@ -255,7 +272,7 @@ export async function buildCreateDuelDusdcTx(
         BigInt(deckSize),
       ],
       typeArguments: [stakeCoinType],
-    }),
+    })
   )
   return tx
 }
@@ -266,16 +283,22 @@ export async function buildJoinDuelDusdcTx(
   owner: string,
   duelId: string,
   stakeAmount: bigint,
-  stakeCoinType: string,
+  stakeCoinType: string
 ): Promise<Transaction> {
   const tx = new Transaction()
-  const stake = await takeCoinFromOwner(client, tx, owner, stakeCoinType, stakeAmount)
+  const stake = await takeCoinFromOwner(
+    client,
+    tx,
+    owner,
+    stakeCoinType,
+    stakeAmount
+  )
   tx.add(
     duelGen.joinDuel({
       package: packageId,
       arguments: [duelId, stake],
       typeArguments: [stakeCoinType],
-    }),
+    })
   )
   return tx
 }
@@ -284,7 +307,7 @@ export async function buildJoinDuelDusdcTx(
 export function buildJoinDuelTx(
   duelId: string,
   stakeAmount: bigint,
-  stakeCoinType: string = CONFIG.stakeType,
+  stakeCoinType: string = CONFIG.stakeType
 ): Transaction {
   const tx = new Transaction()
   const [stake] = tx.splitCoins(tx.gas, [tx.pure.u64(stakeAmount)])
@@ -295,7 +318,7 @@ export function buildJoinDuelTx(
       // Clock arg is auto-injected by codegen.
       arguments: [duelId, stake],
       typeArguments: [stakeCoinType],
-    }),
+    })
   )
   return tx
 }
@@ -303,76 +326,54 @@ export function buildJoinDuelTx(
 /**
  * Record a single swipe on the next card in the player's sequence.
  *
- * The new contract requires the player to already hold a Predict
- * position at `manager` for the (oracle, strike, is_up) combination —
- * `record_swipe` verifies `position(manager, key) >= quantity`. In
- * practice this is wired by `buildStakedSwipeTx` in `lib/deepbook.ts`
- * which bundles `predict::mint` + `duel::record_swipe` in one PTB. This
- * standalone helper is for tests / scripts that want just the swipe
- * step against a manager that already has the position.
+ * Staked-tier swipes require a genuine 6-24 mint backing them — this
+ * delegates to `buildStakedSwipeTx` in `lib/deepbook.ts`, which bundles
+ * `expiry_market::mint_exact_quantity` + `duel::record_swipe` (chaining
+ * the mint's `order_id`) in one player-signed, sponsored PTB. Free-tier
+ * swipes skip the mint entirely and call `record_swipe_free`, which
+ * normalizes quantity to `PROB_SCALE` and `order_id` to `0` on-chain.
  */
-export function buildSwipeTx(args: {
-  duelId: string
-  managerId: string
-  oracleId: string
-  cardIdx: number
-  isUp: boolean
-  quantity: bigint
-  stakeCoinType?: string
-}): Transaction {
-  const tx = new Transaction()
-  // Contract snapshots premium + p_swiped on-chain via get_trade_amounts,
-  // so we pass the Predict shared object + oracle + quantity (no premium).
-  tx.add(
-    duelGen.recordSwipe({
-      package: packageId,
-      arguments: [
-        args.duelId,
-        args.managerId,
-        DEEPBOOK.predictObject,
-        args.oracleId,
-        args.cardIdx,
-        args.isUp,
-        args.quantity,
-      ],
-      typeArguments: [args.stakeCoinType ?? CONFIG.stakeType],
-    }),
-  )
-  return tx
-}
-
-/**
- * Finalize a duel in a single PTB. Two-phase: one `settle_card(card_idx,
- * &oracle)` per card scores it against its OWN oracle's `settlement_price`
- * (and reads both PredictManagers for anti-replay), then `finalize`
- * compares the accumulated per-player PnL and pays the pot. The caller
- * must ensure every card's oracle has published `settlement_price` —
- * otherwise the matching `settle_card` aborts `EOracleNotLive`.
- */
-export function buildFinalizeTx(
-  duelId: string,
-  cards: DuelCard[],
-  p0Manager: string,
-  p1Manager: string,
-  stakeCoinType: string = CONFIG.stakeType,
+export function buildSwipeTx(
+  args:
+    | {
+        tier: "staked"
+        duelId: string
+        wrapperId: string
+        marketId: string
+        strike: bigint
+        tickSize: bigint
+        cardIdx: number
+        isUp: boolean
+        quantity: bigint
+      }
+    | {
+        tier: "free"
+        duelId: string
+        cardIdx: number
+        isUp: boolean
+        stakeCoinType?: string
+      }
 ): Transaction {
-  if (cards.length === 0) throw new Error("deck has no cards to finalize")
+  if (args.tier === "staked") {
+    return buildStakedSwipeTx({
+      duelId: args.duelId,
+      wrapperId: args.wrapperId,
+      marketId: args.marketId,
+      strike: args.strike,
+      tickSize: args.tickSize,
+      cardIdx: args.cardIdx,
+      isUp: args.isUp,
+      quantity: args.quantity,
+    })
+  }
   const tx = new Transaction()
-  cards.forEach((card, idx) => {
-    tx.add(
-      duelGen.settleCard({
-        package: packageId,
-        arguments: [duelId, p0Manager, p1Manager, card.oracleId, BigInt(idx)],
-        typeArguments: [stakeCoinType],
-      }),
-    )
-  })
   tx.add(
-    duelGen.finalize({
+    duelGen.recordSwipeFree({
       package: packageId,
-      arguments: [duelId],
-      typeArguments: [stakeCoinType],
-    }),
+      // Clock arg is auto-injected by codegen.
+      arguments: [args.duelId, args.cardIdx, args.isUp],
+      typeArguments: [args.stakeCoinType ?? CONFIG.stakeType],
+    })
   )
   return tx
 }
@@ -382,8 +383,7 @@ export function buildFinalizeTx(
 interface RawSwipe {
   is_up: boolean
   quantity: string
-  premium: string
-  p_swiped: string
+  order_id: string
 }
 
 // Flat gRPC json shape of `flicky::duel::Duel`, as returned by
@@ -398,7 +398,7 @@ interface RawDuelFields {
   tier: string | number
   deck_size: string
   deck_hash: number[] | string
-  cards: Array<{ oracle_id: string; strike: string }>
+  cards: Array<{ expiry_market_id: string; strike: string }>
   creator: string
   challenger: string
   p0_stake: string | { value: string }
@@ -426,8 +426,7 @@ function parseSwipe(raw: RawSwipe | null): DuelSwipe | null {
   return {
     isUp: raw.is_up,
     quantity: BigInt(raw.quantity),
-    premium: BigInt(raw.premium),
-    pSwiped: BigInt(raw.p_swiped),
+    orderId: BigInt(raw.order_id),
   }
 }
 
@@ -459,7 +458,7 @@ export function parseDuel(json: unknown, objectType?: string): DuelState {
   }
   const fields = json as RawDuelFields
   const cards = fields.cards.map((c) => ({
-    oracleId: normalizeSuiObjectId(c.oracle_id),
+    expiryMarketId: normalizeSuiObjectId(c.expiry_market_id),
     strike: BigInt(c.strike),
   }))
   // Extract the duel's stake coin type from the object type string.
@@ -495,7 +494,7 @@ export function parseDuel(json: unknown, objectType?: string): DuelState {
 
 export async function fetchDuel(
   client: SuiClient,
-  duelId: string,
+  duelId: string
 ): Promise<DuelState> {
   const obj = await client.core.getObject({
     objectId: duelId,
@@ -518,7 +517,7 @@ export async function fetchDuel(
  */
 export async function resolveCreatedDuelId(
   client: SuiClient,
-  digest: string,
+  digest: string
 ): Promise<string | null> {
   const res = await client.core.waitForTransaction({
     digest,
@@ -555,7 +554,7 @@ type RecentEventsResult<T> = {
  */
 export async function listDuelIds(
   _client: SuiClient,
-  limit = 50,
+  limit = 50
 ): Promise<string[]> {
   const res = (await getGraphQLClient().query({
     query: RECENT_EVENTS_QUERY,
@@ -566,164 +565,25 @@ export async function listDuelIds(
     .reverse()
 }
 
-// === DeepBook OracleSVI reads + discovery ===
-
-export interface OracleSviInfo {
-  id: string
-  spot: bigint
-  forward: bigint
-  expiry: bigint
-  isActive: boolean
-  settlementPrice: bigint | null
-}
-
-/**
- * Read state for a DeepBook `OracleSVI` — flat `prices` struct +
- * `settlement_price: Option<u64>` at the top level.
- */
-export async function fetchOracleSvi(
-  client: SuiClient,
-  oracleId: string,
-): Promise<OracleSviInfo> {
-  const obj = await client.core.getObject({
-    objectId: oracleId,
-    include: { json: true },
-  })
-  const json = obj.object.json
-  if (!json || typeof json !== "object") {
-    throw new Error("OracleSVI not found")
-  }
-  const f = json as {
-    prices: { spot: string; forward: string }
-    expiry: string
-    active: boolean
-    // gRPC unwraps `Option<u64>`: Some ⇒ bare string, None ⇒ null. Older
-    // JSON-RPC-style `{ fields: { vec: [...] } }` handled defensively.
-    settlement_price: string | { fields?: { vec?: string[] } } | null
-  }
-  let settlementPrice: bigint | null = null
-  const sp = f.settlement_price
-  if (typeof sp === "string") {
-    settlementPrice = BigInt(sp)
-  } else if (sp && typeof sp === "object") {
-    const vec = sp.fields?.vec ?? []
-    if (vec.length > 0) settlementPrice = BigInt(vec[0])
-  }
-  return {
-    id: normalizeSuiObjectId(oracleId),
-    spot: BigInt(f.prices.spot),
-    forward: BigInt(f.prices.forward),
-    expiry: BigInt(f.expiry),
-    isActive: !!f.active,
-    settlementPrice,
-  }
-}
+// === Strike-grid helper ===
+//
+// `fetchOracleSvi`/`findLatestOracleSvi` (4-16-era `OracleSVI` discovery)
+// were removed here: 6-24 cards pin an `ExpiryMarket` (`expiry_market_id`),
+// not an `OracleSVI`, and `CONFIG.fallbackOracleSviId` no longer exists
+// (dropped when config moved to 6-24 ids). Market discovery is
+// indexer-driven now — see `fetchMarketTickSize` in `lib/deepbook.ts`.
+// Callers still importing the deleted functions need an ExpiryMarket
+// discovery helper in their place (Task 6).
 
 /**
- * Minimum expiry headroom we require when picking an oracle, in ms.
- * Must cover the full swipe phase (up to 60 s) plus a margin for join
- * latency and clock drift, otherwise `record_swipe` would abort with
- * `EOracleNotLive`.
- */
-const ORACLE_MIN_HEADROOM_MS = 90_000n
-
-/**
- * Pick the BTC `OracleSVI` with the **shortest viable expiry** from
- * DeepBook's live pool.
- *
- * Why shortest, not newest:
- *
- * DeepBook testnet runs a rolling pool of multiple oracles at once with
- * expiries spread across quarter-hour boundaries (`:15, :30, :45, :00`)
- * AND longer-dated tiers (~1–5 h out). DeepBook publishes the long-dated
- * oracles *after* the near-dated ones, so "newest by OracleCreated event"
- * is biased toward the longest-dated oracle in the pool. A duel pinned
- * to that one only settles when DeepBook's settlement_price for that far
- * expiry is published — could be 4 h+ later.
- *
- * For PvP flow we want duels to settle ASAP after swipes lock, so prefer
- * the closest expiry that still has enough headroom for the swipe phase.
- * `ORACLE_MIN_HEADROOM_MS` is the floor.
- *
- * Candidate selection:
- *   1. Read the 30 most recent `registry::OracleCreated` events.
- *   2. Multi-get the oracle objects in batch.
- *   3. Keep ones that are ACTIVE + priced (spot/forward > 0) + not
- *      settled + `expiry - now >= ORACLE_MIN_HEADROOM_MS`.
- *   4. Return the one with the SMALLEST `expiry`.
- *   5. Fall back to `CONFIG.fallbackOracleSviId` if none qualify.
- *
- * See `docs/oracle-selection.md` for the full rationale, live testnet
- * observations, and tuning guide.
- */
-export async function findLatestOracleSvi(
-  client: SuiClient,
-  asset = "BTC",
-): Promise<string> {
-  try {
-    const res = (await getGraphQLClient().query({
-      query: RECENT_EVENTS_QUERY,
-      variables: {
-        type: `${deepbookPredictPackageId}::registry::OracleCreated`,
-        last: 30,
-      },
-    })) as RecentEventsResult<{ oracle_id: string; underlying_asset: string }>
-    const candidates: string[] = []
-    // GraphQL returns ascending; reverse to consider newest-created first.
-    for (const n of (res.data?.events?.nodes ?? []).reverse()) {
-      const p = n.contents.json
-      if (p.underlying_asset === asset) {
-        candidates.push(normalizeSuiObjectId(p.oracle_id))
-      }
-    }
-    if (candidates.length > 0) {
-      const top = candidates.slice(0, 10)
-      const objs = await client.core.getObjects({
-        objectIds: top,
-        include: { json: true },
-      })
-      const nowMs = BigInt(Date.now())
-      let best: { id: string; expiry: bigint } | null = null
-      for (const obj of objs.objects) {
-        if (obj instanceof Error || !obj.json) continue
-        const f = obj.json as {
-          active?: boolean
-          expiry?: string
-          prices?: { spot?: string; forward?: string }
-          settlement_price?: string | { fields?: { vec?: string[] } } | null
-        }
-        const sp = f.settlement_price
-        const settled =
-          (typeof sp === "string" && sp !== "0") ||
-          (!!sp &&
-            typeof sp === "object" &&
-            // Defensive: older JSON-RPC-style Option wrap { fields: { vec } }.
-            (sp.fields?.vec?.length ?? 0) > 0)
-        const spot = BigInt(f.prices?.spot ?? "0")
-        const forward = BigInt(f.prices?.forward ?? "0")
-        const expiry = BigInt(f.expiry ?? "0")
-        if (settled || !f.active || spot === 0n || forward === 0n) continue
-        if (expiry - nowMs < ORACLE_MIN_HEADROOM_MS) continue
-        if (best === null || expiry < best.expiry) {
-          best = { id: obj.objectId, expiry }
-        }
-      }
-      if (best) return best.id
-    }
-  } catch {
-    // fall through
-  }
-  return CONFIG.fallbackOracleSviId
-}
-
-/**
- * Strike-grid for an OracleSVI without reading DeepBook's `oracle_config`:
- * derive 5 strikes around the last known reference price (settlement when
- * settled, otherwise forward) at the percentages in `pcts`.
+ * Strike-grid for an expiry market without reading DeepBook's pricing
+ * config: derive 5 strikes around the last known reference price
+ * (settlement when settled, otherwise forward) at the percentages in
+ * `pcts`.
  */
 export function oracleStrikes(
   ref: bigint,
-  pcts: readonly bigint[] = [95n, 98n, 100n, 102n, 105n] as const,
+  pcts: readonly bigint[] = [95n, 98n, 100n, 102n, 105n] as const
 ): bigint[] {
   return pcts.map((pct) => (ref * pct) / 100n)
 }
