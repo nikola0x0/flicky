@@ -936,7 +936,7 @@ function PhaseSwiping({
       </ChartModal>
       <ChartModal
         open={chartModal === "pnl"}
-        title="live pnl"
+        title="projected pnl"
         onClose={() => setChartModal(null)}
       >
         <StreamingPnlChart
@@ -1099,7 +1099,10 @@ function CardLedger({
           )
           if (live !== null) {
             net = live
-            pnlLabel = `${fmtPnlPct(live, quantity)} (live)`
+            // "projected", not "live PnL" — this is ±quantity (full
+            // notional), not the real payout-minus-premium P&L, so it can
+            // overstate the loss side. See lib/pnl.ts's SwipeLite doc.
+            pnlLabel = `${fmtPnlPct(live, quantity)} (projected)`
           } else {
             pnlLabel = "ticking…"
           }
