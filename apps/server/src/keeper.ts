@@ -278,40 +278,68 @@ export async function readMarketSettlement(
  *
  * Safe-but-approximate fallback: any failure (HTTP error, no cashflow row —
  * e.g. the indexer hasn't caught up to the mint yet — or a malformed body)
- * returns `0n` and logs a warning. `settle_card` only uses premium for the
- * tie-break (`EqualScoreHigherPremiumWins` — see duel.move), never the
- * primary payout math, so a `0` fallback cannot mis-pay the primary winner;
- * it can only mis-resolve an exact-tie edge case. Flagged LOUDLY per task
- * instructions — see task-5-report.md "premium=0 fallback" section.
+ * resolves to `{ value: 0n, resolved: false }` and logs a warning.
+ *
+ * IMPORTANT — premium is NOT tie-break-only in flicky's winner decision:
+ * `val0 = p0_payout + p1_premium` vs `val1 = p1_payout + p0_premium`, so an
+ * asymmetric fallback (one player's real premium vs the other's `0`) can
+ * flip who wins a close card, not just an exact tie. Callers MUST check
+ * `resolved` and, if either side of a card failed to resolve, zero BOTH
+ * players' premiums for that card (see `tryClose`'s per-card resolution
+ * loop) so premium drops out of the comparison symmetrically instead of
+ * mis-deciding the winner. Flagged LOUDLY per task instructions — see
+ * task-5-report.md "premium=0 fallback" section.
  */
 export async function readOrderPremium(
   expiryMarketId: string,
   orderId: bigint
-): Promise<bigint> {
+): Promise<{ value: bigint; resolved: boolean }> {
   try {
     const res = await fetch(
       `${env.predictIndexerUrl}/markets/${expiryMarketId}/positions/${orderId.toString()}/cashflow`
     )
     if (!res.ok) {
       log.warn(
-        `readOrderPremium(${expiryMarketId}, ${orderId}): HTTP ${res.status} — falling back to premium=0 (tie-break only, not primary payout)`
+        `readOrderPremium(${expiryMarketId}, ${orderId}): HTTP ${res.status} — falling back to premium=0 (not resolved)`
       )
-      return 0n
+      return { value: 0n, resolved: false }
     }
     const data = (await res.json()) as { net_premium?: string } | null
     if (!data || data.net_premium === undefined) {
       log.warn(
         `readOrderPremium(${expiryMarketId}, ${orderId}): no cashflow row (indexer lag or unminted order) — falling back to premium=0`
       )
-      return 0n
+      return { value: 0n, resolved: false }
     }
-    return BigInt(data.net_premium)
+    return { value: BigInt(data.net_premium), resolved: true }
   } catch (e) {
     log.warn(
       `readOrderPremium(${expiryMarketId}, ${orderId}): fetch failed — falling back to premium=0: ${e instanceof Error ? e.message : String(e)}`
     )
-    return 0n
+    return { value: 0n, resolved: false }
   }
+}
+
+/**
+ * Reduce a card's two independently-resolved `readOrderPremium` results to
+ * the `(p0_premium, p1_premium)` pair fed into `settle_card`.
+ *
+ * Symmetric fallback (see `readOrderPremium`'s doc comment): if EITHER
+ * side failed to resolve, both premiums drop to `0n` for this card —
+ * mixing one player's real premium with the other's `0` fallback would
+ * asymmetrically bias `val0 = p0_payout + p1_premium` vs
+ * `val1 = p1_payout + p0_premium` and could mis-decide the winner, not
+ * just an exact tie. Pure so it's directly unit-testable without RPC
+ * mocking.
+ */
+export function resolveCardPremiums(
+  p0: { value: bigint; resolved: boolean },
+  p1: { value: bigint; resolved: boolean }
+): { p0Premium: bigint; p1Premium: bigint } {
+  if (!p0.resolved || !p1.resolved) {
+    return { p0Premium: 0n, p1Premium: 0n }
+  }
+  return { p0Premium: p0.value, p1Premium: p1.value }
 }
 
 export class Keeper {
@@ -453,16 +481,23 @@ export class Keeper {
         settlementPrices.push(price)
         const p0Swipe = duel.p0Swipes[i]
         const p1Swipe = duel.p1Swipes[i]
-        p0Premiums.push(
-          p0Swipe
-            ? await readOrderPremium(card.expiryMarketId, p0Swipe.orderId)
-            : 0n
-        )
-        p1Premiums.push(
-          p1Swipe
-            ? await readOrderPremium(card.expiryMarketId, p1Swipe.orderId)
-            : 0n
-        )
+        const p0Result = p0Swipe
+          ? await readOrderPremium(card.expiryMarketId, p0Swipe.orderId)
+          : { value: 0n, resolved: true }
+        const p1Result = p1Swipe
+          ? await readOrderPremium(card.expiryMarketId, p1Swipe.orderId)
+          : { value: 0n, resolved: true }
+        if (
+          (p0Result.resolved || p1Result.resolved) &&
+          !(p0Result.resolved && p1Result.resolved)
+        ) {
+          log.warn(
+            `card ${i} of ${shortId(duelId)}: one side's premium failed to resolve — zeroing BOTH players' premiums for this card so the fallback stays symmetric`
+          )
+        }
+        const { p0Premium, p1Premium } = resolveCardPremiums(p0Result, p1Result)
+        p0Premiums.push(p0Premium)
+        p1Premiums.push(p1Premium)
       }
 
       const tx = new Transaction()
@@ -512,7 +547,6 @@ export class Keeper {
           if (!swipe || swipe.quantity <= 0n) continue
           tx.moveCall({
             target: `${env.deepbookPredictPackageId}::expiry_market::redeem_settled`,
-            typeArguments: [env.dusdcCoinType],
             arguments: [
               tx.object(card.expiryMarketId),
               tx.object(env.accountRegistryId),

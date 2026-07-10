@@ -11,6 +11,7 @@ import {
   isTerminalSettleError,
   parseDuelFromObject,
   parseSwipe,
+  resolveCardPremiums,
 } from "./keeper"
 
 describe("isTerminalSettleError", () => {
@@ -248,11 +249,10 @@ describe("settle PTB shape (6-24 model)", () => {
     expect(call.MoveCall.arguments).toHaveLength(2)
   })
 
-  test("redeem_settled is built with the 10-arg 6-24 object graph", () => {
+  test("redeem_settled is built with the 10-arg 6-24 object graph and NO type argument (non-generic — DUSDC is hardcoded inside)", () => {
     const tx = new Transaction()
     tx.moveCall({
       target: `${env.deepbookPredictPackageId}::expiry_market::redeem_settled`,
-      typeArguments: [env.dusdcCoinType],
       arguments: [
         tx.object(expiryMarketId),
         tx.object(env.accountRegistryId),
@@ -272,6 +272,49 @@ describe("settle PTB shape (6-24 model)", () => {
     expect(call.MoveCall.function).toBe("redeem_settled")
     expect(call.MoveCall.module).toBe("expiry_market")
     expect(call.MoveCall.arguments).toHaveLength(10)
-    expect(call.MoveCall.typeArguments).toEqual([env.dusdcCoinType])
+    // `redeem_settled` takes ZERO type parameters — passing one aborts the
+    // whole settle PTB (Move arity mismatch). See keeper.ts moveCall above.
+    expect(call.MoveCall.typeArguments).toEqual([])
+  })
+})
+
+describe("resolveCardPremiums (symmetric fallback)", () => {
+  test("both resolved → passes through real values", () => {
+    expect(
+      resolveCardPremiums(
+        { value: 30_000n, resolved: true },
+        { value: 80_000n, resolved: true }
+      )
+    ).toEqual({ p0Premium: 30_000n, p1Premium: 80_000n })
+  })
+
+  test("p0 fails, p1 resolves to a real (non-zero) value → BOTH zeroed, not just p0", () => {
+    // Regression for the asymmetric-fallback bug: val0 = p0_payout +
+    // p1_premium vs val1 = p1_payout + p0_premium — feeding p1's real
+    // premium while p0 falls back to 0 would bias the winner decision.
+    expect(
+      resolveCardPremiums(
+        { value: 0n, resolved: false },
+        { value: 80_000n, resolved: true }
+      )
+    ).toEqual({ p0Premium: 0n, p1Premium: 0n })
+  })
+
+  test("p1 fails, p0 resolves to a real (non-zero) value → BOTH zeroed, not just p1", () => {
+    expect(
+      resolveCardPremiums(
+        { value: 30_000n, resolved: true },
+        { value: 0n, resolved: false }
+      )
+    ).toEqual({ p0Premium: 0n, p1Premium: 0n })
+  })
+
+  test("both fail → both zeroed (already symmetric)", () => {
+    expect(
+      resolveCardPremiums(
+        { value: 0n, resolved: false },
+        { value: 0n, resolved: false }
+      )
+    ).toEqual({ p0Premium: 0n, p1Premium: 0n })
   })
 })
