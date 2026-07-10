@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
-import { markCardPnl, type SwipeLite } from "@/lib/pnl"
+import { fmtPnlPct, markCardPnl, type SwipeLite } from "@/lib/pnl"
 import { PixelButton } from "@/components/pixel-button"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
@@ -63,19 +63,17 @@ interface Tick {
 }
 
 /**
- * 6-24: swipe wire now carries `orderId` instead of `premium` — the real
- * premium needs a server-side lookup by `orderId` that isn't wired into
- * `room_state`/`swipes` yet (see protocol.ts). `pnl.ts`'s helpers still
- * take a `SwipeLite` with `premium`; shim it to `"0"` so the live mark
- * still tracks ITM/OTM (quantity vs. 0) until that lookup lands — the
- * dollar amount is approximate (overstated by the unsubtracted premium).
+ * Narrows a wire swipe (which carries `orderId`) down to the `SwipeLite`
+ * shape `pnl.ts`'s helpers need. 6-24 dropped per-swipe `premium` from the
+ * wire (only `orderId` remains — the real premium needs a server-side
+ * lookup that isn't wired in yet), and `SwipeLite` no longer has a
+ * `premium` field: `markCardPnl` now projects binary PnL from
+ * spot-vs-strike + `quantity` alone.
  */
 function toSwipeLite(
   swipe: { isUp: boolean; quantity: string; orderId: string } | null
 ): SwipeLite | null {
-  return swipe
-    ? { isUp: swipe.isUp, quantity: swipe.quantity, premium: "0" }
-    : null
+  return swipe ? { isUp: swipe.isUp, quantity: swipe.quantity } : null
 }
 
 const POLL_INTERVAL_MS = 5_000
@@ -693,22 +691,19 @@ function CardTile({
 }
 
 /**
- * Per-card PnL as a signed % of the swipe's premium (the player's
- * stake on that single card). Falls back to "—" if no swipe was made —
- * including 6-24 swipes, which carry `orderId` instead of `premium` (the
- * premium needs a server-side lookup by `orderId` not yet wired into
- * `room_state`/`swipes`; see protocol.ts).
+ * Per-card PnL as a signed % of the swipe's quantity (the player's stake
+ * on that single card). Falls back to "—" if no swipe was made. 6-24
+ * swipes carry `orderId` instead of `premium` (the real premium needs a
+ * server-side lookup not yet wired into `room_state`/`swipes`; see
+ * protocol.ts), so this is relative to `quantity` rather than a true cost
+ * basis — see `fmtPnlPct` / `liveCardPnl` in pnl.ts.
  */
 function signedPercent(
   micro: bigint,
   swipe: { isUp: boolean; quantity: string; orderId: string } | null
 ): string {
   if (!swipe) return "—"
-  const premium = BigInt(toSwipeLite(swipe)?.premium ?? "0")
-  if (premium === 0n) return "—"
-  const pct = Math.round((Number(micro) / Number(premium)) * 100)
-  const sign = pct < 0 ? "-" : pct > 0 ? "+" : ""
-  return `${sign}${Math.abs(pct)}%`
+  return fmtPnlPct(micro, BigInt(swipe.quantity))
 }
 
 /**

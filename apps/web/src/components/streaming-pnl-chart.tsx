@@ -104,19 +104,17 @@ function totalPremium(_duel: ChartDuel, _side: "p0" | "p1"): bigint {
 }
 
 /**
- * 6-24: swipe wire now carries `orderId` instead of `premium` — the real
- * premium needs a server-side lookup by `orderId` that isn't wired into
- * `room_state`/`swipes` yet (see protocol.ts). `pnl.ts`'s helpers still
- * take a `SwipeLite` with `premium`; shim it to `"0"` so the live mark
- * still tracks ITM/OTM (quantity vs. 0) until that lookup lands — the
- * dollar amount is approximate (overstated by the unsubtracted premium).
+ * Narrows a wire swipe (which carries `orderId`) down to the `SwipeLite`
+ * shape `pnl.ts`'s helpers need. 6-24 dropped per-swipe `premium` from the
+ * wire (only `orderId` remains — the real premium needs a server-side
+ * lookup that isn't wired in yet), and `SwipeLite` no longer has a
+ * `premium` field: `markCardPnl` now projects binary PnL from
+ * spot-vs-strike + `quantity` alone.
  */
 function toSwipeLite(
   swipe: { isUp: boolean; quantity: string; orderId: string } | null
 ): SwipeLite | null {
-  return swipe
-    ? { isUp: swipe.isUp, quantity: swipe.quantity, premium: "0" }
-    : null
+  return swipe ? { isUp: swipe.isUp, quantity: swipe.quantity } : null
 }
 
 /**

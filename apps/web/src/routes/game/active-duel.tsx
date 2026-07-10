@@ -151,19 +151,17 @@ export interface RoomState {
 }
 
 /**
- * 6-24: swipe wire now carries `orderId` instead of `premium` — the real
- * premium needs a server-side lookup by `orderId` that isn't wired into
- * `room_state`/`swipes` yet (see protocol.ts). `pnl.ts`'s helpers still
- * take a `SwipeLite` with `premium`; shim it to `"0"` so the live mark
- * still tracks ITM/OTM (quantity vs. 0) until that lookup lands — the
- * dollar amount is approximate (overstated by the unsubtracted premium).
+ * Narrows a wire swipe (which carries `orderId`) down to the `SwipeLite`
+ * shape `pnl.ts`'s helpers need. 6-24 dropped per-swipe `premium` from the
+ * wire (only `orderId` remains — the real premium needs a server-side
+ * lookup that isn't wired in yet), and `SwipeLite` no longer has a
+ * `premium` field: `liveCardPnl`/`markCardPnl` now project binary PnL from
+ * spot-vs-strike + `quantity` alone.
  */
 function toSwipeLite(
   swipe: { isUp: boolean; quantity: string; orderId: string } | null
 ): SwipeLite | null {
-  return swipe
-    ? { isUp: swipe.isUp, quantity: swipe.quantity, premium: "0" }
-    : null
+  return swipe ? { isUp: swipe.isUp, quantity: swipe.quantity } : null
 }
 
 export function ActiveDuel({
@@ -1121,20 +1119,20 @@ function CardLedger({
             ? swipeSlot.p0Swipe
             : swipeSlot.p1Swipe
           : null
-        // % return on the premium paid for this card. `net` is the signed
-        // PnL (null when there's nothing to show) — drives the value color.
-        // 6-24: the swipe wire carries `orderId` instead of `premium` (see
-        // `toSwipeLite` above) — premium is shimmed to 0 until a
-        // server-side order-premium lookup lands, so this % is unavailable
-        // pre-settlement.
-        const premium = BigInt(toSwipeLite(mySwipe)?.premium ?? "0")
+        // % return relative to the swiped quantity (the wire no longer
+        // carries per-swipe `premium`, so there's no true cost basis here —
+        // `net` relative to `quantity` reads as "how much of your at-risk
+        // stake you're up/down", exact for the binary live projection).
+        // `net` is the signed PnL (null when there's nothing to show) —
+        // drives the value color.
+        const quantity = BigInt(toSwipeLite(mySwipe)?.quantity ?? "0")
         let net: bigint | null = null
         let pnlLabel = "—"
         if (settled) {
           const pnl = myIsP0 ? settled.p0Pnl : settled.p1Pnl
           if (pnl !== null) {
             net = BigInt(pnl)
-            pnlLabel = `${fmtPnlPct(net, premium)} (settled)`
+            pnlLabel = `${fmtPnlPct(net, quantity)} (settled)`
           } else {
             pnlLabel = "skipped"
           }
@@ -1146,7 +1144,7 @@ function CardLedger({
           )
           if (live !== null) {
             net = live
-            pnlLabel = `${fmtPnlPct(live, premium)} (live)`
+            pnlLabel = `${fmtPnlPct(live, quantity)} (live)`
           } else {
             pnlLabel = "ticking…"
           }
