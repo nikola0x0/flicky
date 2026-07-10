@@ -292,10 +292,17 @@ export function moveCallTargets(tx: Transaction): string[] {
     })
 }
 
+const SYSTEM_FRAMEWORK_PKGS = new Set([
+  normalizeSuiObjectId("0x1"),
+  normalizeSuiObjectId("0x2"),
+  normalizeSuiObjectId("0x3"),
+])
+
 /**
  * Defense against sponsoring arbitrary transactions through the self-sponsor
  * path (Enoki's own `allowedMoveCallTargets` isn't in the loop here since
  * Enoki is being bypassed). Throws on the first non-allowlisted MoveCall.
+ * System-framework packages (0x1/0x2/0x3) are always allowed — see below.
  */
 export function assertSelfSponsorTargetsAllowed(
   tx: Transaction,
@@ -307,10 +314,18 @@ export function assertSelfSponsorTargetsAllowed(
       return `${normalizeSuiObjectId(pkg)}::${mod}::${fn}`
     })
   )
-  for (const target of moveCallTargets(tx)) {
+  const targets = moveCallTargets(tx)
+  for (const target of targets) {
+    const pkg = target.split("::")[0]
+    // Sui system-framework packages (0x1/0x2/0x3) are coin/pay/framework
+    // plumbing that coin resolution (merge/split for a multi-coin stake or a
+    // `coinWithBalance`) legitimately emits. They operate only on the sender's
+    // own objects — they can't drain the sponsor (gas-only exposure) or reach
+    // arbitrary app logic — and Enoki accepts them too, so allow them here.
+    if (SYSTEM_FRAMEWORK_PKGS.has(pkg)) continue
     if (!allowed.has(target)) {
       throw new Error(
-        `self-sponsor: MoveCall target not allowlisted: ${target}`
+        `self-sponsor: MoveCall target not allowlisted: ${target} (all targets: ${targets.join(", ")})`
       )
     }
   }
