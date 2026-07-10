@@ -1,57 +1,52 @@
 /**
- * findManagerFor return-contract tests. The critical safety property: a
- * `null` must mean "scanned the whole event stream, found none" — never
- * "the scan failed". A failed scan MUST throw, so a transient RPC error
- * can't masquerade as a missing manager (which would make the web mint a
- * duplicate PredictManager). See predict.ts for the contract.
+ * deriveWrapperFor return-contract tests. The critical safety property: a
+ * `null` must mean "the registry authoritatively says no wrapper exists
+ * yet" (a clean `derived_wrapper_exists === false` read) — never "the
+ * devInspect failed". A failed devInspect MUST throw, so a transient RPC
+ * error can't masquerade as "no wrapper" (which would make the web mint a
+ * duplicate deposit path). See predict.ts for the contract.
  *
- * findManagerFor is cache-first, so every call touches the Postgres
- * `predict_manager` table — the suite runs only against a throwaway
- * TEST_DATABASE_URL (see test-preload.ts) and skips otherwise.
+ * deriveWrapperFor is cache-first, so every call touches the Postgres
+ * `predict_manager` table (reused as the owner→wrapper cache) — the suite
+ * runs only against a throwaway TEST_DATABASE_URL (see test-preload.ts)
+ * and skips otherwise.
  */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test"
 import type { SuiGrpcClient } from "@mysten/sui/grpc"
-import { normalizeSuiObjectId } from "@mysten/sui/utils"
+import { bcs } from "@mysten/sui/bcs"
 import * as predict from "./predict"
 import * as db from "./db"
 import { HAS_TEST_DB, resetTables } from "./test-db"
 
-/** Mirror the id normalization findManagerFor applies before returning. */
-const mgr = (owner: string, i: number) =>
-  normalizeSuiObjectId(`0xmgr_${owner}_${i}`)
+const boolBytes = (v: boolean) => bcs.bool().serialize(v).toBytes()
+const addrBytes = (addr: string) => bcs.Address.serialize(addr).toBytes()
 
-/** A page of PredictManagerCreated events as the RPC would return them. */
-function page(owners: string[], hasNextPage: boolean) {
-  return {
-    data: owners.map((owner, i) => ({
-      parsedJson: { manager_id: `0xmgr_${owner}_${i}`, owner },
-    })),
-    hasNextPage,
-    nextCursor: hasNextPage ? { txDigest: "tx", eventSeq: "0" } : null,
-  }
-}
+const WRAPPER = "0x" + "42".repeat(32)
 
-/** Fake client that returns `pages` in order, then throws if over-read. */
-function clientFromPages(pages: ReturnType<typeof page>[]): SuiGrpcClient {
+/**
+ * Fake gRPC client whose `core.simulateTransaction` returns one scripted
+ * devInspect result per call, in order — mirroring
+ * `derived_wrapper_exists` then (if reached) `derived_wrapper_address`.
+ * `undefined` entries throw (RPC error mid-call); over-reading past the
+ * scripted queue also throws.
+ */
+function clientFromReturns(
+  returns: Array<Uint8Array | "throw">,
+): SuiGrpcClient {
   let i = 0
   return {
-    queryEvents: async () => {
-      if (i >= pages.length) throw new Error("over-read past scripted pages")
-      return pages[i++]
+    core: {
+      simulateTransaction: async () => {
+        if (i >= returns.length) throw new Error("over-read past scripted devInspect calls")
+        const next = returns[i++]
+        if (next === "throw") throw new Error("RPC unavailable")
+        return { commandResults: [{ returnValues: [{ bcs: next }] }] }
+      },
     },
   } as unknown as SuiGrpcClient
 }
 
-/** Fake client whose queryEvents always rejects (RPC down). */
-function throwingClient(): SuiGrpcClient {
-  return {
-    queryEvents: async () => {
-      throw new Error("RPC unavailable")
-    },
-  } as unknown as SuiGrpcClient
-}
-
-describe.skipIf(!HAS_TEST_DB)("findManagerFor return contract", () => {
+describe.skipIf(!HAS_TEST_DB)("deriveWrapperFor return contract", () => {
   beforeEach(async () => {
     await resetTables()
   })
@@ -60,45 +55,37 @@ describe.skipIf(!HAS_TEST_DB)("findManagerFor return contract", () => {
     await db.closeDb()
   })
 
-  test("returns the manager id when the owner is on the first page", async () => {
-    const c = clientFromPages([page(["0xalice", "0xbob"], false)])
-    expect(await predict.findManagerFor(c, "0xbob")).toBe(mgr("0xbob", 1))
+  test("returns the derived wrapper address when derived_wrapper_exists is true", async () => {
+    const c = clientFromReturns([boolBytes(true), addrBytes(WRAPPER)])
+    expect(await predict.deriveWrapperFor(c, "0xalice")).toBe(WRAPPER)
   })
 
-  test("finds a manager buried several pages deep (proves multi-page walk)", async () => {
-    const c = clientFromPages([
-      page(["0xa", "0xb"], true),
-      page(["0xc", "0xd"], true),
-      page(["0xe", "0xtarget"], false),
-    ])
-    expect(await predict.findManagerFor(c, "0xtarget")).toBe(mgr("0xtarget", 1))
+  test("returns null (authoritative) when derived_wrapper_exists is false", async () => {
+    const c = clientFromReturns([boolBytes(false)])
+    expect(await predict.deriveWrapperFor(c, "0xnobody")).toBeNull()
   })
 
-  test("returns null ONLY after exhausting the stream (hasNextPage=false)", async () => {
-    const c = clientFromPages([
-      page(["0xa", "0xb"], true),
-      page(["0xc", "0xd"], false),
-    ])
-    expect(await predict.findManagerFor(c, "0xnobody")).toBeNull()
+  test("THROWS on an RPC error during derived_wrapper_exists — never a false null", async () => {
+    const c = clientFromReturns(["throw"])
+    expect(predict.deriveWrapperFor(c, "0xowner")).rejects.toThrow("RPC unavailable")
   })
 
-  test("THROWS on an RPC error mid-scan — never a false null", async () => {
-    expect(predict.findManagerFor(throwingClient(), "0xowner")).rejects.toThrow(
-      "RPC unavailable",
-    )
+  test("THROWS on an RPC error during derived_wrapper_address (after exists=true)", async () => {
+    const c = clientFromReturns([boolBytes(true), "throw"])
+    expect(predict.deriveWrapperFor(c, "0xowner")).rejects.toThrow("RPC unavailable")
   })
 
   test("a cache hit short-circuits without touching the client", async () => {
-    await db.cacheManager("0xcached", "0xmgr_cached")
-    // A throwing client would blow up if the scan ran; the cache must win.
-    expect(await predict.findManagerFor(throwingClient(), "0xcached")).toBe(
-      "0xmgr_cached",
-    )
+    await db.cacheManager("0xcached", WRAPPER)
+    // A client with no scripted responses would throw (over-read) if any
+    // devInspect ran; the cache must win before that.
+    const c = clientFromReturns([])
+    expect(await predict.deriveWrapperFor(c, "0xcached")).toBe(WRAPPER)
   })
 
-  test("memoizes a freshly-resolved manager into the cache", async () => {
-    const c = clientFromPages([page(["0xfresh"], false)])
-    await predict.findManagerFor(c, "0xfresh")
-    expect(await db.getCachedManager("0xfresh")).toBe(mgr("0xfresh", 0))
+  test("memoizes a freshly-derived wrapper into the cache", async () => {
+    const c = clientFromReturns([boolBytes(true), addrBytes(WRAPPER)])
+    await predict.deriveWrapperFor(c, "0xfresh")
+    expect(await db.getCachedManager("0xfresh")).toBe(WRAPPER)
   })
 })
