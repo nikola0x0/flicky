@@ -1,3 +1,4 @@
+// LEGACY 4-16 diagnostic — not migrated to 6-24 (see Plan 2)
 /**
  * Diagnostic: dump the latest DeepBook Predict OracleCreated events +
  * the resolved OracleSVI state. Used to understand why
@@ -11,7 +12,9 @@ const client = getSuiClient()
 const pkg = env.deepbookPredictPackageId
 
 console.log(`predict package: ${pkg}`)
-console.log(`headroom:        ${env.deckCardMinHeadroomMs}ms (${env.deckCardMinHeadroomMs / 60_000}min)`)
+console.log(
+  `headroom:        ${env.deckCardMinHeadroomMs}ms (${env.deckCardMinHeadroomMs / 60_000}min)`
+)
 console.log()
 
 const evRes = (await getGraphQLClient().query({
@@ -20,7 +23,9 @@ const evRes = (await getGraphQLClient().query({
   }`,
   variables: { type: `${pkg}::registry::OracleCreated` },
 })) as {
-  data?: { events?: { nodes?: Array<{ contents: { json: Record<string, unknown> } }> } }
+  data?: {
+    events?: { nodes?: Array<{ contents: { json: Record<string, unknown> } }> }
+  }
 }
 const nodes = evRes.data?.events?.nodes ?? []
 console.log(`got ${nodes.length} OracleCreated events (newest first)\n`)
@@ -40,7 +45,9 @@ for (const node of nodes) {
     include: { json: true },
   })
   if (!obj.object?.json) {
-    console.log(`  ${p.oracle_id.slice(0, 14)}…  asset=${p.underlying_asset}  (no content)`)
+    console.log(
+      `  ${p.oracle_id.slice(0, 14)}…  asset=${p.underlying_asset}  (no content)`
+    )
     continue
   }
   const f = obj.object.json as {
@@ -54,14 +61,19 @@ for (const node of nodes) {
     typeof f.settlement_price === "string" ||
     (f.settlement_price &&
       typeof f.settlement_price === "object" &&
-      Array.isArray((f.settlement_price as { fields?: { vec?: unknown[] } }).fields?.vec) &&
-      ((f.settlement_price as { fields?: { vec?: unknown[] } }).fields?.vec?.length ?? 0) > 0)
+      Array.isArray(
+        (f.settlement_price as { fields?: { vec?: unknown[] } }).fields?.vec
+      ) &&
+      ((f.settlement_price as { fields?: { vec?: unknown[] } }).fields?.vec
+        ?.length ?? 0) > 0)
   const remainingMin = Math.floor((expiry - now) / 60_000)
   const ok = f.active && !settled && expiry > minExpiry
   if (ok) okCount++
   const spot = Number(f.prices.spot) / 1e9
   console.log(
-    `  ${p.oracle_id.slice(0, 14)}…  asset=${p.underlying_asset}  active=${f.active}  settled=${!!settled}  expiry=+${remainingMin}min  spot=$${spot.toFixed(2)}  ${ok ? "✓ eligible" : "—"}`,
+    `  ${p.oracle_id.slice(0, 14)}…  asset=${p.underlying_asset}  active=${f.active}  settled=${!!settled}  expiry=+${remainingMin}min  spot=$${spot.toFixed(2)}  ${ok ? "✓ eligible" : "—"}`
   )
 }
-console.log(`\n=> ${okCount} eligible (active && !settled && expiry > +${env.deckCardMinHeadroomMs / 60_000}min)\n`)
+console.log(
+  `\n=> ${okCount} eligible (active && !settled && expiry > +${env.deckCardMinHeadroomMs / 60_000}min)\n`
+)

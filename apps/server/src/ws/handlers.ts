@@ -103,8 +103,9 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           })
           return
         }
-        // PRD §Matchmaking: PredictManager balance ≥ 5 dUSDC is required
-        // before queueing. Check via devInspect (no signing, no gas).
+        // PRD §Matchmaking: funding-account (6-24 AccountWrapper) balance
+        // ≥ 5 dUSDC is required before queueing. Check via devInspect (no
+        // signing, no gas).
         const gate = await checkQueueBalanceGate(
           getSuiClient(),
           ws.data.address
@@ -113,15 +114,15 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           if (gate.reason === "no_manager") {
             send(ws, {
               type: "error",
-              code: "no_predict_manager",
+              code: "no_wrapper",
               message:
-                "no PredictManager found for this address — sign in completes the bootstrap on first run",
+                "no funding account found for this address — sign in completes the bootstrap on first run",
             })
           } else if (gate.reason === "insufficient_balance") {
             send(ws, {
               type: "error",
               code: "insufficient_balance",
-              message: `PredictManager balance < ${MIN_BALANCE_FOR_QUEUE} (5 dUSDC) — deposit before queueing`,
+              message: `account balance < ${MIN_BALANCE_FOR_QUEUE} (5 dUSDC) — deposit before queueing`,
               detail: {
                 need: MIN_BALANCE_FOR_QUEUE.toString(),
                 have: gate.balance.toString(),
@@ -131,7 +132,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
             send(ws, {
               type: "error",
               code: "balance_check_failed",
-              message: "could not verify PredictManager balance; retry shortly",
+              message: "could not verify account balance; retry shortly",
             })
           }
           return

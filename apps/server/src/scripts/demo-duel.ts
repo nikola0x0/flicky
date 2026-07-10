@@ -1,3 +1,4 @@
+// LEGACY 4-16 diagnostic — not migrated to 6-24 (see Plan 2)
 /**
  * Move-level DeepBook integration demo.
  *
@@ -52,7 +53,9 @@ interface OracleSVIInfo {
 async function findLatestOracle(): Promise<OracleSVIInfo> {
   const client = getSuiClient()
   const evts = await client.queryEvents({
-    query: { MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::registry::OracleCreated` },
+    query: {
+      MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::registry::OracleCreated`,
+    },
     limit: 10,
     order: "descending",
   })
@@ -79,7 +82,9 @@ async function findLatestOracle(): Promise<OracleSVIInfo> {
       expiry: BigInt(f.expiry),
       settled: f.settlement_price !== null,
       settlementPrice:
-        f.settlement_price !== null ? BigInt(f.settlement_price as string) : null,
+        f.settlement_price !== null
+          ? BigInt(f.settlement_price as string)
+          : null,
     }
   }
   throw new Error("no recent BTC OracleSVI found")
@@ -101,12 +106,16 @@ async function main() {
   console.log(`oracle:         ${oracle.id}`)
   console.log(`  forward:      ${fmtUsd(oracle.forward)}`)
   console.log(`  spot:         ${fmtUsd(oracle.spot)}`)
-  console.log(`  expiry:       ${new Date(Number(oracle.expiry)).toISOString()}`)
   console.log(
-    `  settled:      ${oracle.settled}${oracle.settlementPrice !== null ? ` @ ${fmtUsd(oracle.settlementPrice)}` : ""}`,
+    `  expiry:       ${new Date(Number(oracle.expiry)).toISOString()}`
+  )
+  console.log(
+    `  settled:      ${oracle.settled}${oracle.settlementPrice !== null ? ` @ ${fmtUsd(oracle.settlementPrice)}` : ""}`
   )
   if (!oracle.settled) {
-    throw new Error("oracle is still active; this script demos the settled flow. wait or use a settled one.")
+    throw new Error(
+      "oracle is still active; this script demos the settled flow. wait or use a settled one."
+    )
   }
 
   // Fund challenger.
@@ -140,12 +149,15 @@ async function main() {
       tx.moveCall({
         target: `${packageId}::duel::new_card`,
         arguments: [tx.object(oracle.id), tx.pure.u64(strike)],
-      }),
+      })
     )
     tx.moveCall({
       target: `${packageId}::duel::create_duel`,
       typeArguments: ["0x2::sui::SUI"],
-      arguments: [stake, tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cards })],
+      arguments: [
+        stake,
+        tx.makeMoveVec({ type: `${packageId}::duel::Card`, elements: cards }),
+      ],
     })
     const res = await client.signAndExecuteTransaction({
       transaction: tx,
@@ -153,15 +165,20 @@ async function main() {
       options: { showObjectChanges: true, showEffects: true },
     })
     if (res.effects?.status.status !== "success") {
-      throw new Error(`create_duel failed: ${JSON.stringify(res.effects?.status)}`)
+      throw new Error(
+        `create_duel failed: ${JSON.stringify(res.effects?.status)}`
+      )
     }
     await client.waitForTransaction({ digest: res.digest })
     const created = res.objectChanges?.find(
-      (c) => c.type === "created" && c.objectType.includes("::duel::Duel<"),
+      (c) => c.type === "created" && c.objectType.includes("::duel::Duel<")
     )
-    if (!created || created.type !== "created") throw new Error("Duel not found")
+    if (!created || created.type !== "created")
+      throw new Error("Duel not found")
     duelId = normalizeSuiObjectId(created.objectId)
-    console.log(`\nduel created: ${duelId}  (admin staked ${fmtSui(STAKE_MIST)})`)
+    console.log(
+      `\nduel created: ${duelId}  (admin staked ${fmtSui(STAKE_MIST)})`
+    )
   }
 
   // Challenger joins.
@@ -179,7 +196,9 @@ async function main() {
       options: { showEffects: true },
     })
     if (res.effects?.status.status !== "success") {
-      throw new Error(`join_duel failed: ${JSON.stringify(res.effects?.status)}`)
+      throw new Error(
+        `join_duel failed: ${JSON.stringify(res.effects?.status)}`
+      )
     }
     await client.waitForTransaction({ digest: res.digest })
     console.log(`challenger joined and staked ${fmtSui(STAKE_MIST)}`)
@@ -210,7 +229,9 @@ async function main() {
         options: { showEffects: true },
       })
       if (res.effects?.status.status !== "success") {
-        throw new Error(`swipe failed (card ${i}, ${name}): ${JSON.stringify(res.effects?.status)}`)
+        throw new Error(
+          `swipe failed (card ${i}, ${name}): ${JSON.stringify(res.effects?.status)}`
+        )
       }
       await client.waitForTransaction({ digest: res.digest })
       console.log(`  card ${i}: ${name.padEnd(10)} → ${isUp ? "UP  " : "DOWN"}`)
@@ -225,7 +246,11 @@ async function main() {
       tx.moveCall({
         target: `${packageId}::duel::settle_card`,
         typeArguments: ["0x2::sui::SUI"],
-        arguments: [tx.object(duelId), tx.object(oracle.id), tx.pure.u64(BigInt(i))],
+        arguments: [
+          tx.object(duelId),
+          tx.object(oracle.id),
+          tx.pure.u64(BigInt(i)),
+        ],
       })
     }
     const res = await client.signAndExecuteTransaction({
@@ -234,10 +259,13 @@ async function main() {
       options: { showEffects: true, showEvents: true },
     })
     if (res.effects?.status.status !== "success") {
-      throw new Error(`settle batch failed: ${JSON.stringify(res.effects?.status)}`)
+      throw new Error(
+        `settle batch failed: ${JSON.stringify(res.effects?.status)}`
+      )
     }
     await client.waitForTransaction({ digest: res.digest })
-    const settled = res.events?.filter((e) => e.type.endsWith("::duel::CardSettled")) ?? []
+    const settled =
+      res.events?.filter((e) => e.type.endsWith("::duel::CardSettled")) ?? []
     for (const ev of settled) {
       const p = ev.parsedJson as {
         card_idx: string
@@ -249,7 +277,7 @@ async function main() {
         `  card ${p.card_idx}: strike=${fmtUsd(strikes[Number(p.card_idx)])}  ` +
           `settle=${fmtUsd(BigInt(p.settlement_price))}  ` +
           `admin=${fmtScore(BigInt(p.p0_card_score))}  ` +
-          `challenger=${fmtScore(BigInt(p.p1_card_score))}`,
+          `challenger=${fmtScore(BigInt(p.p1_card_score))}`
       )
     }
   }
@@ -287,8 +315,12 @@ async function main() {
             ? "challenger"
             : "tie"
       console.log("\n=== RESULT ===")
-      console.log(`admin score:       ${fmtScore(BigInt(p.p0_score)).padStart(8)}    payout: ${fmtSui(BigInt(p.payout_to_p0))}`)
-      console.log(`challenger score:  ${fmtScore(BigInt(p.p1_score)).padStart(8)}    payout: ${fmtSui(BigInt(p.payout_to_p1))}`)
+      console.log(
+        `admin score:       ${fmtScore(BigInt(p.p0_score)).padStart(8)}    payout: ${fmtSui(BigInt(p.payout_to_p0))}`
+      )
+      console.log(
+        `challenger score:  ${fmtScore(BigInt(p.p1_score)).padStart(8)}    payout: ${fmtSui(BigInt(p.payout_to_p1))}`
+      )
       console.log(`winner: ${winnerLabel}`)
     }
   }

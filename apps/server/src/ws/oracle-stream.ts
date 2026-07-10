@@ -137,6 +137,6 @@ function countSockets(): number {
   return n
 }
 
-export function oracleStreamStats(): { oracles: number; sockets: number } {
-  return { oracles: marketSubscribers.size, sockets: countSockets() }
+export function oracleStreamStats(): { markets: number; sockets: number } {
+  return { markets: marketSubscribers.size, sockets: countSockets() }
 }
