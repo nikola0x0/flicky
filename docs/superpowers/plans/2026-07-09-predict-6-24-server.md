@@ -63,7 +63,10 @@ accumulatorRootId:  envStr("ACCUMULATOR_ROOT_ID",  "0xacc"),
 predictIndexerUrl:  envStr("PREDICT_INDEXER_URL",  "https://predict-server-beta.testnet.mystenlabs.com"),
 propbookIndexerUrl: envStr("PROPBOOK_INDEXER_URL", "https://propbook.api.testnet.mystenlabs.com"),
 predictSettlementMode: (Bun.env.PREDICT_SETTLEMENT_MODE === "onchain" ? "onchain" : "keeper") as "keeper" | "onchain",
+deckStrikeMode: (Bun.env.DECK_STRIKE_MODE === "svi_quote" ? "svi_quote" : "price_offset") as "price_offset" | "svi_quote",
 ```
+
+`deckStrikeMode` mirrors the settlement-mode toggle: default `price_offset` (implemented in Task 3); `svi_quote` (off-chain Black-Scholes/SVI probability pricing) is a documented future branch, guarded as not-implemented until built — no dead code.
 Keep `dusdcCoinType` and `deepbookPredictObjectId` — but repurpose `deepbookPredictObjectId` only if still referenced; otherwise remove it and fix references in later tasks. (Grep `deepbookPredictObjectId` usages; the keeper/redeem path replaces them.)
 
 - [ ] **Step 3: typecheck**
@@ -140,6 +143,8 @@ git commit -m "feat(server): sponsor allowlist for 6-24 account + expiry_market 
 **Files:** Modify `apps/server/src/deckmaster.ts`, `apps/server/src/deckmaster.test.ts`
 
 The 4-16 discovery scanned `oracle::OraclePricesUpdated` and probed the on-chain quote slope (`predict::get_trade_amounts`) to place strikes in probability space. 6-24 exposes **no public quote**, so: discover live `ExpiryMarket`s from the predict indexer, read current BTC spot from the propbook indexer, and place strikes as **price offsets around spot** snapped to `admission_tick_size`, sign-balanced. This drops the on-chain amplitude probe.
+
+**Strike mode is env-toggleable** (`env.deckStrikeMode`, Task 1). This task implements `"price_offset"` (the default). Guard the other mode explicitly: `if (env.deckStrikeMode === "svi_quote") throw new Error("svi_quote strike mode not implemented yet")` at the deck-build entry — a clear guard, not a dead branch, so a future off-chain-SVI implementation slots in without disturbing the default path.
 
 **Interfaces:**
 - Produces: `findDeckMarkets(count, maxHorizonMs): Promise<MarketSnapshot[]>` where `MarketSnapshot = { expiryMarketId: string, expiry: number, tickSize: bigint, admissionTickSize: bigint }`; `buildDeck(markets, spot): { expiryMarketId, strike, lowerTick, higherTick, isUpFavored }[]`; a stable `snapToAdmissionTick(rawStrike, tickSize, admissionTickSize): bigint`.
