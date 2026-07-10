@@ -7,7 +7,7 @@ import type { WebSocketHandler } from "bun"
 import { getSuiClient } from "../lib/sui"
 import { makeLogger, shortId } from "../log"
 import { checkQueueBalanceGate, MIN_BALANCE_FOR_QUEUE } from "../predict"
-import { findDeckOracles } from "../deckmaster"
+import { findDeckMarkets } from "../deckmaster"
 import { consume } from "../ratelimit"
 import { handleChatReact, handleChatSend, sendChatHistory } from "./chat"
 import {
@@ -117,21 +117,21 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           }
           return
         }
-        // Pre-flight the BTC oracle pool so players get a clear "try
+        // Pre-flight the BTC market pool so players get a clear "try
         // again in a few" instead of silently entering a queue that's
-        // going to fail at deck-gen. Upstream Predict creates oracles
-        // on a 15-min cron with occasional skipped ticks — when the
-        // cron drops we sit at 4/5 eligible oracles until the next
-        // beat. Letting the match form anyway leads to a retry loop
-        // that the player sees as a permanent "searching".
+        // going to fail at deck-gen. Upstream Predict creates markets
+        // on a cron with occasional skipped ticks — when the cron drops
+        // we sit at 4/5 eligible markets until the next beat. Letting
+        // the match form anyway leads to a retry loop that the player
+        // sees as a permanent "searching".
         try {
-          const oracles = await findDeckOracles(getSuiClient(), "BTC", 5)
-          if (oracles.length < 5) {
+          const markets = await findDeckMarkets(5)
+          if (markets.length < 5) {
             send(ws, {
               type: "error",
               code: "oracles_unavailable",
-              message: `Only ${oracles.length}/5 BTC oracles are live right now. The upstream cron should produce another in a few minutes — try again then.`,
-              detail: { available: oracles.length, required: 5 },
+              message: `Only ${markets.length}/5 BTC markets are live right now. The upstream cron should produce another in a few minutes — try again then.`,
+              detail: { available: markets.length, required: 5 },
             })
             return
           }

@@ -24,14 +24,15 @@
 import type { ServerWebSocket } from "bun"
 import { getPlayerRating } from "../db"
 import {
-  buildAndProbeDeck,
+  buildDeck,
+  commitDeck,
   deriveSeed,
-  findDeckOracles,
+  findDeckMarkets,
   hashToHex,
+  readBtcSpot,
   rememberDeck,
 } from "../deckmaster"
 import { env } from "../env"
-import { getSuiClient } from "../lib/sui"
 import { makeLogger, shortId } from "../log"
 import { findClosestOpponent } from "../mmr"
 import type { ServerMsg, Tier } from "./protocol"
@@ -49,13 +50,13 @@ type DeckHashProvider = (opts: {
 }) => Promise<string>
 
 let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
-  const client = getSuiClient()
-  const oracles = await findDeckOracles(client, "BTC", 5)
-  if (oracles.length < 5) {
+  const markets = await findDeckMarkets(5)
+  if (markets.length < 5) {
     throw new Error(
-      `not enough live oracles (${oracles.length}/5) — retry in a few minutes`,
+      `not enough live markets (${markets.length}/5) — retry in a few minutes`,
     )
   }
+  const spot = await readBtcSpot()
   const nonceHex = hashToHex(crypto.getRandomValues(new Uint8Array(16)))
   const seed = deriveSeed({
     sender: creatorAddr,
@@ -64,7 +65,8 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
     timestampMs: Date.now(),
     nonceHex,
   })
-  const deck = await buildAndProbeDeck(client, oracles, seed)
+  const cards = buildDeck(markets, spot, seed)
+  const deck = commitDeck(cards)
   await rememberDeck(deck.hash, deck.cards, seed)
   // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields
   // `0x0x…` which decodes to 33 bytes and trips create_duel's 32-byte
