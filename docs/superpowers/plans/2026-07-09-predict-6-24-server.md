@@ -18,7 +18,8 @@
 - Propbook oracle indexer: `https://propbook.api.testnet.mystenlabs.com`. `GET /oracles/{pyth_feed_id}/pyth/latest` → current BTC spot.
 - Constants: `AccumulatorRoot = 0xacc`, `Clock = 0x6`, dUSDC 6dp. Leverage `1e9`=1x. `max_cost`/`max_probability` uncapped = `u64` max.
 - Preserve README invariants: sponsored gas end-to-end, server NEVER mints on the player's behalf, `Duel` doesn't hold positions, `p_swiped` no longer snapshotted on-chain (keeper-attested premium at settle).
-- Branch `feat/predict-6-24-migration` (continues from Plan 1, HEAD `98c5a5a`). `apps/web` stays intentionally RED until Plan 3 — server verification is scoped to `apps/server` (`bun --filter server test` + `bun --filter server typecheck`).
+- Branch `feat/predict-6-24-migration` (continues from Plan 1). `apps/web` stays intentionally RED until Plan 3.
+- **VERIFICATION BASELINE (measured 2026-07-10, pre-Plan-2):** `apps/server` `tsc --noEmit` already has **39 pre-existing type errors** — all `@mysten/sui` gRPC-client typing mismatches (`client.core.getObject(s)({include})`, `.json`/`.objectId` on `ObjectResponse`, `simulateTransaction`/`signAndExecuteTransaction`/`waitForTransaction` on the grpc client, `getBalance({owner})`) from the earlier `feat/grpc` migration. They live in `deckmaster.ts`(6), `keeper.ts`(12), `oracle.ts`(7), `indexer.ts`(5), `ws/oracle-stream.ts`(5), `predict.ts`(1), `scripts/probe-oracles.ts`(3). The code RUNS (Bun doesn't typecheck); these are stale types. **The verification bar for every task is therefore: (a) `bun run test` (the package.json-scoped script — NOT bare `bun test`, which also runs the broken legacy `scripts/e2e.test.ts`) stays at 0 fail (baseline 126 pass / 57 skip / 0 fail); (b) NO NEW typecheck errors beyond the 39-error baseline.** Do NOT rabbit-hole fixing the pre-existing gRPC typing — match the existing working runtime call pattern. Where a rewrite replaces a mistyped call (e.g. an on-chain object read becomes a `fetch()` to the indexer), the error count should DROP; that's welcome but not required.
 
 **Scope note:** deliver the SERVER. Web (Plan 3) and E2E (Plan 4) follow. Some tasks probe the live indexer as their first step — that is a real step, not a placeholder, because the exact JSON of `/markets/{id}/state` and `/oracles/.../pyth/latest` must be confirmed against the running service before parsing it.
 
@@ -353,11 +354,12 @@ grep -rn "OracleSVI\|PredictManager\|predict_manager\|market_key\|get_trade_amou
 ```
 Each hit is a missed rename — fix it. Scripts under `src/scripts/` that hardcode 4-16 ids (`deepbook-discover.ts`, `demo-duel.ts`, `probe-oracles.ts`) may be updated or deleted; if left, add a one-line "4-16 legacy, not migrated" comment so they don't read as current.
 
-- [ ] **Step 2: Full server suite + typecheck**
+- [ ] **Step 2: Full server suite + typecheck vs baseline**
 ```bash
-cd apps/server && bun test && bun run typecheck
+cd apps/server && bun run test          # scoped script; must stay 0 fail
+bun run typecheck 2>&1 | grep -c "error TS"   # must be <= 39 (baseline); ideally lower
 ```
-Expected: all non-e2e tests PASS, `tsc` clean. (Do NOT run `bun test:e2e` here — it needs live testnet + a seeded account; Plan 4 owns the real E2E.)
+Expected: `bun run test` 0 fail; typecheck error count ≤ 39 (the pre-existing gRPC-typing baseline) with NO new error signatures introduced. Do NOT run bare `bun test` (pulls in the broken legacy `scripts/e2e.test.ts`) and do NOT run `bun test:e2e` (needs live testnet + seeded account; Plan 4 owns real E2E).
 
 - [ ] **Step 3: Boot smoke test**
 ```bash
@@ -374,7 +376,8 @@ git commit -m "chore(server): 6-24 straggler sweep + verification"
 ---
 
 ## Verification (whole plan)
-- `bun --filter server test` green; `bun --filter server typecheck` clean.
+- `cd apps/server && bun run test` stays 0 fail (baseline 126 pass / 57 skip).
+- Typecheck error count ≤ 39 (pre-existing gRPC-typing baseline); no new error signatures.
 - No 4-16 symbols remain in `apps/server/src` (Task 7 grep empty).
 - Discovery returns ≥3 live short-dated BTC `ExpiryMarket`s from the predict indexer.
 - Keeper builds a valid `settle_card × N` + `finalize` + `redeem_settled` PTB against the new package (dry-run shape verified in keeper.test.ts).
