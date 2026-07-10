@@ -37,7 +37,7 @@ const BLUE_BRAND_STYLE = {
 export const SWIPE_QUANTITY = 1_000_000n
 
 /**
- * Minimum dUSDC the PredictManager must hold before entering the queue
+ * Minimum dUSDC the AccountWrapper must hold before entering the queue
  * — covers worst-case 5-card exposure at SWIPE_QUANTITY = 1 dUSDC.
  */
 export const MIN_MANAGER_BALANCE = 5n * SWIPE_QUANTITY
@@ -62,7 +62,7 @@ type Phase =
       needed: bigint
       current: bigint
     }
-  /** Wallet OK; no PredictManager yet. */
+  /** Wallet OK; no AccountWrapper yet. */
   | { kind: "needs_manager" }
   /** Wallet OK; manager exists but balance < 5 dUSDC. */
   | { kind: "needs_manager_deposit"; managerId: string; current: bigint }

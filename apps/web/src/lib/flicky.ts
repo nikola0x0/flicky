@@ -571,9 +571,8 @@ export async function listDuelIds(
 // were removed here: 6-24 cards pin an `ExpiryMarket` (`expiry_market_id`),
 // not an `OracleSVI`, and `CONFIG.fallbackOracleSviId` no longer exists
 // (dropped when config moved to 6-24 ids). Market discovery is
-// indexer-driven now — see `fetchMarketTickSize` in `lib/deepbook.ts`.
-// Callers still importing the deleted functions need an ExpiryMarket
-// discovery helper in their place (Task 6).
+// indexer-driven now — see `fetchMarketTickSize` in `lib/deepbook.ts` and
+// `fetchOracleList`/`useOracle` in `App.tsx`.
 
 /**
  * Strike-grid for an expiry market without reading DeepBook's pricing

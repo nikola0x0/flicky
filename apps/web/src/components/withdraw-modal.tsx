@@ -35,7 +35,7 @@ type Tab = "MANAGER" | "SEND"
 /**
  * Withdraw modal — two related "money out" flows under one roof:
  *
- *   - MANAGER tab: predict_manager::withdraw, manager → zk-wallet.
+ *   - MANAGER tab: account::withdraw_funds, wrapper → zk-wallet.
  *     Recipient is implicit (the caller).
  *   - SEND    tab: zk-wallet → arbitrary address, SUI or dUSDC, with
  *     an inline confirm step before signing.
@@ -82,12 +82,12 @@ export function WithdrawModal({ open, address, onClose }: WithdrawModalProps) {
           type="button"
           onClick={onClose}
           aria-label="close"
-          className="absolute right-3 top-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
+          className="absolute top-3 right-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
         >
           ✕
         </button>
 
-        <header className="px-6 pb-2 pt-7 text-center">
+        <header className="px-6 pt-7 pb-2 text-center">
           <h2
             id="withdraw-title"
             className="text-lg tracking-[0.18em] uppercase"
@@ -103,7 +103,7 @@ export function WithdrawModal({ open, address, onClose }: WithdrawModalProps) {
         </div>
       </div>
     </div>,
-    document.body,
+    document.body
   )
 }
 
@@ -148,7 +148,7 @@ function TabRow({
 }
 
 /* ────────────────────────────────────────────────────────────────────
- * MANAGER tab — predict_manager::withdraw, manager → zk-wallet.
+ * MANAGER tab — account::withdraw_funds, wrapper → zk-wallet.
  * ─────────────────────────────────────────────────────────────────── */
 
 function ManagerWithdrawTab({ address }: { address: string }) {
@@ -201,7 +201,7 @@ function ManagerWithdrawTab({ address }: { address: string }) {
       <div className="rounded-xl bg-white/5 px-3 py-2 text-xs tracking-wider text-white/55 uppercase">
         <div className="flex justify-between">
           <span>manager dUSDC</span>
-          <span className="text-base tabular-nums text-white">
+          <span className="text-base text-white tabular-nums">
             {managerBalance.toFixed(4)}
           </span>
         </div>
@@ -292,7 +292,7 @@ function SendTab({ address }: { address: string }) {
         address,
         recipient.trim(),
         meta.coinType,
-        microAmount,
+        microAmount
       )
       await sign.mutateAsync({ transaction: tx })
       setSuccess({ amount: parsed, token })
@@ -324,7 +324,7 @@ function SendTab({ address }: { address: string }) {
           </div>
           <div>
             <div className="text-white/55 uppercase">to</div>
-            <div className="mt-1 break-all font-mono text-xs text-white">
+            <div className="mt-1 font-mono text-xs break-all text-white">
               {recipient.trim()}
             </div>
           </div>
@@ -338,7 +338,7 @@ function SendTab({ address }: { address: string }) {
             type="button"
             disabled={busy}
             onClick={() => setConfirming(false)}
-            className="rounded-xl bg-white/10 px-4 py-3 text-base tracking-wider uppercase text-white/80 hover:bg-white/15 disabled:opacity-50"
+            className="rounded-xl bg-white/10 px-4 py-3 text-base tracking-wider text-white/80 uppercase hover:bg-white/15 disabled:opacity-50"
           >
             cancel
           </button>
@@ -389,7 +389,7 @@ function SendTab({ address }: { address: string }) {
       <div className="rounded-xl bg-white/5 px-3 py-2 text-xs tracking-wider text-white/55 uppercase">
         <div className="flex justify-between">
           <span>wallet {meta.label}</span>
-          <span className="text-base tabular-nums text-white">
+          <span className="text-base text-white tabular-nums">
             {balance.toFixed(4)}
           </span>
         </div>
@@ -483,16 +483,16 @@ function AmountField({
           inputMode="decimal"
           min={0}
           step="any"
-          className="w-full bg-transparent text-2xl tabular-nums text-white focus:outline-none"
+          className="w-full bg-transparent text-2xl text-white tabular-nums focus:outline-none"
         />
         <button
           type="button"
           onClick={onMax}
-          className="rounded-full bg-white/10 px-3 py-1 text-xs tracking-wider uppercase text-white/70 hover:text-white"
+          className="rounded-full bg-white/10 px-3 py-1 text-xs tracking-wider text-white/70 uppercase hover:text-white"
         >
           max
         </button>
-        <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pl-1.5 pr-2">
+        <div className="flex w-20 shrink-0 items-center justify-center gap-1 rounded-full bg-white/10 py-1 pr-2 pl-1.5">
           <img
             src={token.icon}
             alt=""
@@ -527,7 +527,7 @@ async function buildExternalTransferTx(
   owner: string,
   recipient: string,
   coinType: string,
-  amount: bigint,
+  amount: bigint
 ): Promise<Transaction> {
   const coins = await client.core.listCoins({ owner, coinType })
   if (coins.objects.length === 0) {

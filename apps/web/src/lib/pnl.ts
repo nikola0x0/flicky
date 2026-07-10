@@ -19,7 +19,7 @@
  * `cardOutcomes[i].p{0,1}Pnl` and only fall back to this for the brief
  * pre-indexer window right after on-chain settlement.
  *
- * Mirrors `liveCardPnl` / `runningPnl` in apps/playground.
+ * Mirrors `liveCardPnl` / `markCardPnl` usage in apps/playground.
  */
 
 export interface SwipeLite {
@@ -119,52 +119,6 @@ export function markCardPnl(
   }
   const pIn = swipe.isUp ? pUp : 1 - pUp
   return BigInt(Math.round(q * (2 * pIn - 1)))
-}
-
-/**
- * Combined running PnL for `side` = settled real PnL + live mark-to-market.
- *
- * Settled portion: `payout - premium` from the contract's aggregate
- * fields (truth — already netted across all settled cards).
- * Live portion: sum of `liveCardPnl` over cards that have a swipe + a
- * tick but aren't in `cardOutcomes` yet. Swiped cards without a tick
- * are skipped (honest unknown), unswiped cards contribute 0.
- */
-export function runningPnl(
-  rs: {
-    p0Payout: string
-    p0Premium: string
-    p1Payout: string
-    p1Premium: string
-    cardOutcomes: Array<{ cardIdx: number }>
-    swipes: Array<{
-      cardIdx: number
-      p0Swipe: SwipeLite | null
-      p1Swipe: SwipeLite | null
-    }>
-  },
-  side: "p0" | "p1",
-  deck: { cards: Array<{ oracle_id: string; strike: string }> } | null,
-  ticks: Record<string, { spot: string }>
-): bigint {
-  const settled =
-    side === "p0"
-      ? BigInt(rs.p0Payout) - BigInt(rs.p0Premium)
-      : BigInt(rs.p1Payout) - BigInt(rs.p1Premium)
-  const settledIdx = new Set(rs.cardOutcomes.map((o) => o.cardIdx))
-  let live = 0n
-  for (const s of rs.swipes) {
-    if (settledIdx.has(s.cardIdx)) continue
-    const swipe = side === "p0" ? s.p0Swipe : s.p1Swipe
-    if (!swipe) continue
-    const card = deck?.cards[s.cardIdx]
-    if (!card) continue
-    const tick = ticks[card.oracle_id]
-    if (!tick) continue
-    const pnl = liveCardPnl(swipe, card.strike, tick.spot)
-    if (pnl !== null) live += pnl
-  }
-  return settled + live
 }
 
 /**

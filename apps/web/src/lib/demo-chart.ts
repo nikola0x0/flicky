@@ -17,7 +17,6 @@ export const DEMO_OPP_ADDRESS =
   "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 export const DEMO_STRIKE = "100000000000" // 100.0 on 1e9 scale
 export const DEMO_QUANTITY = "100000000000" // 100x quantity → BTC-scale PnL
-export const DEMO_PREMIUM = "50000000" // $50 premium per swipe (display-only demo math)
 // 6-24: swipe wire carries `orderId` (not `premium`) — a fake order id for
 // demo swipe fixtures.
 export const DEMO_ORDER_ID = "1"

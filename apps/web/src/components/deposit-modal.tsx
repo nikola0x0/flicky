@@ -451,9 +451,9 @@ function AddressRow({
 
 /**
  * On-chain deposit from the zk-wallet dUSDC into the player's
- * PredictManager. Different UX from the receive-into-wallet flow:
+ * AccountWrapper. Different UX from the receive-into-wallet flow:
  * amount input + signed deposit tx (sponsored via useFlickySign).
- * Creates the manager on-the-fly if the user doesn't have one yet.
+ * Creates the wrapper on-the-fly if the user doesn't have one yet.
  */
 function ManagerDepositTab({
   address,
