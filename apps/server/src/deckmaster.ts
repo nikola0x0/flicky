@@ -396,17 +396,18 @@ const SVI_VOL = 0.6
 const SVI_MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000
 
 /** Target win-probability for the FAVORED direction, by difficulty zone.
- *  Bounded so the favored side's premium (`p × quantity`) clears the protocol
- *  per-swipe `min_net_premium` floor ($1) at `SWIPE_QUANTITY = 2` dUSDC — i.e.
- *  p ≥ 0.5 — with margin (p ≥ 0.56 → premium ≳ $1.12). Only the FAVORED side
- *  is required to mint (see mint-probe `buildProbedDeck`); the UNFAVORED
- *  long-shot's premium `(1-p) × quantity` is below the floor and is surfaced
- *  to the player at swipe time rather than kept mintable. Higher p = stronger
- *  lean = more dramatic time-decay PnL drift toward ±quantity near settlement. */
+ *  Bounded so BOTH sides' premiums (`p × quantity` and `(1-p) × quantity`)
+ *  clear the protocol per-swipe `min_net_premium` floor ($1) at
+ *  `SWIPE_QUANTITY = 3` dUSDC — the both-sides-mintable band is
+ *  p ∈ [0.334, 0.666], and every zone below sits inside it with margin (e.g.
+ *  edge 0.63 → long-shot premium ≳ $1.11). mint-probe `buildProbedDeck` now
+ *  requires BOTH directions to mint, falling back to ATM only if either
+ *  fails. Higher p = stronger lean = more dramatic time-decay PnL drift
+ *  toward ±quantity near settlement. */
 const ZONE_TARGET_PROB: Record<Zone, number> = {
   close: 0.56,
   mid: 0.61,
-  edge: 0.65,
+  edge: 0.63,
 }
 
 /** Inverse standard-normal CDF (Acklam's rational approximation, ~1e-9). */

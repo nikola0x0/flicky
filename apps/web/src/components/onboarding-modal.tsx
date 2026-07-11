@@ -39,22 +39,25 @@ const BLUE_BRAND_STYLE = {
  * abort code 4). By design the position is kept as CHEAP as the protocol
  * allows — the duel STAKE (side-pot) is the game's real prize, the mint is
  * just how each swipe takes a genuine Predict position for scoring. So this
- * sits at 2 dUSDC notional: the favored side (win prob ≳ 0.56, see deckmaster
- * `ZONE_TARGET_PROB`) yields a premium of ~1.1–1.3 dUSDC — safely over the
- * $1 floor — while a 5-card duel draws only ~5–6 dUSDC of premium total, so a
- * stake pool of a few dUSDC per side dominates it. (1 dUSDC notional gives
- * ~0.5 premium at ATM — under the floor — so 2 dUSDC is the practical
- * minimum.)
+ * sits at 3 dUSDC notional: at this quantity BOTH sides of an offset-strike
+ * card clear the floor (band widens to p ∈ [0.334, 0.666], covering every
+ * `ZONE_TARGET_PROB` zone in deckmaster) — the favored side (win prob ≳ 0.56)
+ * yields a premium of ~$1.68–1.95, and the long-shot side ~$1.05–1.32 — while
+ * a 5-card duel draws ~$7.5–9 of premium total, so a stake pool of a few
+ * dUSDC per side still dominates it. (2 dUSDC notional could not clear the
+ * floor on the long-shot side of an offset strike — that's why this was
+ * raised from 2 to 3.)
  */
-export const SWIPE_QUANTITY = 2_000_000n
+export const SWIPE_QUANTITY = 3_000_000n
 
 /**
  * Floor the AccountWrapper must hold before queueing — kept at 5 dUSDC to
  * match the server's `MIN_BALANCE_FOR_QUEUE`. NOTE: this is a floor, not
- * full worst-case coverage — a 5-card duel's premiums (~5–6 dUSDC) plus the
- * stake can exceed it, so the account should be funded above this for a
- * complete game. Decoupled from `SWIPE_QUANTITY` on purpose (raising the
- * notional must not silently raise the onboarding gate).
+ * full worst-case coverage — a 5-card duel's premiums (~$7.5–9 at
+ * `SWIPE_QUANTITY = 3`) plus the stake can exceed it, so the account should
+ * be funded above this for a complete game. Decoupled from `SWIPE_QUANTITY`
+ * on purpose (raising the notional must not silently raise the onboarding
+ * gate).
  */
 export const MIN_MANAGER_BALANCE = 5_000_000n
 

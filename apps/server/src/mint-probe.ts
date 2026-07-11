@@ -45,7 +45,7 @@ const LEVERAGE_1X = 1_000_000_000n
  * admission math (`net_premium = probability × quantity / leverage` vs
  * `min_net_premium`) mirrors what a real swipe will do.
  */
-const PROBE_QTY = 2_000_000n
+const PROBE_QTY = 3_000_000n
 
 /**
  * (sender, wrapper) used to build probe PTBs. `undefined` = not yet resolved,
@@ -241,11 +241,16 @@ function atmCard(
  * Build a deck whose every card is currently mintable in BOTH directions.
  *
  * Starts from `buildDeck`, then per card probes UP and DOWN; any card that
- * fails either direction — its offset strike pushed the low-probability side
- * under the premium floor (`ENetPremiumBelowMinimum`) on a short-expiry
- * market — is replaced with a pure ATM card on the same market, which mints
- * ~0.5 both ways. This is the 6-24 revival of the old 4-16
- * `buildAndProbeDeck` ATM-fallback (env.ts's `deckCardMinHeadroomMs` comment).
+ * fails either direction — its offset strike pushed one side's premium under
+ * the floor (`ENetPremiumBelowMinimum`) on a short-expiry market — is
+ * replaced with a pure ATM card on the same market, which mints ~0.5 both
+ * ways. This is the 6-24 revival of the old 4-16 `buildAndProbeDeck`
+ * ATM-fallback (env.ts's `deckCardMinHeadroomMs` comment).
+ *
+ * At `PROBE_QTY = 3` dUSDC (matching web `SWIPE_QUANTITY`) plus Task 1's
+ * 30min–3h market-headroom floor, the both-sides-mintable band widens to
+ * p ∈ [0.334, 0.666], which covers every deckmaster `ZONE_TARGET_PROB` zone —
+ * so both directions can be required outright instead of favored-only.
  *
  * Fail-open: if the probe can't run (disabled / no identity) it returns the
  * raw `buildDeck` output. Assumes `markets` already passed
@@ -268,26 +273,19 @@ export async function buildProbedDeck(
     cards.map(async (card, i) => {
       const market = markets[i % markets.length]
       const strikeTick = card.strike / market.tickSize
-      // Require the FAVORED direction (the card's lean) to mint — that's the
-      // side whose live PnL drifts dramatically toward +quantity and the
-      // natural play. Keeping a genuine offset here is what makes the PnL
-      // move; demanding BOTH directions would force short-expiry cards back to
-      // ATM (flat PnL), because the unfavored long-shot's premium dips under
-      // the floor on short markets. The unfavored side being unmintable is
-      // surfaced to the player at swipe time, not flattened away.
-      const favUp = card.isUpFavored
-      const favMints = await mintProbeSucceeds(
-        market,
-        strikeTick,
-        favUp,
-        id.sender,
-        id.wrapperId
-      )
-      if (favMints) return card
-      // Favored side fails too → the market itself is unmintable (e.g. LP
-      // backing died); fall back to ATM, which any backed market admits.
+      // At qty=3 + Task 1's 30min-3h markets, BOTH sides clear the
+      // min_net_premium floor at placement — so require YES *and* NO to be
+      // mintable and only fall back to ATM if EITHER fails. (Old favored-only
+      // rule existed because at qty=2 the long-shot could never clear the
+      // floor with any offset; that constraint is gone.) This is the line
+      // that keeps both swipe directions playable.
+      const [upMints, downMints] = await Promise.all([
+        mintProbeSucceeds(market, strikeTick, true, id.sender, id.wrapperId),
+        mintProbeSucceeds(market, strikeTick, false, id.sender, id.wrapperId),
+      ])
+      if (upMints && downMints) return card
       log.info(
-        `card ${i} (${market.expiryMarketId.slice(0, 10)}) favored side (${favUp ? "up" : "down"}) not mintable — ATM fallback`
+        `card ${i} (${market.expiryMarketId.slice(0, 10)}) not mintable both ways (up=${upMints} down=${downMints}) — ATM fallback`
       )
       return atmCard(card, market, spot)
     })
