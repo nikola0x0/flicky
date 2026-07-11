@@ -19,7 +19,7 @@ export const CONFIG = {
    */
   packageId:
     import.meta.env.VITE_FLICKY_PACKAGE_ID_TESTNET ??
-    "0x6c6be7201465b165c82e717b75074060208495118dbda5afb19471be89d3cbfb",
+    "0x5ceae1cacbba1862e0f0c4e8861280b8a1e9530ce4049317daf5d3951778582f",
 
   /** DeepBook Predict package on testnet (6-24 version). */
   deepbookPredictPackageId:
