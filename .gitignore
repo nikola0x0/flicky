@@ -33,7 +33,9 @@ npm-debug.log*
 local/
 # Local reference clones (e.g. deepbookv3 source read for docs) — never tracked.
 # Was accidentally committed as an orphan gitlink (no .gitmodules) which broke CI.
-temp/
+temp/*
+# ...except human-readable reports, which we DO want in git.
+!temp/report/
 
 # Move build + codegen outputs
 apps/contracts/build/
