@@ -1577,7 +1577,7 @@ function SwipingView({
   const now = useNow(250)
   const card = duel.cards[myNextIdx]
   // Contract no longer tracks per-player "last swipe ms" — the new design
-  // bounds the whole match with a single 10-min `SWIPE_WINDOW_MS` from
+  // bounds the whole match with a single 5-min `SWIPE_WINDOW_MS` from
   // `started_at_ms`. Per-card pacing UI uses join-time as the baseline.
   const baselineMs = Number(duel.startedAtMs)
   const elapsedMs = Math.max(0, now - baselineMs)

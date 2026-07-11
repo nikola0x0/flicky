@@ -96,7 +96,7 @@ const MAX_DECK_SIZE: u64 = 20;
 /// `deck_size` explicitly when creating a duel.
 const DEFAULT_DECK_SIZE: u64 = 5;
 const PROB_SCALE: u64 = 1_000_000_000;
-const SWIPE_WINDOW_MS: u64 = 600_000; // 10 minutes
+const SWIPE_WINDOW_MS: u64 = 300_000; // 5 minutes (was 600_000)
 const REFUND_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 const REVEAL_TIMEOUT_MS: u64 = 300_000; // 5 minutes — challenger can claim forfeit
 
