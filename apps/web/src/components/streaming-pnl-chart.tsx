@@ -56,9 +56,10 @@ const SAMPLE_INTERVAL_MS = 1000 // 1 Hz — one PnL sample per second
 const EASE_MIN_MS = 500
 const EASE_MAX_MS = 3000
 const STORAGE_BASE = "flicky:pnl-history:"
-// v2: pre-Pyth-spot samples were flat "0"; the version bump abandons old keys
-// (the persist sweep matches STORAGE_BASE so any lingering v1 key is purged).
-const STORAGE_PREFIX = STORAGE_BASE + "v2:"
+// v3: earlier formats persisted a long leading flat-"0" run (pre-Pyth-spot in
+// v1, pre-first-tick in v2). The bump abandons them — the persist sweep matches
+// STORAGE_BASE so any lingering v1/v2 key is purged on the next write.
+const STORAGE_PREFIX = STORAGE_BASE + "v3:"
 
 // Manual time-zoom presets (TradingView-style); `null` = full match.
 const RANGE_PRESETS: Array<{ label: string; ms: number | null }> = [
@@ -303,6 +304,12 @@ function useChartHistory(
       const cur = duelRef.current
       const ts = smoothedTicksRef.current
       const now = Date.now()
+      // Don't record until there's a real data source — a live tick eased in
+      // or a settled card. The pre-first-tick window (and the post-F5
+      // re-subscribe gap) would otherwise log a long flat $0 run that
+      // persists across refreshes and pins the timeline's start at zero.
+      const hasData = Object.keys(ts).length > 0 || cur.settledCount > 0
+      if (!hasData) return
       const p0 = currentRunningPnl(cur, "p0", ts, now)
       const p1 = currentRunningPnl(cur, "p1", ts, now)
       const sample: Sample = { t: now, p0, p1 }
