@@ -25,6 +25,7 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { makeLogger } from "./log"
 import { getCachedManager, cacheManager } from "./db"
+import { STAKE_TIERS, type Tier } from "./ws/protocol"
 
 const log = makeLogger("predict")
 
@@ -65,6 +66,23 @@ async function devInspectReturn(
 
 /** PRD §Matchmaking: entry requires PredictManager balance ≥ 5 dUSDC. */
 export const MIN_BALANCE_FOR_QUEUE = 5_000_000n // 5 dUSDC, 6 decimals
+
+// Per-swipe premium quantity — MUST match web SWIPE_QUANTITY
+// (onboarding-modal.tsx) and server PROBE_QTY (mint-probe.ts). A deck is
+// at most MAX_DECK_SIZE cards.
+export const SWIPE_QUANTITY_MIST = 3_000_000n
+export const MAX_DECK_SIZE = 5n
+
+/**
+ * dUSDC the funding account needs before queueing at `tier`: the tier stake
+ * plus the worst-case premium budget (5 cards × per-swipe quantity), since
+ * both the stake and every swipe premium draw from the same account. Floored
+ * at MIN_BALANCE_FOR_QUEUE so no tier drops below the protocol minimum.
+ */
+export function requiredQueueBalance(tier: Tier): bigint {
+  const required = STAKE_TIERS[tier] + MAX_DECK_SIZE * SWIPE_QUANTITY_MIST
+  return required > MIN_BALANCE_FOR_QUEUE ? required : MIN_BALANCE_FOR_QUEUE
+}
 
 // ─── 6-24 account model ─────────────────────────────────────────────────
 //
@@ -213,7 +231,8 @@ export type BalanceGateResult =
 
 export async function checkQueueBalanceGate(
   client: SuiGrpcClient,
-  owner: string
+  owner: string,
+  required: bigint = MIN_BALANCE_FOR_QUEUE
 ): Promise<BalanceGateResult> {
   let wrapper: string | null
   try {
@@ -236,7 +255,7 @@ export async function checkQueueBalanceGate(
     )
     return { ok: false, reason: "rpc_failed", wrapper }
   }
-  if (balance < MIN_BALANCE_FOR_QUEUE) {
+  if (balance < required) {
     return { ok: false, reason: "insufficient_balance", wrapper, balance }
   }
   return { ok: true, wrapper, balance }

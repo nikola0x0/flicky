@@ -52,12 +52,14 @@ export const SWIPE_QUANTITY = 3_000_000n
 
 /**
  * Floor the AccountWrapper must hold before queueing — kept at 5 dUSDC to
- * match the server's `MIN_BALANCE_FOR_QUEUE`. NOTE: this is a floor, not
- * full worst-case coverage — a 5-card duel's premiums (~$7.5–9 at
- * `SWIPE_QUANTITY = 3`) plus the stake can exceed it, so the account should
- * be funded above this for a complete game. Decoupled from `SWIPE_QUANTITY`
- * on purpose (raising the notional must not silently raise the onboarding
- * gate).
+ * match the server's absolute `MIN_BALANCE_FOR_QUEUE` floor. NOTE: this is
+ * a floor, not full worst-case coverage — the server's real queue gate
+ * (`requiredQueueBalance` in `apps/server/src/predict.ts`) requires
+ * `stake + 5 cards × SWIPE_QUANTITY` (~stake + $15), so a `standard`-tier
+ * player needs ~20 dUSDC in the account for a full 5-card duel without a
+ * mid-game top-up. Decoupled from `SWIPE_QUANTITY` on purpose (raising the
+ * notional must not silently raise this onboarding floor) — the web check
+ * here stays a cheap pre-swipe backstop, not the authoritative budget.
  */
 export const MIN_MANAGER_BALANCE = 5_000_000n
 

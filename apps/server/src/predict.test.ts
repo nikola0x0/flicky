@@ -120,3 +120,25 @@ describe.skipIf(!HAS_TEST_DB)("deriveWrapperFor return contract", () => {
     expect(resolved).not.toBe(legacyManagerId)
   })
 })
+
+/**
+ * `requiredQueueBalance` is pure (just STAKE_TIERS arithmetic, no RPC/DB),
+ * so — unlike the suite above — these run unconditionally, with no
+ * TEST_DATABASE_URL gate.
+ *
+ * required = tierStake + 5 cards × 3 dUSDC premium budget (15 dUSDC),
+ * floored at the absolute 5 dUSDC minimum.
+ */
+describe("requiredQueueBalance", () => {
+  test("standard tier: stake 5 + 15 premium budget", () => {
+    expect(predict.requiredQueueBalance("standard")).toBe(20_000_000n)
+  })
+
+  test("high_roller tier: stake 10 + 15 premium budget", () => {
+    expect(predict.requiredQueueBalance("high_roller")).toBe(25_000_000n)
+  })
+
+  test("starter tier: stake 1 + 15 premium budget", () => {
+    expect(predict.requiredQueueBalance("starter")).toBe(16_000_000n)
+  })
+})

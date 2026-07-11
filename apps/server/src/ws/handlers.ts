@@ -6,7 +6,7 @@
 import type { WebSocketHandler } from "bun"
 import { getSuiClient } from "../lib/sui"
 import { makeLogger, shortId } from "../log"
-import { checkQueueBalanceGate, MIN_BALANCE_FOR_QUEUE } from "../predict"
+import { checkQueueBalanceGate, requiredQueueBalance } from "../predict"
 import { findDeckMarkets } from "../deckmaster"
 import { consume } from "../ratelimit"
 import { handleChatReact, handleChatSend, sendChatHistory } from "./chat"
@@ -104,11 +104,14 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           return
         }
         // PRD §Matchmaking: funding-account (6-24 AccountWrapper) balance
-        // ≥ 5 dUSDC is required before queueing. Check via devInspect (no
-        // signing, no gas).
+        // must cover the tier stake plus the worst-case 5-card premium
+        // budget before queueing — see `requiredQueueBalance`. Check via
+        // devInspect (no signing, no gas).
+        const required = requiredQueueBalance(msg.tier)
         const gate = await checkQueueBalanceGate(
           getSuiClient(),
-          ws.data.address
+          ws.data.address,
+          required
         )
         if (!gate.ok) {
           if (gate.reason === "no_manager") {
@@ -122,9 +125,9 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
             send(ws, {
               type: "error",
               code: "insufficient_balance",
-              message: `account balance < ${MIN_BALANCE_FOR_QUEUE} (5 dUSDC) — deposit before queueing`,
+              message: `account balance < ${required} (need stake + ~15 dUSDC premium budget) — deposit before queueing`,
               detail: {
-                need: MIN_BALANCE_FOR_QUEUE.toString(),
+                need: required.toString(),
                 have: gate.balance.toString(),
               },
             })
