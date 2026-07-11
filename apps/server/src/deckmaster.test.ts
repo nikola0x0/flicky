@@ -518,8 +518,8 @@ describe("decideDeckSize (deck size decoupled from market count)", () => {
     expect(decideDeckSize(2, band)).toEqual({ ok: true, deckSize: 5 })
   })
 
-  test("1 live → not ok (below the 2-market minimum spread)", () => {
-    expect(decideDeckSize(1, band).ok).toBe(false)
+  test("1 live → ok (single-market near-ATM decks are fine post-probe)", () => {
+    expect(decideDeckSize(1, band)).toEqual({ ok: true, deckSize: 5 })
   })
 
   test("0 live → not ok", () => {
@@ -530,12 +530,16 @@ describe("decideDeckSize (deck size decoupled from market count)", () => {
     expect(decideDeckSize(9, band)).toEqual({ ok: true, deckSize: 5 })
   })
 
-  test("explicit deckSize band (min==max==n) → deckSize n, ok once ≥2 live", () => {
+  test("explicit deckSize band (min==max==n) → deckSize n, ok once ≥1 live", () => {
     expect(decideDeckSize(2, { min: 3, max: 3 })).toEqual({
       ok: true,
       deckSize: 3,
     })
-    expect(decideDeckSize(1, { min: 3, max: 3 }).ok).toBe(false)
+    expect(decideDeckSize(1, { min: 3, max: 3 })).toEqual({
+      ok: true,
+      deckSize: 3,
+    })
+    expect(decideDeckSize(0, { min: 3, max: 3 }).ok).toBe(false)
   })
 })
 

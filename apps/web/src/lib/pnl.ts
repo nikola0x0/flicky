@@ -94,6 +94,30 @@ function normCdf(x: number): number {
  * premium) P&L. Falls back to the binary outcome when `expiryMs` is
  * unknown or already reached. Returns null when core inputs are missing.
  */
+/**
+ * Digital "BTC settles strictly above `strike`" probability under the same
+ * Black-Scholes model {@link markCardPnl} prices — so a card's shown per-side
+ * win odds and its live PnL always agree. Collapses to the binary 0/1 outcome
+ * at/after expiry (matching the contract's `actual_up = settlement > strike`).
+ * Returns null when `strike`/`spot` are missing or non-positive.
+ */
+export function upProbability(
+  strike: string | undefined,
+  spot: string | undefined,
+  expiryMs: number | undefined,
+  nowMs: number
+): number | null {
+  if (strike === undefined || spot === undefined) return null
+  const f = Number(BigInt(spot))
+  const k = Number(BigInt(strike))
+  if (!(f > 0) || !(k > 0)) return null
+  const tYears = expiryMs !== undefined ? (expiryMs - nowMs) / MS_PER_YEAR : 0
+  if (!(tYears > 0)) return f > k ? 1 : 0
+  const v = ASSUMED_VOL * Math.sqrt(tYears)
+  const d2 = (Math.log(f / k) - 0.5 * v * v) / v
+  return normCdf(d2)
+}
+
 export function markCardPnl(
   swipe: SwipeLite | null,
   strike: string | undefined,
@@ -101,22 +125,10 @@ export function markCardPnl(
   expiryMs: number | undefined,
   nowMs: number
 ): bigint | null {
-  if (!swipe || strike === undefined || spot === undefined) return null
-  const f = Number(BigInt(spot))
-  const k = Number(BigInt(strike))
-  if (!(f > 0) || !(k > 0)) return null
+  if (!swipe) return null
+  const pUp = upProbability(strike, spot, expiryMs, nowMs)
+  if (pUp === null) return null
   const q = Number(BigInt(swipe.quantity))
-  const tYears = expiryMs !== undefined ? (expiryMs - nowMs) / MS_PER_YEAR : 0
-  let pUp: number
-  if (!(tYears > 0)) {
-    // Expired or unknown expiry — collapse to the binary outcome. Strict
-    // `>` matches the contract's `actual_up = settlement_price > strike`.
-    pUp = f > k ? 1 : 0
-  } else {
-    const v = ASSUMED_VOL * Math.sqrt(tYears)
-    const d2 = (Math.log(f / k) - 0.5 * v * v) / v
-    pUp = normCdf(d2)
-  }
   const pIn = swipe.isUp ? pUp : 1 - pUp
   return BigInt(Math.round(q * (2 * pIn - 1)))
 }

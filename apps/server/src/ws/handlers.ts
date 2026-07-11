@@ -139,21 +139,21 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         }
         // Pre-flight the BTC market pool so players get a clear "try
         // again in a few" instead of silently entering a queue that's
-        // going to fail at deck-gen. Deck-gen now distributes multiple
-        // cards per market (round-robin + strike dedup — see buildDeck
-        // in deckmaster.ts), so it no longer needs one distinct market
-        // per card — but a deck built entirely from ONE market (every
-        // card sharing an expiry) feels degenerate, so we still require
-        // at least 2 live markets to spread across. Fetch up to 5 for a
-        // fuller spread when supply allows.
+        // going to fail at deck-gen. Deck-gen distributes multiple cards
+        // per market (round-robin + strike dedup — see buildDeck in
+        // deckmaster.ts) and, at match time, the mint probe
+        // (filterMintableMarkets) further narrows to currently-backed
+        // markets. A near-ATM deck from a single market is fine, so this
+        // gate only needs ONE headroom-eligible market; the real backing
+        // check happens at deck-gen. Fetch up to 5 for a fuller spread.
         try {
-          const MIN_DECK_MARKETS = 2
+          const MIN_DECK_MARKETS = 1
           const markets = await findDeckMarkets(5)
           if (markets.length < MIN_DECK_MARKETS) {
             send(ws, {
               type: "error",
               code: "oracles_unavailable",
-              message: `Only ${markets.length}/${MIN_DECK_MARKETS} BTC markets live right now — try again in a couple of minutes.`,
+              message: `No BTC markets live right now — try again in a couple of minutes.`,
               detail: { available: markets.length, required: MIN_DECK_MARKETS },
             })
             return

@@ -17,7 +17,6 @@
  */
 import type { ServerWebSocket } from "bun"
 import {
-  buildDeck,
   commitDeck,
   decideDeckSize,
   deriveSeed,
@@ -26,6 +25,7 @@ import {
   readBtcSpot,
   resolveDeckBounds,
 } from "../deckmaster"
+import { buildProbedDeck, filterMintableMarkets } from "../mint-probe"
 import { makeLogger, shortId } from "../log"
 import type { SocketState } from "./matchmaking"
 import { _sendInternal } from "./matchmaking"
@@ -44,7 +44,11 @@ export async function handlePracticeStart(
     return
   }
   try {
-    const markets = await findDeckMarkets(5)
+    const rawMarkets = await findDeckMarkets(5)
+    const spot = await readBtcSpot()
+    // Drop momentarily-unbacked markets (see mint-probe.ts) so practice cards
+    // mint as reliably as real duel cards.
+    const markets = await filterMintableMarkets(rawMarkets, spot)
     // Multi-card-per-market: a full deck needs only >= 2 live markets
     // (decideDeckSize's floor); cards distribute across them with distinct
     // strikes. Matches the real matchmaking deck-gen.
@@ -53,11 +57,10 @@ export async function handlePracticeStart(
       _sendInternal(ws, {
         type: "error",
         code: "no_oracles",
-        message: `only ${markets.length} eligible market(s) >10 min out — retry in a few minutes`,
+        message: `only ${markets.length} mintable market(s) right now — retry in a few minutes`,
       })
       return
     }
-    const spot = await readBtcSpot()
     const nonceHex = hashToHex(crypto.getRandomValues(new Uint8Array(16)))
     const seed = deriveSeed({
       sender: ws.data.address,
@@ -65,7 +68,13 @@ export async function handlePracticeStart(
       timestampMs: Date.now(),
       nonceHex,
     })
-    const cards = buildDeck(markets, spot, seed, decision.deckSize)
+    const cards = await buildProbedDeck(
+      markets,
+      spot,
+      seed,
+      decision.deckSize,
+      Date.now()
+    )
     const botSwipes = Array.from(
       { length: decision.deckSize },
       () => Math.random() > 0.5

@@ -1236,7 +1236,7 @@ function DuelSummary({
         </div>
         <div className="text-sm text-muted-foreground">
           pot {fmtStake(d.p0Stake + d.p1Stake, d.stakeCoinType)} · settled{" "}
-          {d.settledCount.toString()}/5
+          {d.settledCount.toString()}/{Number(d.deckSize)}
         </div>
       </div>
       <span className="text-sm text-muted-foreground">→</span>
@@ -1317,7 +1317,8 @@ function PhaseDispatcher({
   const opponentNextIdx = isCreator
     ? Number(duel.p1NextCardIdx)
     : Number(duel.p0NextCardIdx)
-  const allSwiped = myNextIdx === 5 && opponentNextIdx === 5
+  const deckSize = Number(duel.deckSize)
+  const allSwiped = myNextIdx === deckSize && opponentNextIdx === deckSize
 
   if (duel.status === "COMPLETE") {
     return <ResultView duel={duel} address={address} />
@@ -1342,7 +1343,7 @@ function PhaseDispatcher({
       />
     )
   }
-  if (myNextIdx < 5) {
+  if (myNextIdx < deckSize) {
     return (
       <SwipingView
         duel={duel}
@@ -1356,12 +1357,20 @@ function PhaseDispatcher({
   }
   if (!allSwiped) {
     return (
-      <LockupView myNextIdx={myNextIdx} opponentNextIdx={opponentNextIdx} />
+      <LockupView
+        myNextIdx={myNextIdx}
+        opponentNextIdx={opponentNextIdx}
+        deckSize={deckSize}
+      />
     )
   }
   if (oracle && oracle.settlementPrice === null) {
     return (
-      <LockupView myNextIdx={myNextIdx} opponentNextIdx={opponentNextIdx} />
+      <LockupView
+        myNextIdx={myNextIdx}
+        opponentNextIdx={opponentNextIdx}
+        deckSize={deckSize}
+      />
     )
   }
   return <SettlingView duel={duel} duelId={duelId} />
@@ -1744,7 +1753,8 @@ function SwipingView({
       {/* phase header */}
       <div className="flex items-center justify-between text-sm">
         <span className="text-muted-foreground">
-          card <strong className="text-foreground">{myNextIdx + 1}</strong>/5
+          card <strong className="text-foreground">{myNextIdx + 1}</strong>/
+          {Number(duel.deckSize)}
           {isDusdc && managerReady && (
             <span
               className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs tracking-wide text-emerald-500 uppercase"
@@ -2002,11 +2012,13 @@ function RevealingView({
 function LockupView({
   myNextIdx,
   opponentNextIdx,
+  deckSize,
 }: {
   myNextIdx: number
   opponentNextIdx: number
+  deckSize: number
 }) {
-  const allSwiped = myNextIdx === 5 && opponentNextIdx === 5
+  const allSwiped = myNextIdx === deckSize && opponentNextIdx === deckSize
   return (
     <div className="space-y-4 py-6 text-center">
       <Badge variant="outline">lockup phase</Badge>
@@ -2021,11 +2033,13 @@ function LockupView({
       </p>
       <div className="flex justify-center gap-6 pt-2 text-sm text-muted-foreground">
         <span>
-          you <strong className="text-foreground">{myNextIdx}</strong>/5
+          you <strong className="text-foreground">{myNextIdx}</strong>/
+          {deckSize}
         </span>
         <span>
           opponent{" "}
-          <strong className="text-foreground">{opponentNextIdx}</strong>/5
+          <strong className="text-foreground">{opponentNextIdx}</strong>/
+          {deckSize}
         </span>
       </div>
     </div>
@@ -2251,7 +2265,7 @@ function SpectatorView({ duel }: { duel: DuelState }) {
       <p className="text-sm text-muted-foreground">
         swipes {Number(duel.p0NextCardIdx)}/{Number(duel.deckSize)} ·{" "}
         {Number(duel.p1NextCardIdx)}/{Number(duel.deckSize)} · settled{" "}
-        {duel.settledCount.toString()}/5
+        {duel.settledCount.toString()}/{Number(duel.deckSize)}
       </p>
     </div>
   )

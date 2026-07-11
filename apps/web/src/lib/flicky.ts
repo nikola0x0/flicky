@@ -20,7 +20,7 @@ type SuiClient = ClientWithCoreApi
 
 import * as duelGen from "@/sui/gen/flicky/duel"
 import { CONFIG } from "./config"
-import { buildStakedSwipeTx } from "./deepbook"
+import { buildStakedSwipeTx, DEEPBOOK, resolveWrapper } from "./deepbook"
 import { getGraphQLClient } from "./graphql"
 
 const { packageId } = CONFIG
@@ -190,7 +190,11 @@ export function buildRevealDeckTx(
   cards: DeckCard[],
   stakeCoinType: string = CONFIG.stakeType
 ): Transaction {
-  if (cards.length !== 5) throw new Error("must reveal exactly 5 cards")
+  // The deck can be any size the contract allows ([1, 20]); the reveal must
+  // carry exactly the committed cards (the contract re-hashes and compares).
+  if (cards.length < 1 || cards.length > 20) {
+    throw new Error(`deck must have 1–20 cards, got ${cards.length}`)
+  }
   const tx = new Transaction()
 
   const cardArgs = cards.map((c) =>
@@ -218,35 +222,69 @@ export function buildRevealDeckTx(
 }
 
 /**
- * Source `amount` of `coinType` from the owner's coin objects: merge them
- * all into the first coin then split off `amount`. Used for create / join
- * paths when the stake isn't SUI (we can't `splitCoins(tx.gas)` for a
- * non-gas coin).
+ * Source the duel stake from the player's AccountWrapper dUSDC balance via
+ * `account::withdraw_funds` (which RETURNS the coin — it is not
+ * auto-transferred), so the withdrawn coin flows straight into the duel as
+ * the stake. This is the SAME funding pool the swipe-mint premiums draw
+ * from: players deposit dUSDC once into their account, and both the side-pot
+ * stake and the per-swipe mint premiums come out of it. That keeps the
+ * zkLogin wallet dUSDC-free (CLAUDE.md "wallet only ever holds dUSDC" is
+ * satisfied because nothing is ever sourced from the wallet here) and means
+ * a player who funded only their account can still create/join.
+ *
+ * Mirrors `buildWithdrawDusdcTx` in `lib/deepbook.ts` minus the final
+ * transfer-to-wallet step.
  */
-async function takeCoinFromOwner(
-  client: SuiClient,
+function takeStakeFromAccount(
   tx: Transaction,
-  owner: string,
+  wrapperId: string,
   coinType: string,
   amount: bigint
 ) {
-  const coins = await client.core.listCoins({ owner, coinType })
-  if (coins.objects.length === 0) {
-    throw new Error(`no ${coinType} coins in wallet ${owner}`)
-  }
-  const [primary, ...rest] = coins.objects.map((c) => tx.object(c.objectId))
-  if (rest.length > 0) tx.mergeCoins(primary, rest)
-  const [taken] = tx.splitCoins(primary, [tx.pure.u64(amount)])
-  return taken
+  const auth = tx.moveCall({
+    target: `${DEEPBOOK.accountPackageId}::account::generate_auth`,
+  })
+  const coin = tx.moveCall({
+    target: `${DEEPBOOK.accountPackageId}::account::withdraw_funds`,
+    typeArguments: [coinType],
+    arguments: [
+      tx.object(wrapperId),
+      auth,
+      tx.pure.u64(amount),
+      tx.object(DEEPBOOK.accumulatorRootId),
+      tx.object(CONFIG.CLOCK_ID),
+    ],
+  })
+  return coin
 }
 
 /**
- * Staked-tier create: same as `buildCreateDuelTx` but the stake is
- * sourced from the owner's `stakeCoinType` coin objects (e.g. dUSDC)
- * instead of split off `tx.gas`. PRD §Staked tier.
+ * Resolve the player's funding account (AccountWrapper) or throw a clear,
+ * actionable error. Both the stake (via `takeStakeFromAccount`) and the
+ * queue balance gate key off this account, so a missing wrapper means the
+ * player hasn't onboarded yet.
+ */
+async function requireWrapper(owner: string): Promise<string> {
+  const wrapperId = await resolveWrapper(owner)
+  if (!wrapperId) {
+    throw new Error(
+      "no funding account yet — deposit dUSDC to set up your account first"
+    )
+  }
+  return wrapperId
+}
+
+/**
+ * Staked-tier create: the stake is withdrawn from the player's dUSDC
+ * AccountWrapper (see `takeStakeFromAccount`) rather than their wallet, so
+ * the account is the single funding source for both stake and mint
+ * premiums. PRD §Staked tier.
+ *
+ * `_client` is unused (the stake no longer scans wallet coins) but kept in
+ * the signature so existing call sites don't need to change.
  */
 export async function buildCreateDuelDusdcTx(
-  client: SuiClient,
+  _client: SuiClient,
   owner: string,
   deckHash: Uint8Array,
   stakeAmount: bigint,
@@ -256,13 +294,8 @@ export async function buildCreateDuelDusdcTx(
   if (deckHash.length !== 32)
     throw new Error("deck hash must be 32 bytes (sha-256)")
   const tx = new Transaction()
-  const stake = await takeCoinFromOwner(
-    client,
-    tx,
-    owner,
-    stakeCoinType,
-    stakeAmount
-  )
+  const wrapperId = await requireWrapper(owner)
+  const stake = takeStakeFromAccount(tx, wrapperId, stakeCoinType, stakeAmount)
   tx.add(
     duelGen.createDuel({
       package: packageId,
@@ -277,22 +310,17 @@ export async function buildCreateDuelDusdcTx(
   return tx
 }
 
-/** Staked-tier join — same difference as buildCreateDuelDusdcTx. */
+/** Staked-tier join — same account-funded stake as buildCreateDuelDusdcTx. */
 export async function buildJoinDuelDusdcTx(
-  client: SuiClient,
+  _client: SuiClient,
   owner: string,
   duelId: string,
   stakeAmount: bigint,
   stakeCoinType: string
 ): Promise<Transaction> {
   const tx = new Transaction()
-  const stake = await takeCoinFromOwner(
-    client,
-    tx,
-    owner,
-    stakeCoinType,
-    stakeAmount
-  )
+  const wrapperId = await requireWrapper(owner)
+  const stake = takeStakeFromAccount(tx, wrapperId, stakeCoinType, stakeAmount)
   tx.add(
     duelGen.joinDuel({
       package: packageId,

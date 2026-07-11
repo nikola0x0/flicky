@@ -338,12 +338,23 @@ export function allocateZones(
 export const POS_INF_TICK = (1n << 30n) - 1n
 
 /** Strike-offset ladder, bps of spot, by difficulty zone. Close = smallest
- *  offset (near-spot coin flip), edge = widest (long-shot/gimme). Small and
- *  fixed for now — an SVI-informed ladder is the `svi_quote` mode's job. */
+ *  offset (near-spot coin flip), edge = widest (long-shot/gimme).
+ *
+ *  Kept NEAR-ATM (single-digit / ~10 bps) on purpose. 6-24's
+ *  `mint_exact_quantity` admits a mint only when its implied entry
+ *  probability clears BOTH the `min_net_premium` floor (low-probability side,
+ *  `assert_mint_admission`, code 4) AND the `[min_entry, max_entry]` band
+ *  (`assert_mint_probability_and_leverage_policy`, code 1). A card must be
+ *  mintable in EITHER direction (the player picks UP/NO at swipe time), so
+ *  its probability has to stay inside ~[0.33, 0.67] — which, on these
+ *  short-expiry (10 min–few hr) BTC markets, means strikes within ~10 bps of
+ *  spot. Wider offsets abort live (verified on-chain). Real difficulty
+ *  variety needs an on-chain probability probe — that's the `svi_quote`
+ *  mode's job; this fixed ladder is the near-ATM interim. */
 const ZONE_OFFSET_BPS: Record<Zone, number> = {
-  close: 50,
-  mid: 150,
-  edge: 300,
+  close: 3,
+  mid: 6,
+  edge: 10,
 }
 
 /** One deck card in price space — the shape `buildDeck` returns. Not the
@@ -363,9 +374,173 @@ export interface DeckCardOut {
 
 /** Bps added to a colliding card's zone offset on each dedup retry, and the
  *  cumulative cap on how far a single card's offset may be widened before
- *  we give up trying to find a fresh (market, strikeTick) pair. */
-const DEDUP_BUMP_STEP_BPS = 25
-const DEDUP_MAX_BUMP_BPS = 2000
+ *  we give up trying to find a fresh (market, strikeTick) pair.
+ *
+ *  Kept tiny (steps of 3 bps, ceiling ~15 bps) so a dedup-bumped strike can
+ *  never wander past the near-ATM mint-admissible band (see ZONE_OFFSET_BPS).
+ *  If the ceiling is hit without finding a fresh pair, `buildDeck` falls
+ *  through and reuses the last strike — a duplicate (market, strikeTick)
+ *  card is dull but harmless (the deck vector may contain duplicates; the
+ *  commitment hash and reveal are unaffected), whereas an out-of-band strike
+ *  would abort the mint at swipe time. */
+const DEDUP_BUMP_STEP_BPS = 3
+const DEDUP_MAX_BUMP_BPS = 15
+
+// ─── svi_quote strike placement (probability-targeted) ───────────────────────
+
+/** Annualized vol for the off-chain digital-option strike placement below.
+ *  MUST match the web's `markCardPnl` `ASSUMED_VOL` (apps/web/src/lib/pnl.ts)
+ *  so the strike we place lands at the same win-probability the live PnL chart
+ *  prices — that's what makes the mark start off-zero and drift on schedule. */
+const SVI_VOL = 0.6
+const SVI_MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000
+
+/** Target win-probability for the FAVORED direction, by difficulty zone.
+ *  Bounded so the favored side's premium (`p × quantity`) clears the protocol
+ *  per-swipe `min_net_premium` floor ($1) at `SWIPE_QUANTITY = 2` dUSDC — i.e.
+ *  p ≥ 0.5 — with margin (p ≥ 0.56 → premium ≳ $1.12). Only the FAVORED side
+ *  is required to mint (see mint-probe `buildProbedDeck`); the UNFAVORED
+ *  long-shot's premium `(1-p) × quantity` is below the floor and is surfaced
+ *  to the player at swipe time rather than kept mintable. Higher p = stronger
+ *  lean = more dramatic time-decay PnL drift toward ±quantity near settlement. */
+const ZONE_TARGET_PROB: Record<Zone, number> = {
+  close: 0.56,
+  mid: 0.61,
+  edge: 0.65,
+}
+
+/** Inverse standard-normal CDF (Acklam's rational approximation, ~1e-9). */
+function invNormCdf(p: number): number {
+  if (p <= 0) return -Infinity
+  if (p >= 1) return Infinity
+  const a = [
+    -3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2,
+    1.38357751867269e2, -3.066479806614716e1, 2.506628277459239,
+  ]
+  const b = [
+    -5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2,
+    6.680131188771972e1, -1.328068155288572e1,
+  ]
+  const c = [
+    -7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838,
+    -2.549732539343734, 4.374664141464968, 2.938163982698783,
+  ]
+  const d = [
+    7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996,
+    3.754408661907416,
+  ]
+  const pLow = 0.02425
+  const pHigh = 1 - pLow
+  if (p < pLow) {
+    const q = Math.sqrt(-2 * Math.log(p))
+    return (
+      (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+      ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+    )
+  }
+  if (p <= pHigh) {
+    const q = p - 0.5
+    const r = q * q
+    return (
+      ((((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) *
+        q) /
+      (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
+    )
+  }
+  const q = Math.sqrt(-2 * Math.log(1 - p))
+  return (
+    -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+    ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+  )
+}
+
+/**
+ * Raw strike price (1e9-fixed) for an svi_quote card: the digital-option
+ * strike at which the FAVORED direction has win-probability `targetP`, given
+ * `spot`, the market's time-to-expiry, and `SVI_VOL`. Inverts the same
+ * Black-Scholes digital the live PnL mark uses:
+ *   `pUp = Φ((ln(f/k) − ½v²)/v)` ⇒ `k = f / exp(Φ⁻¹(pUp)·v + ½v²)`, `v = σ√T`.
+ * `sign < 0` = UP-favored (strike below spot); `sign > 0` = DOWN-favored
+ * (strike above spot). Falls back to ATM (spot) when time-to-expiry ≤ 0.
+ */
+function sviRawStrike(
+  spot: bigint,
+  sign: SignBias,
+  targetP: number,
+  expiry: number,
+  nowMs: number
+): bigint {
+  const tYears = (expiry - nowMs) / SVI_MS_PER_YEAR
+  if (!(tYears > 0)) return spot
+  const v = SVI_VOL * Math.sqrt(tYears)
+  const pUp = sign < 0 ? targetP : 1 - targetP
+  const d2 = invNormCdf(pUp)
+  const k = Number(spot) / Math.exp(d2 * v + 0.5 * v * v)
+  return BigInt(Math.max(0, Math.round(k)))
+}
+
+/**
+ * svi_quote deck: strikes placed at a per-zone target win-probability (see
+ * `ZONE_TARGET_PROB`) instead of a fixed bps offset, so every card carries a
+ * genuine directional lean. Because the lean is expressed in probability, the
+ * live PnL mark (pricing the same digital) starts off-zero and drifts
+ * continuously toward ±quantity via time-decay as the card nears settlement —
+ * the drama a flat ATM deck can't produce. Offsets auto-scale with each
+ * market's time-to-expiry. Dedup nudges the strike by whole admission cells
+ * (preserving the lean's direction) so (market, strikeTick) pairs stay
+ * distinct. Requires `nowMs` for time-to-expiry.
+ */
+function buildSviDeck(
+  markets: MarketSnapshot[],
+  spot: bigint,
+  seed: Uint8Array,
+  deckSize: number,
+  nowMs: number | undefined
+): DeckCardOut[] {
+  if (nowMs === undefined) {
+    throw new Error("buildDeck: svi_quote mode requires nowMs")
+  }
+  const stream = prgStream(seed)
+  const signs = allocateSignBalance(deckSize, stream)
+  const zones = allocateZones(deckSize, stream)
+  const seen = new Set<string>()
+  return Array.from({ length: deckSize }, (_, i) => {
+    const m = markets[i % markets.length]
+    const marketId = normalizeSuiAddress(m.expiryMarketId)
+    const sign = signs[i]
+    const baseRaw = sviRawStrike(
+      spot,
+      sign,
+      ZONE_TARGET_PROB[zones[i]],
+      m.expiry,
+      nowMs
+    )
+    // Dedup: nudge one admission cell further from spot (keeping the lean's
+    // direction) until the (market, strikeTick) pair is unique, capped so it
+    // can't wander far from the intended probability.
+    const cell = m.admissionTickSize
+    let bump = 0n
+    let strikeTick: bigint
+    let key: string
+    for (;;) {
+      const nudged =
+        sign > 0 ? baseRaw + bump : baseRaw > bump ? baseRaw - bump : 0n
+      strikeTick = snapToAdmissionTick(nudged, m.tickSize, m.admissionTickSize)
+      key = `${marketId}:${strikeTick}`
+      if (!seen.has(key) || bump >= cell * 10n) break
+      bump += cell
+    }
+    seen.add(key)
+    const isUpFavored = sign < 0
+    return {
+      expiryMarketId: marketId,
+      strike: strikeTick * m.tickSize,
+      lowerTick: isUpFavored ? strikeTick : 0n,
+      higherTick: isUpFavored ? POS_INF_TICK : strikeTick,
+      isUpFavored,
+    }
+  })
+}
 
 /**
  * Build a price-space deck of `deckSize` cards distributed round-robin
@@ -380,22 +555,24 @@ const DEDUP_MAX_BUMP_BPS = 2000
  * retried (direction/sign is preserved), up to `DEDUP_MAX_BUMP_BPS` total
  * added bps.
  *
- * Guards `env.deckStrikeMode === "svi_quote"` — that mode (an off-chain
- * SVI-informed picker) isn't implemented yet.
+ * When `env.deckStrikeMode === "svi_quote"`, delegates to `buildSviDeck`
+ * (probability-targeted strikes; needs `nowMs`). Otherwise uses the fixed
+ * bps-offset placement below.
  */
 export function buildDeck(
   markets: MarketSnapshot[],
   spot: bigint,
   seed: Uint8Array,
-  deckSize: number = markets.length
+  deckSize: number = markets.length,
+  nowMs?: number
 ): DeckCardOut[] {
-  if (env.deckStrikeMode === "svi_quote") {
-    throw new Error("svi_quote strike mode not implemented yet")
-  }
   if (markets.length === 0) {
     throw new Error("buildDeck: no markets supplied")
   }
   if (deckSize <= 0) return []
+  if (env.deckStrikeMode === "svi_quote") {
+    return buildSviDeck(markets, spot, seed, deckSize, nowMs)
+  }
   const stream = prgStream(seed)
   const signs = allocateSignBalance(deckSize, stream)
   const zones = allocateZones(deckSize, stream)
@@ -490,10 +667,15 @@ export function resolveDeckBounds(body: {
  * Deck size no longer tracks live market count: `buildDeck` distributes
  * `deckSize` cards round-robin across whatever markets are live,
  * guaranteeing distinct (market, strike) pairs. So the market pool no
- * longer needs to be as large as the deck — but a deck built from a
- * single market (every card sharing an expiry) is degenerate, so `ok`
- * still requires at least 2 live markets to spread across. `deckSize` is
- * always the band's `max` (an explicit `deckSize` request collapses
+ * longer needs to be as large as the deck.
+ *
+ * Floor is 1 market: with the 6-24 mint probe active
+ * (`filterMintableMarkets`), the eligible set is narrowed to only
+ * currently-backed markets, which volatile LP backing frequently reduces to
+ * a single market. A 1-market deck is no longer degenerate now that strikes
+ * are near-ATM and distinct per card (all 5 mint both directions), so
+ * rejecting it would needlessly fail otherwise-playable matches. `deckSize`
+ * is always the band's `max` (an explicit `deckSize` request collapses
  * `resolveDeckBounds` to `{min: n, max: n}`, so this still returns `n`).
  */
 export function decideDeckSize(
@@ -501,7 +683,7 @@ export function decideDeckSize(
   bounds: { min: number; max: number }
 ): { ok: boolean; deckSize: number } {
   return {
-    ok: liveCount >= 2,
+    ok: liveCount >= 1,
     deckSize: bounds.max,
   }
 }
@@ -633,7 +815,13 @@ export async function handleDeckmasterRequest(
         timestampMs: Date.now(),
         nonceHex,
       })
-      const outCards = buildDeck(markets, spot, seed, decision.deckSize)
+      const outCards = buildDeck(
+        markets,
+        spot,
+        seed,
+        decision.deckSize,
+        Date.now()
+      )
       const deck = commitDeck(outCards)
       await rememberDeck(deck.hash, deck.cards, seed)
       return json({

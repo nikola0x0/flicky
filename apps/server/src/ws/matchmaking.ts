@@ -24,7 +24,6 @@
 import type { ServerWebSocket } from "bun"
 import { getPlayerRating } from "../db"
 import {
-  buildDeck,
   commitDeck,
   decideDeckSize,
   deriveSeed,
@@ -34,6 +33,7 @@ import {
   rememberDeck,
   resolveDeckBounds,
 } from "../deckmaster"
+import { buildProbedDeck, filterMintableMarkets } from "../mint-probe"
 import { env } from "../env"
 import { makeLogger, shortId } from "../log"
 import { findClosestOpponent } from "../mmr"
@@ -51,18 +51,42 @@ type DeckHashProvider = (opts: {
   creatorAddr: string | undefined
 }) => Promise<string>
 
+// Internal deck-gen retry: per-market LP backing (EInsufficientCash) flips
+// within seconds, so a momentary "0 mintable markets" is usually gone a beat
+// later. Retry a few times HERE (short delay) before letting matchPair fail —
+// that turns most transient dips into a slightly-slower match instead of a
+// visible "trouble setting up" + a 15s outer requeue.
+const DECK_GEN_ATTEMPTS = 4
+const DECK_GEN_RETRY_MS = 2_000
+
 let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
-  const markets = await findDeckMarkets(5)
-  // Multi-card-per-market: distribute deckSize cards round-robin across the
-  // live markets (each with a distinct strike). A full deck needs only >= 2
-  // markets (decideDeckSize's floor), not 5 — the strike grid does the rest.
-  const decision = decideDeckSize(markets.length, resolveDeckBounds({}))
+  let markets: Awaited<ReturnType<typeof filterMintableMarkets>> = []
+  let spot = 0n
+  let decision = decideDeckSize(0, resolveDeckBounds({}))
+  for (let attempt = 1; attempt <= DECK_GEN_ATTEMPTS; attempt++) {
+    const rawMarkets = await findDeckMarkets(5)
+    spot = await readBtcSpot()
+    // Drop markets whose mint currently aborts on the volatile per-market LP
+    // backing gate (EInsufficientCash) — otherwise cards round-robined onto a
+    // momentarily-dead market abort at swipe time. See mint-probe.ts.
+    markets = await filterMintableMarkets(rawMarkets, spot)
+    // Multi-card-per-market: distribute deckSize cards round-robin across the
+    // live markets (each with a distinct strike). A full deck needs only >= 1
+    // market (decideDeckSize's floor) — the strike grid does the rest.
+    decision = decideDeckSize(markets.length, resolveDeckBounds({}))
+    if (decision.ok) break
+    if (attempt < DECK_GEN_ATTEMPTS) {
+      log.info(
+        `deck-gen attempt ${attempt}/${DECK_GEN_ATTEMPTS}: ${markets.length} mintable market(s) — retrying in ${DECK_GEN_RETRY_MS}ms`
+      )
+      await new Promise((r) => setTimeout(r, DECK_GEN_RETRY_MS))
+    }
+  }
   if (!decision.ok) {
     throw new Error(
-      `not enough live markets (${markets.length}/2) — retry in a couple of minutes`
+      `no mintable markets after ${DECK_GEN_ATTEMPTS} tries — BTC market LP backing is thin right now, retry shortly`
     )
   }
-  const spot = await readBtcSpot()
   const nonceHex = hashToHex(crypto.getRandomValues(new Uint8Array(16)))
   const seed = deriveSeed({
     sender: creatorAddr,
@@ -71,7 +95,13 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
     timestampMs: Date.now(),
     nonceHex,
   })
-  const cards = buildDeck(markets, spot, seed, decision.deckSize)
+  const cards = await buildProbedDeck(
+    markets,
+    spot,
+    seed,
+    decision.deckSize,
+    Date.now()
+  )
   const deck = commitDeck(cards)
   await rememberDeck(deck.hash, deck.cards, seed)
   // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields

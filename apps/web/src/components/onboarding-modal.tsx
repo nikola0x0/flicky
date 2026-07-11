@@ -30,17 +30,33 @@ const BLUE_BRAND_STYLE = {
 } as CSSProperties
 
 /**
- * Per-swipe Predict position size (dUSDC micro-units). Fixed at 1 dUSDC
- * in v1 — worst-case 5-card exposure = 5 * SWIPE_QUANTITY, matching
- * MIN_MANAGER_BALANCE below. Keep these two constants in lockstep.
+ * Per-swipe Predict `mint_exact_quantity` size (notional, dUSDC micro-units).
+ *
+ * This is the position NOTIONAL, not the premium paid. The mint's
+ * `net_premium = entry_probability × quantity / leverage` must clear the
+ * protocol's `min_net_premium` floor ($1 = 1_000_000) or the mint aborts
+ * with `ENetPremiumBelowMinimum` (`strike_exposure_config::assert_mint_admission`,
+ * abort code 4). By design the position is kept as CHEAP as the protocol
+ * allows — the duel STAKE (side-pot) is the game's real prize, the mint is
+ * just how each swipe takes a genuine Predict position for scoring. So this
+ * sits at 2 dUSDC notional: the favored side (win prob ≳ 0.56, see deckmaster
+ * `ZONE_TARGET_PROB`) yields a premium of ~1.1–1.3 dUSDC — safely over the
+ * $1 floor — while a 5-card duel draws only ~5–6 dUSDC of premium total, so a
+ * stake pool of a few dUSDC per side dominates it. (1 dUSDC notional gives
+ * ~0.5 premium at ATM — under the floor — so 2 dUSDC is the practical
+ * minimum.)
  */
-export const SWIPE_QUANTITY = 1_000_000n
+export const SWIPE_QUANTITY = 2_000_000n
 
 /**
- * Minimum dUSDC the AccountWrapper must hold before entering the queue
- * — covers worst-case 5-card exposure at SWIPE_QUANTITY = 1 dUSDC.
+ * Floor the AccountWrapper must hold before queueing — kept at 5 dUSDC to
+ * match the server's `MIN_BALANCE_FOR_QUEUE`. NOTE: this is a floor, not
+ * full worst-case coverage — a 5-card duel's premiums (~5–6 dUSDC) plus the
+ * stake can exceed it, so the account should be funded above this for a
+ * complete game. Decoupled from `SWIPE_QUANTITY` on purpose (raising the
+ * notional must not silently raise the onboarding gate).
  */
-export const MIN_MANAGER_BALANCE = 5n * SWIPE_QUANTITY
+export const MIN_MANAGER_BALANCE = 5_000_000n
 
 interface Props {
   open: boolean

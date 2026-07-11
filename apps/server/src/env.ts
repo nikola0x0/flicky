@@ -131,6 +131,18 @@ export const env = {
   // (1%/99%) are far looser than what makes a fun prediction.
   deckQuoteMinProb: Number(process.env.DECK_QUOTE_MIN_PROB ?? 0.2),
   deckQuoteMaxProb: Number(process.env.DECK_QUOTE_MAX_PROB ?? 0.8),
+  // Deck-gen mint-admissibility probe (see mint-probe.ts). 6-24 markets gate
+  // each mint on a volatile per-market LP cash reserve (expiry_cash::
+  // assert_backing, EInsufficientCash) that the indexer exposes no field for,
+  // so before building a deck we devInspect a representative ATM mint on each
+  // candidate market and drop the ones that currently reject it. Runs once at
+  // deck creation, off the hot swipe path. Set `DECK_PROBE_MINTABLE=false` to
+  // disable (deck then uses the raw headroom-filtered market set).
+  deckProbeMintable: (process.env.DECK_PROBE_MINTABLE ?? "true") !== "false",
+  // Optional override for the AccountWrapper the probe mints against. Defaults
+  // to the sponsor/keeper key's own (deterministic) wrapper — devInspect never
+  // charges it, so it only needs to exist and hold a little dUSDC.
+  probeWrapperId: process.env.PROBE_WRAPPER_ID,
   // Postgres (Bun.sql). All persistence — indexer cursors, the duel
   // mirror, chat, player ratings, and the deckmaster plaintext store —
   // lives here. On Railway the deployed service reads the private

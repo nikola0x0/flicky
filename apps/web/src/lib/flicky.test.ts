@@ -15,18 +15,29 @@ import {
 import { CONFIG } from "./config"
 import { DEEPBOOK } from "./deepbook"
 
-// Minimal gRPC client mock for the dUSDC builders. They only call
-// `client.core.listCoins({ owner, coinType })`; nothing else.
-function mockClient(coins: Array<{ objectId: string; balance: string }>) {
-  return {
-    core: {
-      listCoins: async () => ({
-        objects: coins,
-        hasNextPage: false,
-        cursor: null,
-      }),
-    },
-  } as unknown as Parameters<typeof buildCreateDuelDusdcTx>[0]
+// The dUSDC create/join builders no longer read wallet coins — the stake is
+// withdrawn from the player's AccountWrapper, resolved via `resolveWrapper`
+// (a `GET /manager` fetch). The `client` arg is now unused, so a bare stub
+// suffices; the wrapper is what the builders actually need.
+function mockClient() {
+  return {} as unknown as Parameters<typeof buildCreateDuelDusdcTx>[0]
+}
+
+const WRAPPER =
+  "0x9a72b27ab9be920c8e11e0f7a1aca2d1f02f13967b58a9279cea9c327bf1a80a"
+
+// Stub `globalThis.fetch` so `resolveWrapper`'s `GET /manager` returns the
+// given wrapper (or `null` = "no funding account"). Returns a restore fn.
+function mockManagerFetch(wrapper: string | null): () => void {
+  const original = globalThis.fetch
+  globalThis.fetch = (async () =>
+    ({
+      ok: true,
+      json: async () => ({ ok: true, wrapper }),
+    }) as unknown as Response) as typeof fetch
+  return () => {
+    globalThis.fetch = original
+  }
 }
 
 const DUSDC =
@@ -225,58 +236,72 @@ describe("PTB builders", () => {
       strike,
     }))
     const hash = await computeDeckHash(cards)
-    const client = mockClient([
-      { objectId: "0xc0", balance: "10000000" },
-      { objectId: "0xc1", balance: "5000000" },
-    ])
-    const tx = await buildCreateDuelDusdcTx(
-      client,
-      "0x86fcc7fdc63be1a6b31c5288e7b87a6b985f16d1af490fcb54f2501d5fa8e78c",
-      hash,
-      5_000_000n,
-      DUSDC
-    )
-    const data = tx.getData()
-    const createDuel = data.commands.find(
-      (c) => "MoveCall" in c && c.MoveCall?.function === "create_duel"
-    )
-    expect(createDuel).toBeDefined()
-    expect(
-      (createDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall
-        .typeArguments
-    ).toEqual([DUSDC])
+    const restore = mockManagerFetch(WRAPPER)
+    try {
+      const tx = await buildCreateDuelDusdcTx(
+        mockClient(),
+        "0x86fcc7fdc63be1a6b31c5288e7b87a6b985f16d1af490fcb54f2501d5fa8e78c",
+        hash,
+        5_000_000n,
+        DUSDC
+      )
+      const data = tx.getData()
+      const createDuel = data.commands.find(
+        (c) => "MoveCall" in c && c.MoveCall?.function === "create_duel"
+      )
+      expect(createDuel).toBeDefined()
+      expect(
+        (createDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall
+          .typeArguments
+      ).toEqual([DUSDC])
+      // Stake is withdrawn from the AccountWrapper, not the wallet.
+      const targets = moveCallTargets(tx)
+      expect(targets.some((t) => t.endsWith("::account::withdraw_funds"))).toBe(
+        true
+      )
+    } finally {
+      restore()
+    }
   })
 
-  test("buildCreateDuelDusdcTx throws when wallet has no dUSDC", async () => {
+  test("buildCreateDuelDusdcTx throws when there is no funding account", async () => {
     const cards: DeckCard[] = strikes.map((strike) => ({
       expiryMarketId: marketId,
       strike,
     }))
     const hash = await computeDeckHash(cards)
-    const client = mockClient([])
-    await expect(
-      buildCreateDuelDusdcTx(client, "0xabc", hash, 1_000_000n, DUSDC)
-    ).rejects.toThrow(/no .*DUSDC coins/)
+    const restore = mockManagerFetch(null)
+    try {
+      await expect(
+        buildCreateDuelDusdcTx(mockClient(), "0xabc", hash, 1_000_000n, DUSDC)
+      ).rejects.toThrow(/no funding account/)
+    } finally {
+      restore()
+    }
   })
 
   test("buildJoinDuelDusdcTx emits one join_duel with dUSDC type arg", async () => {
-    const client = mockClient([{ objectId: "0xc0", balance: "10000000" }])
-    const tx = await buildJoinDuelDusdcTx(
-      client,
-      "0xabc",
-      duelId,
-      1_000_000n,
-      DUSDC
-    )
-    const data = tx.getData()
-    const joinDuel = data.commands.find(
-      (c) => "MoveCall" in c && c.MoveCall?.function === "join_duel"
-    )
-    expect(joinDuel).toBeDefined()
-    expect(
-      (joinDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall
-        .typeArguments
-    ).toEqual([DUSDC])
+    const restore = mockManagerFetch(WRAPPER)
+    try {
+      const tx = await buildJoinDuelDusdcTx(
+        mockClient(),
+        "0xabc",
+        duelId,
+        1_000_000n,
+        DUSDC
+      )
+      const data = tx.getData()
+      const joinDuel = data.commands.find(
+        (c) => "MoveCall" in c && c.MoveCall?.function === "join_duel"
+      )
+      expect(joinDuel).toBeDefined()
+      expect(
+        (joinDuel as { MoveCall: { typeArguments?: string[] } }).MoveCall
+          .typeArguments
+      ).toEqual([DUSDC])
+    } finally {
+      restore()
+    }
   })
 
   test("buildRevealDeckTx emits 5 new_card + 1 reveal_deck", () => {
@@ -294,8 +319,22 @@ describe("PTB builders", () => {
     ).toHaveLength(1)
   })
 
-  test("buildRevealDeckTx rejects wrong card count", () => {
-    expect(() => buildRevealDeckTx(duelId, [])).toThrow(/exactly 5/)
+  test("buildRevealDeckTx rejects an out-of-range card count", () => {
+    expect(() => buildRevealDeckTx(duelId, [])).toThrow(/1.20 cards/)
+  })
+
+  test("buildRevealDeckTx accepts a non-5 deck size (e.g. 3 cards)", () => {
+    const cards: DeckCard[] = strikes
+      .slice(0, 3)
+      .map((strike) => ({ expiryMarketId: marketId, strike }))
+    const tx = buildRevealDeckTx(duelId, cards)
+    const targets = moveCallTargets(tx)
+    expect(targets.filter((t) => t.endsWith("::duel::new_card"))).toHaveLength(
+      3
+    )
+    expect(
+      targets.filter((t) => t.endsWith("::duel::reveal_deck"))
+    ).toHaveLength(1)
   })
 
   test("computeDeckHash returns 32 bytes deterministically", async () => {

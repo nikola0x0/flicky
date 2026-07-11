@@ -41,7 +41,7 @@ console.log(`spot: $${(Number(spot) / 1e9).toFixed(2)}\n`)
 const seed = deriveSeed({ asset: "BTC", timestampMs: Date.now() })
 console.log(`seed: ${hashToHex(seed)}\n`)
 
-const cards = buildDeck(markets, spot, seed)
+const cards = buildDeck(markets, spot, seed, markets.length, Date.now())
 const deck = commitDeck(cards)
 
 console.log("Per-card landing:\n")

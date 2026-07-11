@@ -19,16 +19,33 @@ import {
 import {
   DEEPBOOK,
   buildStakedSwipeTx,
+  fetchAccountState,
   fetchMarketTickSize,
   fmtDusdc,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
-import { liveCardPnl, fmtPnlPct, type SwipeLite } from "@/lib/pnl"
+import {
+  liveCardPnl,
+  fmtPnlPct,
+  upProbability,
+  type SwipeLite,
+} from "@/lib/pnl"
 import { SWIPE_WINDOW_MS, swipeWindowRemainingMs } from "@/lib/swipe-window"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
 import { WsErrorBanner } from "@/components/ws-error-banner"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
+
+/**
+ * Minimum AccountWrapper dUSDC balance to allow a swipe. Each swipe mints a
+ * real position whose premium (`entry_probability × SWIPE_QUANTITY / leverage`
+ * + fees) is withdrawn from the account; below this the mint aborts deep in
+ * `account::withdraw_balance` with an opaque code. The favored side's win
+ * probability is capped at ~0.65 (see deckmaster `ZONE_TARGET_PROB`), so its
+ * premium ≲ 0.7 × quantity — gate on that plus a small headroom so we prompt a
+ * top-up BEFORE the on-chain abort.
+ */
+const MIN_ACCOUNT_PER_SWIPE = (SWIPE_QUANTITY * 7n) / 10n
 
 /** Format a 1e9-scaled on-chain BTC price as a rounded USD string,
  *  e.g. "67235752957751" → "$67,236". Accepts the raw string or bigint. */
@@ -216,7 +233,7 @@ export function ActiveDuel({
       if (
         phaseRef.current.kind === "AWAIT_REVEAL" &&
         msg.cardsRevealed &&
-        msg.cards.length === 5
+        msg.cards.length === msg.cardCount
       ) {
         setPhase({
           kind: "SWIPING",
@@ -226,7 +243,7 @@ export function ActiveDuel({
       }
       if (
         phaseRef.current.kind === "SWIPING" &&
-        countMySwipes(msg as RoomState, account?.address) === 5
+        countMySwipes(msg as RoomState, account?.address) === msg.cardCount
       ) {
         setPhase({ kind: "AWAIT_SETTLEMENT", duelId: phaseRef.current.duelId })
       }
@@ -274,7 +291,10 @@ export function ActiveDuel({
   // and subscribe to its live ticks. Expiry is NOT fetched here — it rides
   // in on the `oracle_tick` WS message itself (see `ticks` above), so the
   // client never discovers markets on its own.
-  const oraclesReady = roomState?.cards.length === 5 ? roomState.cards : null
+  const oraclesReady =
+    roomState && roomState.cards.length === roomState.cardCount
+      ? roomState.cards
+      : null
   useEffect(() => {
     if (!oraclesReady) return
     let cancelled = false
@@ -635,6 +655,20 @@ function PhaseSwiping({
     setBusy(true)
     setError(null)
     try {
+      // Pre-flight the account balance: each swipe's mint premium is
+      // withdrawn from the AccountWrapper, and if it can't cover it the tx
+      // aborts on-chain with an opaque `account::withdraw_balance` code.
+      // Catch it here and prompt a top-up instead of burning a sponsored tx.
+      const { balance } = await fetchAccountState(myAddress)
+      if (balance < MIN_ACCOUNT_PER_SWIPE) {
+        setError(
+          `Account balance low (${fmtDusdc(balance)}). Each swipe needs about ${fmtDusdc(
+            MIN_ACCOUNT_PER_SWIPE
+          )} of dUSDC in your account for the mint premium — top up your account, then swipe again.`
+        )
+        setDrag({ x: 0, active: false, flying: null })
+        return
+      }
       const tx = buildStakedSwipeTx({
         duelId,
         wrapperId: managerId,
@@ -649,7 +683,28 @@ function PhaseSwiping({
       await sign.mutateAsync({ transaction: tx })
       onSwipeDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      // The mint's premium withdrawal failing surfaces as an opaque
+      // `account::withdraw_balance` abort (code 1) — translate it to the
+      // same actionable top-up guidance as the pre-flight check.
+      const insufficient =
+        /withdraw_balance|EInsufficient|abort code: 1\b/.test(msg)
+      // `strike_exposure_config::assert_mint_admission` (code 4) =
+      // ENetPremiumBelowMinimum: the swiped side is too unlikely for its
+      // premium to clear the protocol's floor — a long-shot bet that isn't
+      // placeable on this (usually short-expiry) market. The card leans the
+      // OTHER way; nudge the player there.
+      const longShotUnavailable =
+        /assert_mint_admission|ENetPremiumBelowMinimum|abort code: 4\b/.test(
+          msg
+        )
+      setError(
+        insufficient
+          ? "Your account ran out of dUSDC for this swipe's mint premium — top up your account and swipe again."
+          : longShotUnavailable
+            ? "That long-shot side is too unlikely to place on this market — swipe the other way (the favored call)."
+            : msg
+      )
       setDrag({ x: 0, active: false, flying: null })
     } finally {
       setBusy(false)
@@ -710,6 +765,16 @@ function PhaseSwiping({
   // Colour ramps cyan → amber → rose as settlement nears.
   const remainingMs = expiry !== undefined ? Number(expiry) - nowMs : null
   const countdown = remainingMs !== null ? fmtCountdown(remainingMs) : null
+  // Estimated per-side win odds under the same digital-BS model as the live
+  // PnL mark (upProbability) — surfaces which side is the favored call vs the
+  // long-shot (whose premium may be too low to place on a short market), and
+  // drifts toward 0/100% as the card nears settlement.
+  const upProb =
+    tick && card && expiry !== undefined
+      ? upProbability(card.strike, tick.spot, Number(expiry), nowMs)
+      : null
+  const yesPct = upProb === null ? null : Math.round(upProb * 100)
+  const noPct = yesPct === null ? null : 100 - yesPct
   const countdownColor =
     remainingMs === null
       ? "text-white/50"
@@ -891,7 +956,7 @@ function PhaseSwiping({
             </div>
           </div>
 
-          {/* yes / no action chips */}
+          {/* yes / no action chips — with estimated per-side win odds */}
           <div className="grid grid-cols-2 gap-2">
             <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#3a1620] px-2 py-2">
               <img
@@ -903,11 +968,21 @@ function PhaseSwiping({
               <span className="font-pixel text-lg text-rose-300 uppercase">
                 no
               </span>
+              {noPct !== null && (
+                <span className="font-pixel text-sm text-rose-300/70 tabular-nums">
+                  {noPct}%
+                </span>
+              )}
             </div>
             <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#163a26] px-2 py-2">
               <span className="font-pixel text-lg text-emerald-300 uppercase">
                 yes
               </span>
+              {yesPct !== null && (
+                <span className="font-pixel text-sm text-emerald-300/70 tabular-nums">
+                  {yesPct}%
+                </span>
+              )}
               <img
                 src="/icons/arrow_right.png"
                 alt=""
@@ -1218,7 +1293,7 @@ function nextCardIdx(rs: RoomState, myAddress: string | undefined): number {
     const my = isP0 ? s.p0Swipe : s.p1Swipe
     if (my) n = Math.max(n, s.cardIdx + 1)
   }
-  return Math.min(n, 5)
+  return Math.min(n, rs.cardCount)
 }
 
 function countMySwipes(rs: RoomState, myAddress: string | undefined): number {
