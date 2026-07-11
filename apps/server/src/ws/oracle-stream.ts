@@ -19,6 +19,7 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "../env"
 import { makeLogger } from "../log"
 import { fetchMarketState } from "../oracle"
+import { readBtcSpot } from "../deckmaster"
 import { _sendInternal, type SocketState } from "./matchmaking"
 
 const log = makeLogger("oracle-stream")
@@ -27,6 +28,12 @@ type AnyWs = ServerWebSocket<SocketState>
 
 const marketSubscribers = new Map<string, Set<AnyWs>>()
 let _interval: ReturnType<typeof setInterval> | null = null
+// Last live BTC spot (1e9-fixed, same scale as card strikes). 6-24 exposes no
+// live per-market spot via the indexer (`oracle_prices` is only populated at
+// settlement), so the mark stayed flat at "0". We source the tick's spot from
+// the live Pyth feed instead (see `tick`); this cache keeps the last good
+// value so a transient fetch failure never regresses the stream to "0".
+let lastBtcSpot: string | null = null
 
 export function subscribeOracles(ws: AnyWs, marketIds: unknown): void {
   if (!Array.isArray(marketIds)) {
@@ -93,6 +100,16 @@ async function tick(): Promise<void> {
   const ids = Array.from(marketSubscribers.keys())
   if (ids.length === 0) return
   const now = Date.now()
+  // One live Pyth BTC spot per tick, shared by every subscribed market (all
+  // BTC — they differ by strike/expiry, not underlying). This is the same
+  // source deck-gen uses for strike placement, so it's on the strikes' scale
+  // and the mark-to-market is honest. Keep the last value on a fetch hiccup.
+  try {
+    lastBtcSpot = (await readBtcSpot()).toString()
+  } catch (e) {
+    log.warn(`btc spot: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  const spot = lastBtcSpot ?? "0"
   let pushed = 0
   await Promise.all(
     ids.map(async (id) => {
@@ -110,7 +127,9 @@ async function tick(): Promise<void> {
       const tickMsg = {
         type: "oracle_tick",
         expiryMarketId: id,
-        spot: state.oracle_prices?.spot ?? "0",
+        // Live Pyth BTC spot (not the indexer's settlement-only
+        // `oracle_prices.spot`, which is "0" pre-settlement on 6-24).
+        spot,
         expiry: String(state.market?.expiry ?? "0"),
         settlementPrice,
         timestampMs: now,
