@@ -17,6 +17,13 @@ import { scaleLinear } from "@visx/scale"
 import { LinePath } from "@visx/shape"
 import { curveMonotoneX } from "@visx/curve"
 import { markCardPnl, type SwipeLite } from "@/lib/pnl"
+import {
+  MAX_SAMPLES,
+  yAmpFor,
+  relativeTimeLabels,
+  type Sample,
+  type Boundary,
+} from "@/lib/pnl-history"
 import { PlayerAvatar } from "@/components/player-avatar"
 
 export interface ChartDuel {
@@ -41,24 +48,10 @@ export interface ChartTick {
   expiryMs?: number
 }
 
-interface Sample {
-  t: number
-  p0: bigint
-  p1: bigint
-}
-
-interface Boundary {
-  t: number
-  idx: number
-}
-
-const SAMPLE_INTERVAL_MS = 60 // ~16 Hz — smoother head than 10 Hz
-const MAX_SAMPLES = 1000 // ~60 s rolling window at ~16 Hz
+const SAMPLE_INTERVAL_MS = 1000 // 1 Hz — one PnL sample per second
 // Bounds for the adaptive ease duration (matched to observed tick cadence).
 const EASE_MIN_MS = 500
 const EASE_MAX_MS = 3000
-const WINDOW_MS = 60_000 // x-axis visible window
-const MIN_AMP_MICRO = 500_000n // 0.5 dUSDC y-axis floor
 
 export function StreamingPnlChart({
   duel,
@@ -168,7 +161,9 @@ function useChartHistory(
   const duelRef = useRef(duel)
   // Latest raw tick values (the target).
   const targetTicksRef = useRef(ticks)
-  // Eased copy updated each animation frame — what the sampler reads.
+  // Eased copy updated each animation frame — what the sampler reads. Never
+  // deletes a market: a sparse/frozen feed keeps its last-known spot so
+  // `upProbability` time-decay keeps the mark drifting each second.
   const smoothedTicksRef = useRef<Record<string, ChartTick>>({})
   // Per-oracle interpolation anchor: linearly ease `from`→`to` across
   // `durMs` starting at `startMs`. `durMs` is set to the *observed* gap
@@ -315,23 +310,17 @@ function ChartCanvas({
   const oppOf = (s: Sample): bigint => (myIsP0 ? s.p1 : s.p0)
 
   const { ampNum, xDomain } = useMemo(() => {
-    let absMax = 0n
+    const firstT = samples.length > 0 ? samples[0].t : 0
     let tMax = Number.NEGATIVE_INFINITY
-    for (const s of samples) {
-      const y = youOf(s)
-      const o = oppOf(s)
-      const ya = y < 0n ? -y : y
-      const oa = o < 0n ? -o : o
-      if (ya > absMax) absMax = ya
-      if (oa > absMax) absMax = oa
-      if (s.t > tMax) tMax = s.t
-    }
-    const padded =
-      ((absMax > MIN_AMP_MICRO ? absMax : MIN_AMP_MICRO) * 12n) / 10n
+    for (const s of samples) if (s.t > tMax) tMax = s.t
+    // Growing full-match window [firstT, now]; guard the degenerate
+    // single-sample case so the x-scale has a non-zero span.
     const domain: [number, number] = !isFinite(tMax)
       ? [0, 1]
-      : [tMax - WINDOW_MS, tMax]
-    return { ampNum: Number(padded), xDomain: domain }
+      : firstT < tMax
+        ? [firstT, tMax]
+        : [tMax - SAMPLE_INTERVAL_MS, tMax]
+    return { ampNum: yAmpFor(samples, myIsP0), xDomain: domain }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [samples, myIsP0])
 
@@ -470,29 +459,34 @@ function ChartCanvas({
           })}
 
           {hasData &&
-            [
-              { ago: 60_000, anchor: "start" as const },
-              { ago: 30_000, anchor: "middle" as const },
-              { ago: 0, anchor: "end" as const },
-            ].map(({ ago, anchor }) => {
-              const tx = xDomain[1] - ago
-              const x = xScale(tx)
-              return (
-                <g key={ago} opacity={0.55}>
-                  <line x1={x} x2={x} y1={ih} y2={ih + 3} stroke="#ffffff55" />
-                  <text
-                    x={x}
-                    y={ih + 18}
-                    fill="#ffffff70"
-                    fontSize="11"
-                    textAnchor={anchor}
-                    dominantBaseline="hanging"
-                  >
-                    {ago === 0 ? "now" : `-${ago / 1000}s`}
-                  </text>
-                </g>
-              )
-            })}
+            relativeTimeLabels(xDomain[0], xDomain[1], 4).map(
+              (mark, i, all) => {
+                const x = xScale(mark.t)
+                const anchor =
+                  i === 0 ? "start" : i === all.length - 1 ? "end" : "middle"
+                return (
+                  <g key={mark.t} opacity={0.55}>
+                    <line
+                      x1={x}
+                      x2={x}
+                      y1={ih}
+                      y2={ih + 3}
+                      stroke="#ffffff55"
+                    />
+                    <text
+                      x={x}
+                      y={ih + 18}
+                      fill="#ffffff70"
+                      fontSize="11"
+                      textAnchor={anchor}
+                      dominantBaseline="hanging"
+                    >
+                      {mark.label}
+                    </text>
+                  </g>
+                )
+              }
+            )}
 
           {hasData && (
             <>
