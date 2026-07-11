@@ -460,7 +460,9 @@ function NeedsDepositStep({
       <WalletToManagerFlow />
       <p className="text-base text-white/80">
         Your manager has {fmtDusdc(current)}. Depositing {fmtDusdc(needed)}{" "}
-        brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} for the 5-card duel.
+        brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} — the minimum to get
+        started. A full 5-card duel draws more (your stake + ~15 dUSDC), checked
+        when you queue.
       </p>
       <OneTimeNote />
       <PixelButton
