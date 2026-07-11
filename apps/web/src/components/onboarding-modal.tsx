@@ -42,7 +42,7 @@ const BLUE_BRAND_STYLE = {
  * sits at 3 dUSDC notional: at this quantity BOTH sides of an offset-strike
  * card clear the floor (band widens to p ∈ [0.334, 0.666], covering every
  * `ZONE_TARGET_PROB` zone in deckmaster) — the favored side (win prob ≳ 0.56)
- * yields a premium of ~$1.68–1.95, and the long-shot side ~$1.05–1.32 — while
+ * yields a premium of ~$1.68–1.89, and the long-shot side ~$1.11–1.32 — while
  * a 5-card duel draws ~$7.5–9 of premium total, so a stake pool of a few
  * dUSDC per side still dominates it. (2 dUSDC notional could not clear the
  * floor on the long-shot side of an offset strike — that's why this was
