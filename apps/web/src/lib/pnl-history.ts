@@ -20,15 +20,23 @@ export interface Boundary {
  *  reached in a ~5-min demo match). */
 export const MAX_SAMPLES = 1800
 
+/** Wall-clock retention cap: drop samples older than 30 min behind the latest,
+ *  so a browser left open for hours (or one that persisted across a data-shape
+ *  change) can't grow an unreadable multi-hour flat span. */
+export const MAX_AGE_MS = 30 * 60 * 1000
+
 /** Y-axis half-amplitude floor (micro-dUSDC, $0.05): small enough that
  *  time-decay drift fills the frame, large enough to avoid a zero-height
  *  (divide-by-zero) axis when PnL is flat 0. */
 export const Y_FLOOR_MICRO = 50_000n
 
-const PERSIST_VERSION = 1 as const
+// v2: the tick's spot moved from the indexer's settlement-only field to the
+// live Pyth feed; pre-v2 persisted samples were flat "0"-spot garbage, so the
+// version bump discards them on next read.
+const PERSIST_VERSION = 2 as const
 
-interface PersistedHistoryV1 {
-  v: 1
+interface PersistedHistoryV2 {
+  v: 2
   duelId: string
   firstT: number
   samples: Array<{ t: number; p0: string; p1: string }>
@@ -76,20 +84,37 @@ function fmtElapsed(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`
 }
 
-/** Keep the newest MAX_SAMPLES samples; drop boundaries before the retained
- *  window's first sample. */
+/** Keep the newest MAX_SAMPLES samples AND drop anything older than MAX_AGE_MS
+ *  behind the latest; drop boundaries before the retained window's first
+ *  sample. */
 export function trimHistory(
   samples: Sample[],
   boundaries: Boundary[]
 ): { samples: Sample[]; boundaries: Boundary[]; firstT: number } {
-  const trimmed =
+  let trimmed =
     samples.length > MAX_SAMPLES ? samples.slice(-MAX_SAMPLES) : samples
+  if (trimmed.length > 0) {
+    const cutoff = trimmed[trimmed.length - 1].t - MAX_AGE_MS
+    const firstKeep = trimmed.findIndex((s) => s.t >= cutoff)
+    if (firstKeep > 0) trimmed = trimmed.slice(firstKeep)
+  }
   const firstT = trimmed.length > 0 ? trimmed[0].t : 0
   return {
     samples: trimmed,
     boundaries: boundaries.filter((b) => b.t >= firstT),
     firstT,
   }
+}
+
+/** Samples within `rangeMs` of the latest sample — the visible slice for the
+ *  manual time-zoom. `null` range → all samples (full-match). */
+export function sliceToRange(
+  samples: Sample[],
+  rangeMs: number | null
+): Sample[] {
+  if (rangeMs === null || samples.length === 0) return samples
+  const cutoff = samples[samples.length - 1].t - rangeMs
+  return samples.filter((s) => s.t >= cutoff)
 }
 
 /** Serialize (trimmed) history to JSON for localStorage. bigints as strings
@@ -100,7 +125,7 @@ export function serializeHistory(
   boundaries: Boundary[]
 ): string {
   const t = trimHistory(samples, boundaries)
-  const payload: PersistedHistoryV1 = {
+  const payload: PersistedHistoryV2 = {
     v: PERSIST_VERSION,
     duelId,
     firstT: t.firstT,
@@ -124,7 +149,7 @@ export function parseHistory(raw: string | null): {
 } | null {
   if (!raw) return null
   try {
-    const p = JSON.parse(raw) as Partial<PersistedHistoryV1>
+    const p = JSON.parse(raw) as Partial<PersistedHistoryV2>
     if (p.v !== PERSIST_VERSION) return null
     if (typeof p.duelId !== "string") return null
     if (!Array.isArray(p.samples) || !Array.isArray(p.boundaries)) return null

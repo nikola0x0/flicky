@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test"
 import {
   MAX_SAMPLES,
+  MAX_AGE_MS,
   Y_FLOOR_MICRO,
   yAmpFor,
   relativeTimeLabels,
   trimHistory,
+  sliceToRange,
   serializeHistory,
   parseHistory,
   type Sample,
@@ -68,19 +70,46 @@ test("serializeHistory/parseHistory round-trips bigints beyond 2^53", () => {
 test("parseHistory returns null on corrupt/mismatched input", () => {
   expect(parseHistory(null)).toBeNull()
   expect(parseHistory("not json")).toBeNull()
+  // v:1 is the pre-Pyth-spot format — rejected so stale flat-"0" samples are
+  // discarded rather than restored.
   expect(
     parseHistory(
-      JSON.stringify({ v: 2, duelId: "x", samples: [], boundaries: [] })
+      JSON.stringify({ v: 1, duelId: "x", samples: [], boundaries: [] })
     )
   ).toBeNull()
   expect(
     parseHistory(
-      JSON.stringify({ v: 1, duelId: 123, samples: [], boundaries: [] })
+      JSON.stringify({ v: 2, duelId: 123, samples: [], boundaries: [] })
     )
   ).toBeNull()
   expect(
     parseHistory(
-      JSON.stringify({ v: 1, duelId: "x", samples: "nope", boundaries: [] })
+      JSON.stringify({ v: 2, duelId: "x", samples: "nope", boundaries: [] })
     )
   ).toBeNull()
+})
+
+test("trimHistory drops samples older than MAX_AGE_MS behind the latest", () => {
+  const last = 100 * 60 * 1000
+  const samples: Sample[] = [
+    { t: last - MAX_AGE_MS - 60_000, p0: 1n, p1: 0n }, // stale → dropped
+    { t: last - 60_000, p0: 2n, p1: 0n }, // within window → kept
+    { t: last, p0: 3n, p1: 0n }, // latest → kept
+  ]
+  const r = trimHistory(samples, [])
+  expect(r.samples.map((s) => s.t)).toEqual([last - 60_000, last])
+  expect(r.firstT).toBe(last - 60_000)
+})
+
+test("sliceToRange keeps samples within rangeMs of the latest; null → all", () => {
+  const samples: Sample[] = [
+    { t: 0, p0: 0n, p1: 0n },
+    { t: 60_000, p0: 1n, p1: 0n },
+    { t: 120_000, p0: 2n, p1: 0n },
+  ]
+  expect(sliceToRange(samples, null)).toEqual(samples)
+  expect(sliceToRange(samples, 70_000).map((s) => s.t)).toEqual([
+    60_000, 120_000,
+  ])
+  expect(sliceToRange([], 60_000)).toEqual([])
 })

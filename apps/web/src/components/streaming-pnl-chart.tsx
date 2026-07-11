@@ -21,6 +21,7 @@ import {
   MAX_SAMPLES,
   yAmpFor,
   relativeTimeLabels,
+  sliceToRange,
   serializeHistory,
   parseHistory,
   type Sample,
@@ -54,7 +55,18 @@ const SAMPLE_INTERVAL_MS = 1000 // 1 Hz — one PnL sample per second
 // Bounds for the adaptive ease duration (matched to observed tick cadence).
 const EASE_MIN_MS = 500
 const EASE_MAX_MS = 3000
-const STORAGE_PREFIX = "flicky:pnl-history:v1:"
+const STORAGE_BASE = "flicky:pnl-history:"
+// v2: pre-Pyth-spot samples were flat "0"; the version bump abandons old keys
+// (the persist sweep matches STORAGE_BASE so any lingering v1 key is purged).
+const STORAGE_PREFIX = STORAGE_BASE + "v2:"
+
+// Manual time-zoom presets (TradingView-style); `null` = full match.
+const RANGE_PRESETS: Array<{ label: string; ms: number | null }> = [
+  { label: "1m", ms: 60_000 },
+  { label: "5m", ms: 300_000 },
+  { label: "15m", ms: 900_000 },
+  { label: "all", ms: null },
+]
 
 export function StreamingPnlChart({
   duel,
@@ -62,12 +74,15 @@ export function StreamingPnlChart({
   myIsP0,
   youAddress,
   oppAddress,
+  showRangeControls = false,
 }: {
   duel: ChartDuel
   ticks: Record<string, ChartTick>
   myIsP0: boolean
   youAddress: string
   oppAddress: string
+  /** Show the TradingView-style time-range chips (watch view only). */
+  showRangeControls?: boolean
 }) {
   const history = useChartHistory(duel, ticks)
   // Total premium each side has paid — the denominator for percentage
@@ -86,6 +101,7 @@ export function StreamingPnlChart({
       oppAddress={oppAddress}
       youPremium={youPremium}
       oppPremium={oppPremium}
+      showRangeControls={showRangeControls}
     />
   )
 }
@@ -322,7 +338,8 @@ function useChartHistory(
       )
       for (let i = window.localStorage.length - 1; i >= 0; i--) {
         const k = window.localStorage.key(i)
-        if (k && k.startsWith(STORAGE_PREFIX) && k !== key) {
+        // Match the version-agnostic base so stale v1 keys are purged too.
+        if (k && k.startsWith(STORAGE_BASE) && k !== key) {
           window.localStorage.removeItem(k)
         }
       }
@@ -374,6 +391,7 @@ function ChartCanvas({
   oppAddress,
   youPremium,
   oppPremium,
+  showRangeControls,
 }: {
   samples: Sample[]
   boundaries: Boundary[]
@@ -382,7 +400,10 @@ function ChartCanvas({
   oppAddress: string
   youPremium: bigint
   oppPremium: bigint
+  showRangeControls: boolean
 }) {
+  // Manual time-zoom: `null` = full match; otherwise the last `rangeMs`.
+  const [rangeMs, setRangeMs] = useState<number | null>(null)
   const W = 320
   const H = 140
   const ml = 50
@@ -395,20 +416,29 @@ function ChartCanvas({
   const youOf = (s: Sample): bigint => (myIsP0 ? s.p0 : s.p1)
   const oppOf = (s: Sample): bigint => (myIsP0 ? s.p1 : s.p0)
 
+  // Visible slice for the selected zoom (full match when rangeMs === null).
+  const visible = useMemo(
+    () => sliceToRange(samples, rangeMs),
+    [samples, rangeMs]
+  )
+
   const { ampNum, xDomain } = useMemo(() => {
-    const firstT = samples.length > 0 ? samples[0].t : 0
+    const firstT = visible.length > 0 ? visible[0].t : 0
     let tMax = Number.NEGATIVE_INFINITY
-    for (const s of samples) if (s.t > tMax) tMax = s.t
-    // Growing full-match window [firstT, now]; guard the degenerate
-    // single-sample case so the x-scale has a non-zero span.
+    for (const s of visible) if (s.t > tMax) tMax = s.t
+    // Fixed range pins [tMax - rangeMs, tMax] so the window is stable before
+    // it fills; full match grows [firstT, now]. Guard the degenerate
+    // single-sample / empty cases so the x-scale has a non-zero span.
     const domain: [number, number] = !isFinite(tMax)
       ? [0, 1]
-      : firstT < tMax
-        ? [firstT, tMax]
-        : [tMax - SAMPLE_INTERVAL_MS, tMax]
-    return { ampNum: yAmpFor(samples, myIsP0), xDomain: domain }
+      : rangeMs !== null
+        ? [tMax - rangeMs, tMax]
+        : firstT < tMax
+          ? [firstT, tMax]
+          : [tMax - SAMPLE_INTERVAL_MS, tMax]
+    return { ampNum: yAmpFor(visible, myIsP0), xDomain: domain }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples, myIsP0])
+  }, [visible, myIsP0, rangeMs])
 
   const xScale = useMemo(
     () => scaleLinear<number>({ domain: xDomain, range: [0, iw] }),
@@ -437,7 +467,7 @@ function ChartCanvas({
   // Break-even midline — read in the same unit as the top/bottom labels.
   const yZeroLabel = ampPercent > 0 ? "0%" : "$0"
 
-  const last = samples[samples.length - 1]
+  const last = visible[visible.length - 1]
   const xHead = last ? xScale(last.t) : 0
   const yYouHead = last ? yScale(Number(youOf(last))) : 0
   const yOppHead = last ? yScale(Number(oppOf(last))) : 0
@@ -577,7 +607,7 @@ function ChartCanvas({
           {hasData && (
             <>
               <LinePath
-                data={samples}
+                data={visible}
                 x={(d) => xScale(d.t)}
                 y={(d) => yScale(Number(oppOf(d)))}
                 stroke="#f08585"
@@ -587,7 +617,7 @@ function ChartCanvas({
                 curve={curveMonotoneX}
               />
               <LinePath
-                data={samples}
+                data={visible}
                 x={(d) => xScale(d.t)}
                 y={(d) => yScale(Number(youOf(d)))}
                 stroke="#7eb6ff"
@@ -635,6 +665,25 @@ function ChartCanvas({
           <PlayerAvatar address={oppAddress} size={14} />
         </span>
       </div>
+
+      {showRangeControls && (
+        <div className="mt-1 flex items-center justify-end gap-0.5 px-1">
+          {RANGE_PRESETS.map((p) => (
+            <button
+              key={p.label}
+              type="button"
+              onClick={() => setRangeMs(p.ms)}
+              className={`px-1.5 py-0.5 text-[9px] tracking-[0.12em] uppercase transition-colors ${
+                rangeMs === p.ms
+                  ? "bg-white/85 text-black"
+                  : "bg-white/10 text-white/55 hover:bg-white/20"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

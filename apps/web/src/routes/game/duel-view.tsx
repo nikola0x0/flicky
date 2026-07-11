@@ -350,6 +350,7 @@ export default function DuelView() {
             myIsP0={Boolean(myIsP0)}
             youAddress={address ?? ""}
             oppAddress={opponent}
+            showRangeControls
           />
         </div>
         <div className={chartView === "btc" ? "" : "hidden"}>
