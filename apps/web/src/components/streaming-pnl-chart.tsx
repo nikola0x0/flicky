@@ -21,6 +21,8 @@ import {
   MAX_SAMPLES,
   yAmpFor,
   relativeTimeLabels,
+  serializeHistory,
+  parseHistory,
   type Sample,
   type Boundary,
 } from "@/lib/pnl-history"
@@ -52,6 +54,7 @@ const SAMPLE_INTERVAL_MS = 1000 // 1 Hz — one PnL sample per second
 // Bounds for the adaptive ease duration (matched to observed tick cadence).
 const EASE_MIN_MS = 500
 const EASE_MAX_MS = 3000
+const STORAGE_PREFIX = "flicky:pnl-history:v1:"
 
 export function StreamingPnlChart({
   duel,
@@ -150,9 +153,10 @@ function currentRunningPnl(
 
 /**
  * Rolling PnL time-series + card-boundary markers. Samples both sides
- * at 10 Hz off the latest duel + smoothed ticks (smoothed via the
- * RAF loop inside), keeping a ~60 s window. Each new card settlement
- * appends a vertical boundary at the moment `settledCount` advances.
+ * at 1 Hz off the latest duel + smoothed ticks (smoothed via the RAF
+ * loop inside) into a growing full-match window, persisted across
+ * refresh. Each new card settlement appends a vertical boundary at the
+ * moment `settledCount` advances.
  */
 function useChartHistory(
   duel: ChartDuel,
@@ -234,6 +238,34 @@ function useChartHistory(
   const duelId = duel.id
   const prevSettledRef = useRef(0)
 
+  // Mirror the latest history for the throttled persister + unload flush,
+  // which must read current state without re-subscribing every render.
+  const historyRef = useRef(history)
+  useEffect(() => {
+    historyRef.current = history
+  }, [history])
+
+  // Hydrate from localStorage when the duel changes (incl. first mount /
+  // F5), so a refresh continues the same line instead of resetting.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    try {
+      const restored = parseHistory(
+        window.localStorage.getItem(STORAGE_PREFIX + duelId)
+      )
+      if (restored && restored.duelId === duelId) {
+        setHistory({
+          duelId,
+          samples: restored.samples,
+          boundaries: restored.boundaries,
+        })
+        prevSettledRef.current = duelRef.current.settledCount
+      }
+    } catch {
+      // corrupt / unavailable storage — start fresh, never throw
+    }
+  }, [duelId])
+
   useEffect(() => {
     if (duel.settledCount > prevSettledRef.current) {
       const additions: Boundary[] = []
@@ -270,6 +302,60 @@ function useChartHistory(
       })
     }, SAMPLE_INTERVAL_MS)
     return () => clearInterval(interval)
+  }, [duelId])
+
+  // Persist at most every 2 s (piggybacking the 1 Hz sampler's state
+  // changes). bigints serialize as strings; only the current duel's entry
+  // is kept so storage can't grow across matches.
+  const lastPersistRef = useRef(0)
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    if (history.duelId !== duelId || history.samples.length === 0) return
+    const now = Date.now()
+    if (now - lastPersistRef.current < 2000) return
+    lastPersistRef.current = now
+    try {
+      const key = STORAGE_PREFIX + duelId
+      window.localStorage.setItem(
+        key,
+        serializeHistory(duelId, history.samples, history.boundaries)
+      )
+      for (let i = window.localStorage.length - 1; i >= 0; i--) {
+        const k = window.localStorage.key(i)
+        if (k && k.startsWith(STORAGE_PREFIX) && k !== key) {
+          window.localStorage.removeItem(k)
+        }
+      }
+    } catch {
+      // quota / unavailable — degrade to in-memory only
+    }
+  }, [history, duelId])
+
+  // Flush the freshest samples when the tab is hidden or navigated away,
+  // so a refresh restores right up to the last visible point.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const flush = () => {
+      const h = historyRef.current
+      if (h.duelId !== duelId || h.samples.length === 0) return
+      try {
+        window.localStorage.setItem(
+          STORAGE_PREFIX + duelId,
+          serializeHistory(duelId, h.samples, h.boundaries)
+        )
+      } catch {
+        // ignore
+      }
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush()
+    }
+    window.addEventListener("pagehide", flush)
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => {
+      window.removeEventListener("pagehide", flush)
+      document.removeEventListener("visibilitychange", onVisibility)
+    }
   }, [duelId])
 
   // Project to current duel — protects against stale-history flashes
