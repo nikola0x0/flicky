@@ -1,0 +1,15 @@
+[package]
+name = "season"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Flicky Labs <lequocuyit@gmail.com>"]
+
+# Standalone package (published separately from the flicky duel package, like
+# `swap/`) so the prize-escrow — which custodies real funds — has its own
+# publish/upgrade cadence and admin cap, decoupled from game-logic upgrades.
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+
+[addresses]
+season = "0x0"

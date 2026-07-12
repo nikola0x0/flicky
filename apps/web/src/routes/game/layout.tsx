@@ -24,10 +24,8 @@ import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
-import {
-  useDusdcBalance,
-  useManagerBalance,
-} from "@/hooks/use-wallet-balances"
+import { SeasonBanner } from "@/components/season-banner"
+import { useDusdcBalance, useManagerBalance } from "@/hooks/use-wallet-balances"
 import { clearPendingSwipe, peekPendingSwipe } from "@/lib/nav-transition"
 import { DeviceFrame } from "@/components/device-frame"
 
@@ -81,6 +79,10 @@ export default function GameLayout() {
   return (
     <>
       <DeviceFrame className={isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}>
+        {/* Season promo — an absolute top overlay on every game route except
+            the active-duel screen (where it'd clutter the swipe surface).
+            Dismissible; floats over the header rather than displacing it. */}
+        {!isPlay && <SeasonBanner />}
         {isPlay && (
           <div
             aria-hidden
@@ -141,7 +143,7 @@ function SignedOutPrompt({ onSignIn }: { onSignIn: () => void }) {
             alt=""
             aria-hidden
             onError={() => setArtFailed(true)}
-            className="-mb-10 w-72 max-w-[88%] [image-rendering:pixelated] drop-shadow-[0_8px_0_rgba(0,0,0,0.35)]"
+            className="-mb-10 w-72 max-w-[88%] drop-shadow-[0_8px_0_rgba(0,0,0,0.35)] [image-rendering:pixelated]"
           />
         )}
         <p className="text-3xl tracking-[0.15em] text-white uppercase">

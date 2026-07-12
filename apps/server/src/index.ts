@@ -28,6 +28,7 @@ import { handleDocsRequest } from "./docs"
 import { handleDuelsRequest } from "./duels-api"
 import { handleLeaderboardRequest } from "./leaderboard-api"
 import { handleManagerRequest } from "./manager-api"
+import { handleSeasonRequest } from "./season"
 import { handleOracleRequest } from "./oracle"
 import { handleSponsorRequest } from "./sponsor"
 import { websocketHandler } from "./ws/handlers"
@@ -133,6 +134,9 @@ const server = Bun.serve({
     const leaderboard = await handleLeaderboardRequest(req, url)
     if (leaderboard) return leaderboard
 
+    const season = handleSeasonRequest(req, url)
+    if (season) return season
+
     const manager = await handleManagerRequest(req, url)
     if (manager) return manager
 
@@ -156,6 +160,7 @@ log.info(`  GET  /oracle/{id}`)
 log.info(`  GET  /duels/recent`)
 log.info(`  GET  /duels/{id}`)
 log.info(`  GET  /leaderboard`)
+log.info(`  GET  /season`)
 log.info(`  GET  /manager?owner=0x...`)
 log.info(`  GET  /openapi.json`)
 log.info(`  GET  /docs (Scalar UI)`)

@@ -5,6 +5,9 @@ import { CONFIG } from "@/lib/config"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { PixelButton } from "@/components/pixel-button"
 import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
+import { fetchSeason, prizeForRank, type Season } from "@/lib/season"
+import { fmtCountdown } from "@/lib/countdown"
+import { useNow } from "@/lib/use-now"
 import type { CSSProperties } from "react"
 
 const BLUE_BRAND_STYLE = {
@@ -20,25 +23,39 @@ interface RankEntry {
   wins: number
   losses: number
   ties: number
+  /** Completed staked duels — for Season prize eligibility. */
+  stakedDuels: number
+  /** `stakedDuels >= season.minStakedDuels` (server-computed). */
+  eligible: boolean
 }
 
 const POLL_MS = 10_000
 const FETCH_LIMIT = 100
 
 /**
- * /game/rank — global leaderboard, ranked by MMR. Read-only over the
- * server's `/leaderboard` endpoint (the `player_rating` table). Each row:
- * position medal, avatar, address, tier badge, rating, and W/L/T. The
- * signed-in player's row is highlighted; if they're not in the top list a
- * small note explains why (unranked / outside the top 100).
- *
- * No bespoke art beyond the trophy banner — tier badges and the top-3
- * medals are derived from the in-game pixel palette.
+ * /game/rank — global leaderboard, ranked by MMR, with the Season 0 prize
+ * overlay: a live countdown + prize pool in the header, a per-rank prize
+ * breakdown, and each top-10 row annotated with its prize and whether the
+ * player is prize-eligible (≥ N staked duels). Ranking itself is unchanged —
+ * all-tier rating; eligibility only gates prizes. Read-only over
+ * `/leaderboard` + `/season`; payout is manual ops at season end.
  */
 export default function GameRank() {
   const account = useCurrentAccount()
   const me = account?.address
   const [players, setPlayers] = useState<RankEntry[] | null>(null)
+  const [season, setSeason] = useState<Season | null>(null)
+  const now = useNow(1000)
+
+  useEffect(() => {
+    let cancelled = false
+    void fetchSeason().then((s) => {
+      if (!cancelled) setSeason(s)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -46,7 +63,7 @@ export default function GameRank() {
     const tick = async () => {
       try {
         const res = await fetch(
-          `${CONFIG.serverHttpUrl}/leaderboard?limit=${FETCH_LIMIT}`,
+          `${CONFIG.serverHttpUrl}/leaderboard?limit=${FETCH_LIMIT}`
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { players: RankEntry[] }
@@ -67,10 +84,12 @@ export default function GameRank() {
   const myRank = useMemo(() => {
     if (!players || !me) return null
     const i = players.findIndex(
-      (p) => p.address.toLowerCase() === me.toLowerCase(),
+      (p) => p.address.toLowerCase() === me.toLowerCase()
     )
     return i === -1 ? null : i + 1
   }, [players, me])
+
+  const remaining = season ? Date.parse(season.endsAt) - now : 0
 
   return (
     <div className="relative isolate flex h-full flex-col gap-3 overflow-y-auto px-4 py-4 font-pixel text-white [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -93,13 +112,23 @@ export default function GameRank() {
             className="h-56 w-auto max-w-none [image-rendering:pixelated]"
           />
         </div>
-        <h1 className="-mt-4 text-4xl tracking-[0.2em] uppercase">leaderboard</h1>
+        <h1 className="-mt-4 text-4xl tracking-[0.2em] uppercase">
+          leaderboard
+        </h1>
+        {season && remaining > 0 && (
+          <p className="mt-1 text-base tracking-[0.14em] text-[#ffd27e] uppercase tabular-nums">
+            {season.prizePool.total} {season.prizePool.currency} pool · ends in{" "}
+            {fmtCountdown(remaining)}
+          </p>
+        )}
         {myRank !== null && (
           <p className="mt-1 text-base tracking-[0.18em] text-white/55 uppercase">
             you're ranked #{myRank}
           </p>
         )}
       </header>
+
+      {season && <PrizePanel season={season} />}
 
       {players === null ? (
         <p className="px-1 py-6 text-center text-base tracking-[0.18em] text-white/55 uppercase">
@@ -115,6 +144,7 @@ export default function GameRank() {
               entry={p}
               position={i + 1}
               isMe={!!me && p.address.toLowerCase() === me.toLowerCase()}
+              season={season}
             />
           ))}
         </ul>
@@ -122,9 +152,7 @@ export default function GameRank() {
 
       {players !== null && players.length > 0 && myRank === null && (
         <p className="px-1 pt-1 text-center text-sm tracking-[0.18em] text-white/45 uppercase">
-          {me
-            ? "finish a duel to enter the ranks"
-            : "sign in to see your rank"}
+          {me ? "finish a duel to enter the ranks" : "sign in to see your rank"}
         </p>
       )}
 
@@ -139,23 +167,71 @@ export default function GameRank() {
   )
 }
 
+// Medal emoji for the top-3 prize tiers; a bullet otherwise.
+const RANK_ICON: Record<number, string> = { 1: "🥇", 2: "🥈", 3: "🥉" }
+
+/**
+ * Per-rank prize breakdown, derived entirely from `season.prizeSplit`, so it
+ * can't drift from the server config. Each tier is rendered as one row
+ * (single ranks show a medal; a range like 4th–10th shows "each").
+ */
+function PrizePanel({ season }: { season: Season }) {
+  const { prizePool, prizeSplit, minStakedDuels, eligibilityNote } = season
+  return (
+    <div className="space-y-2 rounded bg-black/30 px-3 py-3 backdrop-blur-sm">
+      <div className="flex items-center justify-between">
+        <span className="text-sm tracking-[0.18em] text-white/55 uppercase">
+          {season.name} prizes
+        </span>
+        <span className="text-base text-[#ffd27e] tabular-nums">
+          {prizePool.total} {prizePool.currency}
+        </span>
+      </div>
+      <ul className="space-y-1">
+        {prizeSplit.map((tier) => (
+          <li
+            key={`${tier.rankStart}-${tier.rankEnd}`}
+            className="flex items-center justify-between text-sm"
+          >
+            <span className="tracking-wider text-white/80 uppercase">
+              {tier.rankStart === tier.rankEnd
+                ? `${RANK_ICON[tier.rankStart] ?? ""} ${ordinal(tier.rankStart)}`
+                : `${ordinal(tier.rankStart)}–${ordinal(tier.rankEnd)}`}
+            </span>
+            <span className="text-white/90 tabular-nums">
+              {tier.amount} {prizePool.currency}
+              {tier.rankStart !== tier.rankEnd && (
+                <span className="text-white/40"> each</span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="border-t border-white/10 pt-2 text-[10px] leading-relaxed tracking-wider text-white/40 uppercase">
+        eligible: {minStakedDuels}+ staked duels · {eligibilityNote}
+      </p>
+    </div>
+  )
+}
+
 function RankRow({
   entry,
   position,
   isMe,
+  season,
 }: {
   entry: RankEntry
   position: number
   isMe: boolean
+  season: Season | null
 }) {
   const tier = ratingToTier(entry.rating)
   const tierStyle = TIER_STYLES[tier]
+  const prize = season ? prizeForRank(season.prizeSplit, position) : null
   return (
     <li
       className={`flex items-center gap-3 rounded px-3 py-2.5 backdrop-blur-sm ${
-        isMe
-          ? "bg-[#4094fb]/20 ring-1 ring-[#7eb6ff]/50"
-          : "bg-black/30"
+        isMe ? "bg-[#4094fb]/20 ring-1 ring-[#7eb6ff]/50" : "bg-black/30"
       }`}
     >
       <RankMedal position={position} />
@@ -169,10 +245,21 @@ function RankRow({
             </span>
           )}
         </span>
-        <span
-          className={`w-fit rounded px-2 py-0.5 text-sm tracking-[0.18em] uppercase ring-1 ring-inset ${tierStyle.ring} ${tierStyle.text}`}
-        >
-          {tierStyle.label}
+        <span className="flex flex-wrap items-center gap-1.5">
+          <span
+            className={`w-fit rounded px-2 py-0.5 text-sm tracking-[0.18em] uppercase ring-1 ring-inset ${tierStyle.ring} ${tierStyle.text}`}
+          >
+            {tierStyle.label}
+          </span>
+          {prize !== null && season && (
+            <PrizeChip
+              prize={prize}
+              currency={season.prizePool.currency}
+              eligible={entry.eligible}
+              stakedDuels={entry.stakedDuels}
+              minStaked={season.minStakedDuels}
+            />
+          )}
         </span>
       </div>
       <div className="flex shrink-0 flex-col items-end">
@@ -182,6 +269,39 @@ function RankRow({
         </span>
       </div>
     </li>
+  )
+}
+
+/**
+ * The prize a top-10 row would win, with its eligibility state:
+ *   eligible   → gold chip ("🏆 200 SUI")
+ *   ineligible → muted chip + how many more staked duels are needed
+ *                ("200 SUI · 1/10 staked"), so it's clear the prize is locked.
+ */
+function PrizeChip({
+  prize,
+  currency,
+  eligible,
+  stakedDuels,
+  minStaked,
+}: {
+  prize: number
+  currency: string
+  eligible: boolean
+  stakedDuels: number
+  minStaked: number
+}) {
+  if (eligible) {
+    return (
+      <span className="w-fit rounded bg-[#ffd27e]/15 px-2 py-0.5 text-sm tracking-[0.12em] text-[#ffd27e] uppercase tabular-nums ring-1 ring-[#ffd27e]/40 ring-inset">
+        🏆 {prize} {currency}
+      </span>
+    )
+  }
+  return (
+    <span className="w-fit rounded bg-white/5 px-2 py-0.5 text-sm tracking-[0.12em] text-white/40 uppercase tabular-nums ring-1 ring-white/10 ring-inset">
+      {prize} {currency} · {stakedDuels}/{minStaked} staked
+    </span>
   )
 }
 
@@ -231,4 +351,10 @@ function Empty() {
 function shortAddr(a: string): string {
   if (!a || a.length < 12) return a
   return `${a.slice(0, 6)}…${a.slice(-4)}`
+}
+
+function ordinal(n: number): string {
+  const s = ["th", "st", "nd", "rd"]
+  const v = n % 100
+  return `${n}${s[(v - 20) % 10] ?? s[v] ?? s[0]}`
 }

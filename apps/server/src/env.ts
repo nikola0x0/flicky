@@ -28,6 +28,42 @@ function loadFlickyPackageId(): string | null {
   }
 }
 
+/** A Season prize tier: ranks `rankStart..rankEnd` (inclusive, 1-based) each pay `amount`. */
+export interface PrizeTier {
+  rankStart: number
+  rankEnd: number
+  amount: number
+}
+
+// Season 0 default split: 1st 200 / 2nd 100 / 3rd 50 / 4th–10th 25 each.
+// Pool total is DERIVED from this (sum over tiers) so the headline number and
+// the per-rank breakdown can never drift: 200 + 100 + 50 + 25×7 = 525.
+const DEFAULT_PRIZE_SPLIT: PrizeTier[] = [
+  { rankStart: 1, rankEnd: 1, amount: 200 },
+  { rankStart: 2, rankEnd: 2, amount: 100 },
+  { rankStart: 3, rankEnd: 3, amount: 50 },
+  { rankStart: 4, rankEnd: 10, amount: 25 },
+]
+
+/**
+ * Parse `SEASON_PRIZE_SPLIT` ("start:end:amount,start:end:amount,…") into prize
+ * tiers, or fall back to {@link DEFAULT_PRIZE_SPLIT}. A malformed override throws
+ * at boot rather than silently mis-displaying prizes.
+ */
+function loadSeasonPrizeSplit(): PrizeTier[] {
+  const raw = process.env.SEASON_PRIZE_SPLIT
+  if (!raw) return DEFAULT_PRIZE_SPLIT
+  return raw.split(",").map((seg) => {
+    const [rankStart, rankEnd, amount] = seg.split(":").map(Number)
+    if (![rankStart, rankEnd, amount].every(Number.isFinite)) {
+      throw new Error(
+        `Bad SEASON_PRIZE_SPLIT segment "${seg}" — want start:end:amount (e.g. 1:1:200,4:10:25).`
+      )
+    }
+    return { rankStart, rankEnd, amount }
+  })
+}
+
 export const env = {
   port: Number(process.env.PORT ?? 3001),
 
@@ -161,7 +197,9 @@ export const env = {
   sponsorSecretKey: process.env.SPONSOR_SECRET_KEY,
   // Max gas (MIST) the sponsor will cover per transaction — a defensive cap
   // enforced by the `gasBudget` validator (default 0.1 SUI).
-  sponsorMaxGasBudget: BigInt(process.env.SPONSOR_MAX_GAS_BUDGET ?? 100_000_000),
+  sponsorMaxGasBudget: BigInt(
+    process.env.SPONSOR_MAX_GAS_BUDGET ?? 100_000_000
+  ),
   allowedOrigin: process.env.ALLOWED_ORIGIN, // unset/"" → *
 
   // Matchmaking: sync-only PvP. No bot-fill — Practice Mode covers
@@ -190,6 +228,27 @@ export const env = {
   mmrMatchWindowExpandPerSec: Number(
     process.env.MMR_MATCH_WINDOW_EXPAND_PER_SEC ?? 20
   ),
+
+  // Season 0 leaderboard prizes (DISPLAY-ONLY — payout is manual ops at
+  // season end, no escrow contract). Every field is env-override-able so the
+  // pool/split/end-date can change without a redeploy. The pool total is
+  // derived from `seasonPrizeSplit` (see season.ts), never a separate number.
+  seasonId: process.env.SEASON_ID ?? "season-0",
+  seasonName: process.env.SEASON_NAME ?? "Season 0",
+  // ISO instant the season ends; the web renders a live countdown to it.
+  seasonEndsAt: process.env.SEASON_ENDS_AT ?? "2026-07-31T23:59:59Z",
+  seasonPrizeCurrency: process.env.SEASON_PRIZE_CURRENCY ?? "SUI",
+  seasonPrizeSplit: loadSeasonPrizeSplit(),
+  // Min completed STAKED duels for prize eligibility (cheap sybil guard).
+  seasonMinStakedDuels: Number(process.env.SEASON_MIN_STAKED_DUELS ?? 10),
+  seasonEligibilityNote:
+    process.env.SEASON_ELIGIBILITY_NOTE ?? "Final prizes at team discretion.",
+  // On-chain prize escrow (season::prize_pool, apps/contracts/season). Set
+  // after publishing; `seasonPoolId` is filled once `create_pool` runs. When
+  // set, GET /season surfaces them so the UI can show "prizes escrowed
+  // on-chain". Not read by any hot path — the escrow is admin-operated.
+  seasonPackageId: process.env.SEASON_PACKAGE_ID,
+  seasonPoolId: process.env.SEASON_POOL_ID,
 
   // Keeper (background settle/redeem/finalize).
   keeperSecretKey: process.env.KEEPER_SECRET_KEY ?? process.env.BOT_SECRET_KEY,

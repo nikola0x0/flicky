@@ -712,6 +712,35 @@ export async function leaderboard(limit: number): Promise<PlayerRating[]> {
 }
 
 /**
+ * Completed STAKED-duel count per player address, for Season 0 prize
+ * eligibility (≥N staked duels). A duel is staked iff its `stake_coin_type`
+ * is the dUSDC type — free duels escrow SUI (`0x2::sui::SUI`); the on-chain
+ * `tier` u8 isn't mirrored, so coin type is the discriminator. Both sides of
+ * a duel count, so creator + challenger are UNION ALL'd. Returns a Map
+ * address → count (an absent address means 0).
+ *
+ * Aggregates the whole mirror (bounded by distinct players, not duels), so
+ * one query covers any leaderboard slice; scope to specific addresses if the
+ * mirror ever grows large.
+ */
+export async function stakedDuelCounts(): Promise<Map<string, number>> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    SELECT addr, COUNT(*)::int AS staked
+    FROM (
+      SELECT creator AS addr FROM duel
+        WHERE status = 'COMPLETE' AND stake_coin_type = ${env.dusdcCoinType}
+      UNION ALL
+      SELECT challenger AS addr FROM duel
+        WHERE status = 'COMPLETE' AND stake_coin_type = ${env.dusdcCoinType}
+    ) t
+    GROUP BY addr
+  `) as Array<{ addr: string; staked: number }>
+  return new Map(rows.map((r) => [r.addr, r.staked]))
+}
+
+/**
  * Wipe the entire player_rating table. Used by the ratings backfill,
  * which recomputes ELO from scratch by replaying COMPLETE duels — the
  * table must start empty so the replay isn't added on top of stale rows.

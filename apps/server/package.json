@@ -18,7 +18,8 @@
     "clear:duels": "bun run src/scripts/clear-duels.ts",
     "backfill:ratings": "bun run src/scripts/backfill-ratings.ts",
     "check:6-24": "bun run src/scripts/check-6-24-live.ts",
-    "fund:sponsor": "bun run src/scripts/fund-sponsor.ts"
+    "fund:sponsor": "bun run src/scripts/fund-sponsor.ts",
+    "season:results": "bun run src/scripts/season-results.ts"
   },
   "dependencies": {
     "@mysten-incubation/sponsor": "0.2.2",
