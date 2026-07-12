@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react"
 import { createPortal } from "react-dom"
 import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import {
-  buildCreateManagerTx,
+  buildCreateAccountTx,
   buildDepositDusdcTx,
-  findPredictManager,
+  fetchAccountState,
   fmtDusdc,
-  getManagerDusdcBalance,
   getWalletDusdcBalance,
-  resolveCreatedManagerId,
-  writeManagerCache,
+  waitForCreatedWrapper,
 } from "@/lib/deepbook"
 import { DepositModal } from "@/components/deposit-modal"
 import { PixelButton } from "@/components/pixel-button"
@@ -26,17 +30,38 @@ const BLUE_BRAND_STYLE = {
 } as CSSProperties
 
 /**
- * Per-swipe Predict position size (dUSDC micro-units). Fixed at 1 dUSDC
- * in v1 — worst-case 5-card exposure = 5 * SWIPE_QUANTITY, matching
- * MIN_MANAGER_BALANCE below. Keep these two constants in lockstep.
+ * Per-swipe Predict `mint_exact_quantity` size (notional, dUSDC micro-units).
+ *
+ * This is the position NOTIONAL, not the premium paid. The mint's
+ * `net_premium = entry_probability × quantity / leverage` must clear the
+ * protocol's `min_net_premium` floor ($1 = 1_000_000) or the mint aborts
+ * with `ENetPremiumBelowMinimum` (`strike_exposure_config::assert_mint_admission`,
+ * abort code 4). By design the position is kept as CHEAP as the protocol
+ * allows — the duel STAKE (side-pot) is the game's real prize, the mint is
+ * just how each swipe takes a genuine Predict position for scoring. So this
+ * sits at 3 dUSDC notional: at this quantity BOTH sides of an offset-strike
+ * card clear the floor (band widens to p ∈ [0.334, 0.666], covering every
+ * `ZONE_TARGET_PROB` zone in deckmaster) — the favored side (win prob ≳ 0.56)
+ * yields a premium of ~$1.68–1.89, and the long-shot side ~$1.11–1.32 — while
+ * a 5-card duel draws ~$7.5–9 of premium total, so a stake pool of a few
+ * dUSDC per side still dominates it. (2 dUSDC notional could not clear the
+ * floor on the long-shot side of an offset strike — that's why this was
+ * raised from 2 to 3.)
  */
-export const SWIPE_QUANTITY = 1_000_000n
+export const SWIPE_QUANTITY = 3_000_000n
 
 /**
- * Minimum dUSDC the PredictManager must hold before entering the queue
- * — covers worst-case 5-card exposure at SWIPE_QUANTITY = 1 dUSDC.
+ * Floor the AccountWrapper must hold before queueing — kept at 5 dUSDC to
+ * match the server's absolute `MIN_BALANCE_FOR_QUEUE` floor. NOTE: this is
+ * a floor, not full worst-case coverage — the server's real queue gate
+ * (`requiredQueueBalance` in `apps/server/src/predict.ts`) requires
+ * `stake + 5 cards × SWIPE_QUANTITY` (~stake + $15), so a `standard`-tier
+ * player needs ~20 dUSDC in the account for a full 5-card duel without a
+ * mid-game top-up. Decoupled from `SWIPE_QUANTITY` on purpose (raising the
+ * notional must not silently raise this onboarding floor) — the web check
+ * here stays a cheap pre-swipe backstop, not the authoritative budget.
  */
-export const MIN_MANAGER_BALANCE = 5n * SWIPE_QUANTITY
+export const MIN_MANAGER_BALANCE = 5_000_000n
 
 interface Props {
   open: boolean
@@ -58,7 +83,7 @@ type Phase =
       needed: bigint
       current: bigint
     }
-  /** Wallet OK; no PredictManager yet. */
+  /** Wallet OK; no AccountWrapper yet. */
   | { kind: "needs_manager" }
   /** Wallet OK; manager exists but balance < 5 dUSDC. */
   | { kind: "needs_manager_deposit"; managerId: string; current: bigint }
@@ -85,14 +110,15 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
     try {
       const wallet = await getWalletDusdcBalance(client, account.address)
       setWalletDusdc(wallet)
-      const mgr = await findPredictManager(client, account.address)
-      const mgrBal = mgr
-        ? await getManagerDusdcBalance(client, mgr.id)
-        : 0n
-      // How much MORE dUSDC must move from wallet into the manager.
+      const { wrapperId, balance: wrapperBal } = await fetchAccountState(
+        account.address
+      )
+      // How much MORE dUSDC must move from wallet into the account.
       const topup =
-        mgrBal >= MIN_MANAGER_BALANCE ? 0n : MIN_MANAGER_BALANCE - mgrBal
-      // Wallet must cover both the stake escrow AND the manager top-up.
+        wrapperBal >= MIN_MANAGER_BALANCE
+          ? 0n
+          : MIN_MANAGER_BALANCE - wrapperBal
+      // Wallet must cover both the stake escrow AND the account top-up.
       const walletNeeded = stake + topup
       if (wallet < walletNeeded) {
         setPhase({
@@ -102,19 +128,19 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         })
         return
       }
-      if (!mgr) {
+      if (!wrapperId) {
         setPhase({ kind: "needs_manager" })
         return
       }
-      if (mgrBal < MIN_MANAGER_BALANCE) {
+      if (wrapperBal < MIN_MANAGER_BALANCE) {
         setPhase({
           kind: "needs_manager_deposit",
-          managerId: mgr.id,
-          current: mgrBal,
+          managerId: wrapperId,
+          current: wrapperBal,
         })
         return
       }
-      setPhase({ kind: "ready", managerId: mgr.id })
+      setPhase({ kind: "ready", managerId: wrapperId })
     } catch (e) {
       setPhase({
         kind: "error",
@@ -133,8 +159,14 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
   // invokes it in dev — both paths cause duplicate `queue_join` sends
   // and a benign rate_limit error toast.
   const firedRef = useRef(false)
+  // Reset to a clean slate on close so a re-open never inherits a stale
+  // `ready` phase or a tripped fire-once guard — either would strand the
+  // modal on "joining queue…" with `onReady` never re-firing.
   useEffect(() => {
-    if (!open) firedRef.current = false
+    if (!open) {
+      firedRef.current = false
+      setPhase({ kind: "checking" })
+    }
   }, [open])
   useEffect(() => {
     if (phase.kind !== "ready") return
@@ -142,6 +174,21 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
     firedRef.current = true
     onReady(phase.managerId)
   }, [phase, onReady])
+
+  // Backstop against a stuck "joining queue…": the parent closes us on
+  // `onReady`, so reaching `ready` should unmount this modal within a frame.
+  // If we're still on `ready` after a grace period, the queue-join stalled —
+  // surface the recoverable error (Retry/Close) instead of hanging forever.
+  useEffect(() => {
+    if (!open || phase.kind !== "ready") return
+    const t = setTimeout(() => {
+      setPhase({
+        kind: "error",
+        message: "Joining is taking longer than expected — try again.",
+      })
+    }, 8_000)
+    return () => clearTimeout(t)
+  }, [open, phase])
 
   // Escape-to-close + body-scroll lock, matching DepositModal/WithdrawModal.
   useEffect(() => {
@@ -175,7 +222,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
           type="button"
           onClick={onClose}
           aria-label="close"
-          className="absolute right-3 top-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
+          className="absolute top-3 right-3 grid size-7 place-items-center text-base text-white/55 hover:text-white"
         >
           ✕
         </button>
@@ -207,27 +254,22 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
             onCreate={async () => {
               if (!account) return
               try {
-                const tx = buildCreateManagerTx()
+                const tx = buildCreateAccountTx()
                 const res = (await sign.mutateAsync({ transaction: tx })) as {
                   digest: string
                 }
-                // Sponsored-gas path returns only { digest }; re-fetch the
-                // tx block to read objectChanges.
-                const mgrId = await resolveCreatedManagerId(
+                // Sponsored-gas path returns only { digest }; the wrapper
+                // address is deterministic but needs the tx to land before
+                // the server can resolve it.
+                const wrapperId = await waitForCreatedWrapper(
                   client,
                   res.digest,
-                  account.address,
+                  account.address
                 )
-                if (!mgrId) {
-                  throw new Error(
-                    "create_manager tx succeeded but PredictManager id not found in tx block",
-                  )
-                }
-                writeManagerCache(account.address, mgrId)
-                // New manager always has 0 balance — go straight to deposit.
+                // New account always has 0 balance — go straight to deposit.
                 setPhase({
                   kind: "needs_manager_deposit",
-                  managerId: mgrId,
+                  managerId: wrapperId,
                   current: 0n,
                 })
               } catch (e) {
@@ -247,12 +289,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
               if (!account) return
               const needed = MIN_MANAGER_BALANCE - phase.current
               try {
-                const tx = await buildDepositDusdcTx(
-                  client,
-                  account.address,
-                  phase.managerId,
-                  needed,
-                )
+                const tx = buildDepositDusdcTx(phase.managerId, needed)
                 await sign.mutateAsync({ transaction: tx })
                 setPhase({ kind: "ready", managerId: phase.managerId })
               } catch (e) {
@@ -307,7 +344,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         />
       )}
     </div>,
-    document.body,
+    document.body
   )
 }
 
@@ -374,8 +411,7 @@ function NeedsWalletStep({
       </div>
       <p className="text-base text-white/80">
         Your wallet needs <strong>{fmtDusdc(needed)}</strong> total to play this
-        stake: {fmtDusdc(stake)} for the duel escrow plus the manager top-up to
-        {" "}
+        stake: {fmtDusdc(stake)} for the duel escrow plus the manager top-up to{" "}
         {fmtDusdc(MIN_MANAGER_BALANCE)}.
       </p>
       <p className="text-sm text-white/55">
@@ -445,7 +481,9 @@ function NeedsDepositStep({
       <WalletToManagerFlow />
       <p className="text-base text-white/80">
         Your manager has {fmtDusdc(current)}. Depositing {fmtDusdc(needed)}{" "}
-        brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} for the 5-card duel.
+        brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} — the minimum to get
+        started. A full 5-card duel draws more (your stake + ~15 dUSDC), checked
+        when you queue.
       </p>
       <OneTimeNote />
       <PixelButton

@@ -1,3 +1,4 @@
+// LEGACY 4-16 diagnostic — not migrated to 6-24 (see Plan 2)
 /**
  * Inspect the deployed DeepBook Predict objects on testnet and print the
  * derived address graph (transitive deps, live BTC MarketOracle, configs)
@@ -9,9 +10,12 @@
 import type { GrpcTypes } from "@mysten/sui/grpc"
 import { getGraphQLClient, getSuiClient } from "../lib/sui"
 
-const PREDICT_PACKAGE = "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
-const PREDICT_REGISTRY = "0x43af14fed5480c20ff77e2263d5f794c35b9fab7e2212903127062f4fe2a6e64"
-const PREDICT_OBJECT = "0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a"
+const PREDICT_PACKAGE =
+  "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
+const PREDICT_REGISTRY =
+  "0x43af14fed5480c20ff77e2263d5f794c35b9fab7e2212903127062f4fe2a6e64"
+const PREDICT_OBJECT =
+  "0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a"
 
 async function describe(label: string, id: string) {
   const client = getSuiClient()
@@ -70,7 +74,9 @@ async function discoverLiveMarketOracles() {
         variables: { type: evtType },
       })) as {
         data?: {
-          events?: { nodes?: Array<{ contents: { json: Record<string, unknown> } }> }
+          events?: {
+            nodes?: Array<{ contents: { json: Record<string, unknown> } }>
+          }
         }
       }
       const nodes = res.data?.events?.nodes ?? []
@@ -96,9 +102,9 @@ async function discoverPackageDeps() {
   // each open-signature `typeName`) — the same dependency set the old
   // exposedFunctions walk produced.
   try {
-    const { package: pkg } = await client.movePackageService
-      .getPackage({ packageId: PREDICT_PACKAGE })
-      .response
+    const { package: pkg } = await client.movePackageService.getPackage({
+      packageId: PREDICT_PACKAGE,
+    }).response
     if (!pkg) {
       console.log("  (package not found)")
       return
@@ -112,12 +118,18 @@ async function discoverPackageDeps() {
       }
     }
     depAddrs.delete(PREDICT_PACKAGE.replace(/^0x/, "").padStart(64, "0"))
-    depAddrs.delete("0000000000000000000000000000000000000000000000000000000000000001")
-    depAddrs.delete("0000000000000000000000000000000000000000000000000000000000000002")
-    console.log("  external addrs referenced by predict's public fn signatures:")
+    depAddrs.delete(
+      "0000000000000000000000000000000000000000000000000000000000000001"
+    )
+    depAddrs.delete(
+      "0000000000000000000000000000000000000000000000000000000000000002"
+    )
+    console.log(
+      "  external addrs referenced by predict's public fn signatures:"
+    )
     for (const a of depAddrs) console.log(`    0x${a}`)
     console.log(
-      `  (${pkg.modules.length} modules: ${pkg.modules.map((m) => m.name ?? "?").join(", ")})`,
+      `  (${pkg.modules.length} modules: ${pkg.modules.map((m) => m.name ?? "?").join(", ")})`
     )
   } catch (err) {
     console.log("  failed:", err instanceof Error ? err.message : err)
@@ -126,12 +138,15 @@ async function discoverPackageDeps() {
 
 function collectAddrs(
   body: GrpcTypes.OpenSignatureBody | undefined,
-  out: Set<string>,
+  out: Set<string>
 ) {
   if (!body) return
   if (body.typeName) {
     // typeName is `<defining_id>::<module>::<name>` — take the defining pkg addr.
-    const addr = body.typeName.split("::")[0]?.replace(/^0x/, "").padStart(64, "0")
+    const addr = body.typeName
+      .split("::")[0]
+      ?.replace(/^0x/, "")
+      .padStart(64, "0")
     if (addr) out.add(addr)
   }
   for (const inner of body.typeParameterInstantiation) collectAddrs(inner, out)

@@ -7,7 +7,7 @@ import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import {
   DEMO_DUEL_ID,
   DEMO_OPP_ADDRESS,
-  DEMO_PREMIUM,
+  DEMO_ORDER_ID,
   DEMO_QUANTITY,
   DEMO_STRIKE,
   useDemoChart,
@@ -34,17 +34,16 @@ interface DuelLite {
   }>
   swipes: Array<{
     cardIdx: number
-    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
   }>
-  cards: Array<{ oracle_id: string; strike: string }>
+  cards: Array<{ expiry_market_id: string; strike: string }>
 }
 
 interface Tick {
   spot: string
-  forward: string
   expiryMs?: number
-  /** Oracle settled on-chain — lands before the indexer mirrors it. */
+  /** Market settled on-chain — lands before the indexer mirrors it. */
   settled?: boolean
 }
 
@@ -68,22 +67,46 @@ function buildDemoDuel(address: string): DuelLite {
     swipes: [
       {
         cardIdx: 0,
-        p0Swipe: { isUp: true, quantity: DEMO_QUANTITY, premium: DEMO_PREMIUM },
-        p1Swipe: { isUp: false, quantity: DEMO_QUANTITY, premium: DEMO_PREMIUM },
+        p0Swipe: {
+          isUp: true,
+          quantity: DEMO_QUANTITY,
+          orderId: DEMO_ORDER_ID,
+        },
+        p1Swipe: {
+          isUp: false,
+          quantity: DEMO_QUANTITY,
+          orderId: DEMO_ORDER_ID,
+        },
       },
       {
         cardIdx: 1,
-        p0Swipe: { isUp: false, quantity: DEMO_QUANTITY, premium: DEMO_PREMIUM },
-        p1Swipe: { isUp: true, quantity: DEMO_QUANTITY, premium: DEMO_PREMIUM },
+        p0Swipe: {
+          isUp: false,
+          quantity: DEMO_QUANTITY,
+          orderId: DEMO_ORDER_ID,
+        },
+        p1Swipe: {
+          isUp: true,
+          quantity: DEMO_QUANTITY,
+          orderId: DEMO_ORDER_ID,
+        },
       },
       {
         cardIdx: 2,
-        p0Swipe: { isUp: true, quantity: DEMO_QUANTITY, premium: DEMO_PREMIUM },
-        p1Swipe: { isUp: false, quantity: DEMO_QUANTITY, premium: DEMO_PREMIUM },
+        p0Swipe: {
+          isUp: true,
+          quantity: DEMO_QUANTITY,
+          orderId: DEMO_ORDER_ID,
+        },
+        p1Swipe: {
+          isUp: false,
+          quantity: DEMO_QUANTITY,
+          orderId: DEMO_ORDER_ID,
+        },
       },
     ],
     cards: Array.from({ length: CARD_SLOTS }, (_, i) => ({
-      oracle_id: `demo-oracle-${i}`,
+      expiry_market_id: `demo-oracle-${i}`,
       strike: DEMO_STRIKE,
     })),
   }
@@ -114,7 +137,7 @@ export function MyMatchTile() {
     const tick = async () => {
       try {
         const res = await fetch(
-          `${CONFIG.serverHttpUrl}/duels/recent?player=${encodeURIComponent(address)}&limit=20`,
+          `${CONFIG.serverHttpUrl}/duels/recent?player=${encodeURIComponent(address)}&limit=20`
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { duels: DuelLite[] }
@@ -139,7 +162,7 @@ export function MyMatchTile() {
   // real fetch effect on re-mounts.
   const effectiveDuels = useMemo(
     () => (demo && address ? [buildDemoDuel(address)] : duels),
-    [demo, address, duels],
+    [demo, address, duels]
   )
   const pick = useMemo(() => pickMatch(effectiveDuels), [effectiveDuels])
   // "Live" means actively being played — not a duel that's fully settled but
@@ -150,38 +173,37 @@ export function MyMatchTile() {
   // Subscribe to oracle ticks for the duel's cards while LIVE. The
   // `unsubscribe` cleanup keeps the keeper's broadcast traffic tight
   // when we navigate away or the duel settles.
-  const oracleIds = useMemo(
-    () => (isLive && pick ? pick.cards.map((c) => c.oracle_id) : []),
-    [isLive, pick],
+  const marketIds = useMemo(
+    () => (isLive && pick ? pick.cards.map((c) => c.expiry_market_id) : []),
+    [isLive, pick]
   )
-  const oracleKey = oracleIds.join(",")
+  const oracleKey = marketIds.join(",")
   useEffect(() => {
     // Gate on `wsOpen` so the subscribe runs once the socket is actually
     // open — otherwise a subscribe sent before the WS handshake (it can
     // lose the race against the duel poll resolving) is a silent no-op
     // and never retried, leaving the chart tick-less. Also re-fires on a
     // server-restart reconnect.
-    if (oracleIds.length === 0 || demo || !wsOpen) return
-    send({ type: "oracle_subscribe", oracleIds })
+    if (marketIds.length === 0 || demo || !wsOpen) return
+    send({ type: "oracle_subscribe", marketIds })
     const off = onMessage((msg) => {
       if (msg.type !== "oracle_tick") return
-      if (!oracleIds.includes(msg.oracleId)) return
+      if (!marketIds.includes(msg.expiryMarketId)) return
       setTicks((prev) => ({
         ...prev,
-        [msg.oracleId]: {
+        [msg.expiryMarketId]: {
           spot: msg.spot,
-          forward: msg.forward,
           expiryMs: Number(msg.expiry),
-          settled: msg.settled,
+          settled: msg.settlementPrice != null,
         },
       }))
     })
     return () => {
       off()
-      send({ type: "oracle_unsubscribe", oracleIds })
+      send({ type: "oracle_unsubscribe", marketIds })
     }
     // oracleKey condenses the array dependency so we don't re-subscribe
-    // on every parent render that returns a fresh `oracleIds`.
+    // on every parent render that returns a fresh `marketIds`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [oracleKey, onMessage, send, demo, wsOpen])
 
@@ -233,8 +255,8 @@ export function MyMatchTile() {
   // On-chain settlement precedes the indexer's `settledCount`, so count
   // oracles the tick stream reports settled and show whichever is ahead.
   const onChainSettled = pick.cards.reduce(
-    (n, c) => n + (ticks[c.oracle_id]?.settled ? 1 : 0),
-    0,
+    (n, c) => n + (ticks[c.expiry_market_id]?.settled ? 1 : 0),
+    0
   )
   const settledCount = Math.max(pick.settledCount, onChainSettled)
 
@@ -332,4 +354,3 @@ function shortAddr(a: string): string {
   if (a.length < 12) return a
   return `${a.slice(0, 6)}…${a.slice(-4)}`
 }
-

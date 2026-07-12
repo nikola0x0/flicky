@@ -17,7 +17,9 @@ export const DEMO_OPP_ADDRESS =
   "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 export const DEMO_STRIKE = "100000000000" // 100.0 on 1e9 scale
 export const DEMO_QUANTITY = "100000000000" // 100x quantity → BTC-scale PnL
-export const DEMO_PREMIUM = "50000000" // $50 premium per swipe
+// 6-24: swipe wire carries `orderId` (not `premium`) — a fake order id for
+// demo swipe fixtures.
+export const DEMO_ORDER_ID = "1"
 export const DEMO_ORACLE_ID = "demo-oracle-2"
 export const DEMO_CARD_COUNT = 5
 // Oracles that aren't yet settled in the demo — these get their own
@@ -36,14 +38,13 @@ export function useDemoChart(): boolean {
 
 interface DemoTick {
   spot: string
-  forward: string
 }
 
 export function useDemoOracleTicks(
   demo: boolean,
   setTicks: (
-    updater: (prev: Record<string, DemoTick>) => Record<string, DemoTick>,
-  ) => void,
+    updater: (prev: Record<string, DemoTick>) => Record<string, DemoTick>
+  ) => void
 ): void {
   useEffect(() => {
     if (!demo) return
@@ -64,10 +65,9 @@ export function useDemoOracleTicks(
         devs[i] = devs[i] * (1 - kappa) + z * sigma
         if (devs[i] > cap) devs[i] = cap
         if (devs[i] < -cap) devs[i] = -cap
-        const forward = strike + BigInt(Math.round(devs[i]))
+        const spot = strike + BigInt(Math.round(devs[i]))
         updates[id] = {
-          spot: forward.toString(),
-          forward: forward.toString(),
+          spot: spot.toString(),
         }
       })
       setTicks((prev) => ({ ...prev, ...updates }))

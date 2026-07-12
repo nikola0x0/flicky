@@ -2,7 +2,7 @@
  * `/game/play/:duelId` — deep-linkable, reload-safe live gameplay.
  *
  * Unlike the matchmaking entry (`/game/pvp`), this route rehydrates the
- * live duel purely from its id: it derives the player's PredictManager and
+ * live duel purely from its id: it resolves the player's AccountWrapper and
  * verifies participation on-chain, then mounts `ActiveDuel` in resume mode
  * (subscribe to the room, let `room_state` drive the phase). Reloading or
  * sharing the URL just works.
@@ -15,7 +15,7 @@ import { Navigate, useNavigate, useParams } from "react-router"
 import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
-import { findPredictManager } from "@/lib/deepbook"
+import { resolveWrapper } from "@/lib/deepbook"
 import { fetchDuel } from "@/lib/flicky"
 import { ActiveDuel } from "./active-duel"
 
@@ -40,9 +40,9 @@ export default function PlayDuel() {
     let attempt = 0
     const attemptLoad = async () => {
       try {
-        const [duel, manager] = await Promise.all([
+        const [duel, wrapperId] = await Promise.all([
           fetchDuel(client, duelId),
-          findPredictManager(client, account.address),
+          resolveWrapper(account.address),
         ])
         if (cancelled) return
         // Finished duels are read-only — straight to the result screen.
@@ -53,12 +53,12 @@ export default function PlayDuel() {
         const isParticipant =
           duel.creator.toLowerCase() === me ||
           duel.challenger.toLowerCase() === me
-        if (isParticipant && manager) {
-          setLoad({ kind: "ready", managerId: manager.id })
+        if (isParticipant && wrapperId) {
+          setLoad({ kind: "ready", managerId: wrapperId })
           return
         }
         // Read-after-write race: a just-joined challenger's `challenger`
-        // field (or a freshly created manager) may not be reflected on the
+        // field (or a freshly created wrapper) may not be reflected on the
         // fullnode yet. Retry a few times before treating them as a
         // spectator and bouncing to the read-only result.
         if (attempt < 6) {

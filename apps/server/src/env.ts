@@ -37,13 +37,59 @@ export const env = {
   // Flicky package (from deployed.json unless overridden).
   flickyPackageId: loadFlickyPackageId(),
 
-  // DeepBook Predict (testnet defaults).
+  // DeepBook Predict (testnet defaults — 6-24).
   deepbookPredictPackageId:
     process.env.DEEPBOOK_PREDICT_PACKAGE_ID ??
-    "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138",
+    "0xdb3ef5a5129920e59c9b2ae25a77eddb48acd0e1c6307b97073f0e076016446e",
   deepbookPredictObjectId:
     process.env.DEEPBOOK_PREDICT_OBJECT_ID ??
     "0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a",
+  protocolConfigId:
+    process.env.PROTOCOL_CONFIG_ID ??
+    "0x2325224629b4bd96d1f1d7ee937e07f8a06f861018a130bbb26db09cb0394cb6",
+  poolVaultId:
+    process.env.POOL_VAULT_ID ??
+    "0xfde98c636eb8a7aba59c3a238cfee6b576b7118d1e5ffa2952876c4b270a3a2a",
+  predictRegistryId:
+    process.env.PREDICT_REGISTRY_ID ??
+    "0x54afbf245caf42466cedb5756ed7816f34f544afdfa13579a862eccf3afa21ca",
+  accountPackageId:
+    process.env.ACCOUNT_PACKAGE_ID ??
+    "0xb9389eac8d59170ffd1427c1a66e5c8306263464fcc6615e825c1f5b3e15da3b",
+  accountRegistryId:
+    process.env.ACCOUNT_REGISTRY_ID ??
+    "0x3c54d5b8b6bca376fc289121838ad02f8a5b3843242b9ad7e8f8245720e685a2",
+  propbookPackageId:
+    process.env.PROPBOOK_PACKAGE_ID ??
+    "0x8eb2adde1c91f8b7c9ba5e9b0a32bfb804510c342939c5f77458fd8143f9755b",
+  oracleRegistryId:
+    process.env.ORACLE_REGISTRY_ID ??
+    "0xf3deaff68cbd081a35ec21653af6f671d2ad5f012f3b4d817d81752843374136",
+  pythFeedId:
+    process.env.BTC_PYTH_FEED_ID ??
+    "0xc78d7de16217d46d21b92ae475da799448be30b71a758dc6d7bb3ac2f1c35afb",
+  bsSpotFeedId:
+    process.env.BTC_BS_SPOT_FEED_ID ??
+    "0xcdc5fa7364e60fd2504aa96f65b707dc0734e507a919b1a7d7d63164fd67b745",
+  bsForwardFeedId:
+    process.env.BTC_BS_FWD_FEED_ID ??
+    "0xe72c734ea8d8dcbc9183d9d8f96f51aaa1fb5034d5ed33ac60d67d261e15b48a",
+  bsSviFeedId:
+    process.env.BTC_BS_SVI_FEED_ID ??
+    "0xdc2f8270676bd05fb28491e8d4a41a495722fda7a454926dd66dbba256a21c69",
+  accumulatorRootId: process.env.ACCUMULATOR_ROOT_ID ?? "0xacc",
+  predictIndexerUrl:
+    process.env.PREDICT_INDEXER_URL ??
+    "https://predict-server-beta.testnet.mystenlabs.com",
+  propbookIndexerUrl:
+    process.env.PROPBOOK_INDEXER_URL ??
+    "https://propbook.api.testnet.mystenlabs.com",
+  predictSettlementMode: (Bun.env.PREDICT_SETTLEMENT_MODE === "onchain"
+    ? "onchain"
+    : "keeper") as "keeper" | "onchain",
+  deckStrikeMode: (Bun.env.DECK_STRIKE_MODE === "svi_quote"
+    ? "svi_quote"
+    : "price_offset") as "price_offset" | "svi_quote",
   dusdcCoinType:
     process.env.DUSDC_COIN_TYPE ??
     "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC",
@@ -68,7 +114,7 @@ export const env = {
   // already falls back to ATM on probe failure so the deck still
   // generates — just with less difficulty variety on tight-TTL cards.
   deckCardMinHeadroomMs: Number(
-    process.env.DECK_CARD_MIN_HEADROOM_MS ?? 10 * 60 * 1000,
+    process.env.DECK_CARD_MIN_HEADROOM_MS ?? 10 * 60 * 1000
   ),
   // Upper expiry bound for deck oracles: the max acceptable time-to-settle
   // for a duel. A card can only settle once its oracle expires, and
@@ -77,7 +123,7 @@ export const env = {
   // cadence oracles (≤1h45m lifetime) plus any other soon-settling oracle,
   // while excluding multi-day oracles.
   deckCardMaxHorizonMs: Number(
-    process.env.DECK_CARD_MAX_HORIZON_MS ?? 3 * 60 * 60 * 1000,
+    process.env.DECK_CARD_MAX_HORIZON_MS ?? 3 * 60 * 60 * 1000
   ),
   // Deckmaster quote band: a card's implied probability (its UP ask from
   // `predict::get_trade_amounts`) must stay inside [min, max]. Keeps decks
@@ -85,6 +131,18 @@ export const env = {
   // (1%/99%) are far looser than what makes a fun prediction.
   deckQuoteMinProb: Number(process.env.DECK_QUOTE_MIN_PROB ?? 0.2),
   deckQuoteMaxProb: Number(process.env.DECK_QUOTE_MAX_PROB ?? 0.8),
+  // Deck-gen mint-admissibility probe (see mint-probe.ts). 6-24 markets gate
+  // each mint on a volatile per-market LP cash reserve (expiry_cash::
+  // assert_backing, EInsufficientCash) that the indexer exposes no field for,
+  // so before building a deck we devInspect a representative ATM mint on each
+  // candidate market and drop the ones that currently reject it. Runs once at
+  // deck creation, off the hot swipe path. Set `DECK_PROBE_MINTABLE=false` to
+  // disable (deck then uses the raw headroom-filtered market set).
+  deckProbeMintable: (process.env.DECK_PROBE_MINTABLE ?? "true") !== "false",
+  // Optional override for the AccountWrapper the probe mints against. Defaults
+  // to the sponsor/keeper key's own (deterministic) wrapper — devInspect never
+  // charges it, so it only needs to exist and hold a little dUSDC.
+  probeWrapperId: process.env.PROBE_WRAPPER_ID,
   // Postgres (Bun.sql). All persistence — indexer cursors, the duel
   // mirror, chat, player ratings, and the deckmaster plaintext store —
   // lives here. On Railway the deployed service reads the private
@@ -96,9 +154,21 @@ export const env = {
   // at a modest max_connections; 10 leaves headroom for psql / migrations.
   dbPoolMax: Number(process.env.DB_POOL_MAX ?? 10),
 
-  // Sponsored gas (Enoki).
+  // Sponsored gas (Enoki, primary). Falls back to self-sponsor below when
+  // Enoki is unconfigured or its call fails.
   enokiPrivateKey: process.env.ENOKI_PRIVATE_KEY,
   allowedOrigin: process.env.ALLOWED_ORIGIN, // unset/"" → *
+
+  // Self-sponsor fallback for /sponsor: when Enoki is unconfigured or a
+  // `createSponsoredTransaction`/`executeSponsoredTransaction` call throws,
+  // the server pays gas itself from this address's SUI balance instead of
+  // failing the request. Defaults to the keeper/bot key so a deploy that
+  // already funds the keeper wallet gets the fallback for free; set
+  // SPONSOR_SECRET_KEY explicitly to use a dedicated sponsor wallet.
+  sponsorSecretKey:
+    process.env.SPONSOR_SECRET_KEY ??
+    process.env.KEEPER_SECRET_KEY ??
+    process.env.BOT_SECRET_KEY,
 
   // Matchmaking: sync-only PvP. No bot-fill — Practice Mode covers
   // solo-vs-bot through a separate WS message.
@@ -111,7 +181,9 @@ export const env = {
   // Chat (global room).
   chatHistoryLimit: Number(process.env.CHAT_HISTORY_LIMIT ?? 50),
   chatRetainCount: Number(process.env.CHAT_RETAIN_COUNT ?? 1000),
-  chatPruneIntervalMs: Number(process.env.CHAT_PRUNE_INTERVAL_MS ?? 60 * 60 * 1000),
+  chatPruneIntervalMs: Number(
+    process.env.CHAT_PRUNE_INTERVAL_MS ?? 60 * 60 * 1000
+  ),
 
   // Match clock + live oracle tick streaming.
   matchTickIntervalMs: Number(process.env.MATCH_TICK_INTERVAL_MS ?? 1_000),
@@ -121,7 +193,9 @@ export const env = {
   mmrInitialRating: Number(process.env.MMR_INITIAL_RATING ?? 1000),
   mmrKFactor: Number(process.env.MMR_K_FACTOR ?? 32),
   mmrMatchWindowInitial: Number(process.env.MMR_MATCH_WINDOW_INITIAL ?? 200),
-  mmrMatchWindowExpandPerSec: Number(process.env.MMR_MATCH_WINDOW_EXPAND_PER_SEC ?? 20),
+  mmrMatchWindowExpandPerSec: Number(
+    process.env.MMR_MATCH_WINDOW_EXPAND_PER_SEC ?? 20
+  ),
 
   // Keeper (background settle/redeem/finalize).
   keeperSecretKey: process.env.KEEPER_SECRET_KEY ?? process.env.BOT_SECRET_KEY,

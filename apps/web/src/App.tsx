@@ -51,30 +51,68 @@ import {
   buildJoinDuelDusdcTx,
   buildJoinDuelTx,
   buildRevealDeckTx,
-  buildFinalizeTx,
   buildSwipeTx,
   computeDeckHash,
   fetchDuel,
-  fetchOracleSvi,
-  findLatestOracleSvi,
   listDuelIds,
   oracleStrikes,
   resolveCreatedDuelId,
   type DeckCard,
   type DuelState,
-  type OracleSviInfo,
 } from "@/lib/flicky"
 import {
   DEEPBOOK,
-  buildCreateManagerTx,
+  buildCreateAccountTx,
   buildDepositDusdcTx,
   buildStakedSwipeTx,
-  waitForCreatedManagerId,
-  findPredictManager,
-  getManagerDusdcBalance,
+  fetchAccountState,
+  fetchMarketTickSize,
   getWalletDusdcBalance,
-  writeManagerCache,
+  waitForCreatedWrapper,
 } from "@/lib/deepbook"
+
+/**
+ * `ExpiryMarket` view shape returned by the flicky server's
+ * `GET /oracle/list` (mirrors `apps/server/src/oracle.ts::ExpiryMarketView`,
+ * with numeric fields parsed to bigint). Replaces the pre-6-24
+ * `OracleSVI`/`fetchOracleSvi` client-side discovery — the client reads the
+ * server's indexer-backed view instead of scanning chain state itself.
+ */
+interface OracleView {
+  id: string
+  expiry: bigint
+  spot: bigint
+  forward: bigint
+  isActive: boolean
+  /** 6-24's `/oracle/list` only returns live (unsettled) markets, so this
+   *  is always null in practice — kept for shape-compatibility with the
+   *  settled-price display below. */
+  settlementPrice: bigint | null
+}
+
+/** Nearest-expiry live BTC markets from the flicky server's oracle index. */
+async function fetchOracleList(): Promise<OracleView[]> {
+  const res = await fetch(`${CONFIG.serverHttpUrl}/oracle/list?asset=BTC`)
+  if (!res.ok) throw new Error(`oracle/list HTTP ${res.status}`)
+  const body = (await res.json()) as {
+    markets: Array<{
+      id: string
+      expiry: string
+      spot: string
+      forward: string
+      active: boolean
+      settled: boolean
+    }>
+  }
+  return body.markets.map((m) => ({
+    id: m.id,
+    expiry: BigInt(m.expiry),
+    spot: BigInt(m.spot),
+    forward: BigInt(m.forward),
+    isActive: m.active,
+    settlementPrice: null,
+  }))
+}
 
 // Deckmaster HTTP endpoint. Defaults to the local server during dev.
 const DECKMASTER_BASE_URL =
@@ -92,16 +130,46 @@ interface StakeTier {
 }
 
 const FREE_TIERS: StakeTier[] = [
-  { label: "Practice", blurb: "0.01 SUI", amount: 10_000_000n, coinType: CONFIG.stakeType },
-  { label: "Standard", blurb: "0.05 SUI", amount: 50_000_000n, coinType: CONFIG.stakeType },
-  { label: "High Roller", blurb: "0.10 SUI", amount: 100_000_000n, coinType: CONFIG.stakeType },
+  {
+    label: "Practice",
+    blurb: "0.01 SUI",
+    amount: 10_000_000n,
+    coinType: CONFIG.stakeType,
+  },
+  {
+    label: "Standard",
+    blurb: "0.05 SUI",
+    amount: 50_000_000n,
+    coinType: CONFIG.stakeType,
+  },
+  {
+    label: "High Roller",
+    blurb: "0.10 SUI",
+    amount: 100_000_000n,
+    coinType: CONFIG.stakeType,
+  },
 ]
 
 // PRD §Stake tiers (staked mode): 1 / 5 / 10 dUSDC.
 const STAKED_TIERS: StakeTier[] = [
-  { label: "Practice", blurb: "1 dUSDC", amount: 1_000_000n, coinType: DEEPBOOK.dusdcType },
-  { label: "Standard", blurb: "5 dUSDC", amount: 5_000_000n, coinType: DEEPBOOK.dusdcType },
-  { label: "High Roller", blurb: "10 dUSDC", amount: 10_000_000n, coinType: DEEPBOOK.dusdcType },
+  {
+    label: "Practice",
+    blurb: "1 dUSDC",
+    amount: 1_000_000n,
+    coinType: DEEPBOOK.dusdcType,
+  },
+  {
+    label: "Standard",
+    blurb: "5 dUSDC",
+    amount: 5_000_000n,
+    coinType: DEEPBOOK.dusdcType,
+  },
+  {
+    label: "High Roller",
+    blurb: "10 dUSDC",
+    amount: 10_000_000n,
+    coinType: DEEPBOOK.dusdcType,
+  },
 ]
 
 // Swipe-phase pacing
@@ -117,7 +185,13 @@ const addressUrl = (id: string) => `${EXPLORER}/address/${id}`
 const objectUrl = (id: string) => `${EXPLORER}/object/${id}/tx-blocks`
 const txExplorerUrl = (digest: string) => `${EXPLORER}/tx/${digest}`
 
-function ExplorerLink({ href, children }: { href: string; children: ReactNode }) {
+function ExplorerLink({
+  href,
+  children,
+}: {
+  href: string
+  children: ReactNode
+}) {
   return (
     <a
       href={href}
@@ -182,14 +256,19 @@ function WalletButton() {
     <div className="relative">
       <button
         onClick={() => setMenuOpen((v) => !v)}
-        className="border-hairline bg-surface-1 hover:bg-surface-2 flex h-9 items-center gap-2 rounded-md border px-3 text-base font-medium tracking-[-0.005em] transition"
+        className="flex h-9 items-center gap-2 rounded-md border border-hairline bg-surface-1 px-3 text-base font-medium tracking-[-0.005em] transition hover:bg-surface-2"
       >
-        <span className="bg-primary inline-block h-2 w-2 rounded-full" />
-        <span className="font-mono text-[12px]">{shortId(account.address, 4)}</span>
-        <span className="text-ink-subtle text-xs">▾</span>
+        <span className="inline-block h-2 w-2 rounded-full bg-primary" />
+        <span className="font-mono text-[12px]">
+          {shortId(account.address, 4)}
+        </span>
+        <span className="text-xs text-ink-subtle">▾</span>
       </button>
       {menuOpen && (
-        <WalletMenu address={account.address} onClose={() => setMenuOpen(false)} />
+        <WalletMenu
+          address={account.address}
+          onClose={() => setMenuOpen(false)}
+        />
       )}
     </div>
   )
@@ -234,7 +313,7 @@ function WalletModal({ onClose }: { onClose: () => void }) {
         role="dialog"
         aria-modal="true"
         onClick={(e) => e.stopPropagation()}
-        className="border-hairline bg-surface-1 w-full max-w-sm rounded-t-xl border p-5 shadow-2xl sm:rounded-xl"
+        className="w-full max-w-sm rounded-t-xl border border-hairline bg-surface-1 p-5 shadow-2xl sm:rounded-xl"
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-semibold tracking-[-0.01em]">
@@ -242,14 +321,14 @@ function WalletModal({ onClose }: { onClose: () => void }) {
           </h2>
           <button
             onClick={onClose}
-            className="text-ink-subtle hover:text-foreground text-xl leading-none"
+            className="text-xl leading-none text-ink-subtle hover:text-foreground"
             aria-label="close"
           >
             ×
           </button>
         </div>
         {wallets.length === 0 ? (
-          <p className="text-ink-subtle text-base">
+          <p className="text-base text-ink-subtle">
             No Sui wallets detected. Install{" "}
             <a
               href="https://chromewebstore.google.com/detail/sui-wallet/opcgpfmipidbgpenhmajoajpbobppdil"
@@ -277,7 +356,7 @@ function WalletModal({ onClose }: { onClose: () => void }) {
                 key={w.name}
                 onClick={() => pick(w.name)}
                 disabled={isPending}
-                className="border-hairline hover:bg-surface-2 group flex w-full items-center gap-3 rounded-md border bg-transparent px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60"
+                className="group flex w-full items-center gap-3 rounded-md border border-hairline bg-transparent px-3 py-2 text-left transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {w.icon ? (
                   <img
@@ -286,11 +365,11 @@ function WalletModal({ onClose }: { onClose: () => void }) {
                     className="h-7 w-7 rounded-md object-cover"
                   />
                 ) : (
-                  <div className="bg-surface-3 h-7 w-7 rounded-md" />
+                  <div className="h-7 w-7 rounded-md bg-surface-3" />
                 )}
                 <span className="flex-1 text-base font-medium">{w.name}</span>
                 {busyWallet === w.name && (
-                  <span className="text-ink-subtle text-sm">connecting…</span>
+                  <span className="text-sm text-ink-subtle">connecting…</span>
                 )}
               </button>
             ))}
@@ -301,7 +380,7 @@ function WalletModal({ onClose }: { onClose: () => void }) {
             {error.message}
           </p>
         )}
-        <p className="text-ink-tertiary mt-4 text-xs">
+        <p className="mt-4 text-xs text-ink-tertiary">
           By connecting, you authorize this app to read your address. No
           transactions are sent until you confirm them.
         </p>
@@ -352,13 +431,15 @@ function WalletMenu({
   return (
     <div
       ref={menuRef}
-      className="border-hairline bg-surface-1 absolute right-0 top-11 z-40 w-64 overflow-hidden rounded-lg border shadow-2xl"
+      className="absolute top-11 right-0 z-40 w-64 overflow-hidden rounded-lg border border-hairline bg-surface-1 shadow-2xl"
     >
-      <div className="border-hairline border-b px-3 py-2.5">
-        <div className="text-ink-subtle text-xs font-medium uppercase tracking-[0.06em]">
+      <div className="border-b border-hairline px-3 py-2.5">
+        <div className="text-xs font-medium tracking-[0.06em] text-ink-subtle uppercase">
           Connected
         </div>
-        <code className="mt-1 block break-all font-mono text-xs">{address}</code>
+        <code className="mt-1 block font-mono text-xs break-all">
+          {address}
+        </code>
       </div>
       <div className="p-1">
         <MenuItem onClick={copy}>
@@ -370,7 +451,7 @@ function WalletMenu({
           target="_blank"
           rel="noreferrer"
           onClick={onClose}
-          className="hover:bg-surface-2 flex items-center gap-2.5 rounded-md px-2.5 py-2 text-base transition"
+          className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-base transition hover:bg-surface-2"
         >
           <span>🔍</span>
           <span>open in explorer</span>
@@ -402,8 +483,9 @@ function MenuItem({
   return (
     <button
       onClick={onClick}
-      className={`hover:bg-surface-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-base transition ${tone === "danger" ? "text-red-400 hover:text-red-300" : ""
-        }`}
+      className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-base transition hover:bg-surface-2 ${
+        tone === "danger" ? "text-red-400 hover:text-red-300" : ""
+      }`}
     >
       {children}
     </button>
@@ -419,7 +501,7 @@ function MenuItem({
 async function requestDeck(
   oracleId: string,
   reference: bigint,
-  sender?: string,
+  sender?: string
 ): Promise<{ cards: DeckCard[]; hash: Uint8Array }> {
   try {
     // The server discovers live oracles itself and auto-sizes the deck to
@@ -438,18 +520,18 @@ async function requestDeck(
     })
     if (!res.ok) throw new Error(`deckmaster ${res.status}`)
     const body = (await res.json()) as {
-      cards: Array<{ oracle_id: string; strike: string }>
+      cards: Array<{ expiry_market_id: string; strike: string }>
       hash: string
       deckSize?: number
       liveOracleCount?: number
     }
     const cards: DeckCard[] = body.cards.map((c) => ({
-      oracleId: c.oracle_id,
+      expiryMarketId: c.expiry_market_id,
       strike: BigInt(c.strike),
     }))
     const hashHex = body.hash.replace(/^0x/, "")
     const hash = new Uint8Array(
-      hashHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)),
+      hashHex.match(/.{2}/g)!.map((b) => parseInt(b, 16))
     )
     return { cards, hash }
   } catch {
@@ -457,7 +539,7 @@ async function requestDeck(
     // reveal must run from this tab via buildRevealDeckTx (not implemented
     // in the lobby UI — Phase 3.5).
     const cards: DeckCard[] = oracleStrikes(reference).map((strike) => ({
-      oracleId,
+      expiryMarketId: oracleId,
       strike,
     }))
     const hash = await computeDeckHash(cards)
@@ -465,7 +547,11 @@ async function requestDeck(
   }
 }
 
-function speedMultiplier(ms: number): { label: string; mult: number; tone: "good" | "ok" | "warn" } {
+function speedMultiplier(ms: number): {
+  label: string
+  mult: number
+  tone: "good" | "ok" | "warn"
+} {
   if (ms <= SPEED_FAST_MAX_MS) return { label: "1.5×", mult: 1.5, tone: "good" }
   if (ms <= SPEED_NORMAL_MAX_MS) return { label: "1.0×", mult: 1.0, tone: "ok" }
   return { label: "0.75×", mult: 0.75, tone: "warn" }
@@ -488,13 +574,13 @@ export default function App() {
   const [selectedDuel, setSelectedDuel] = useState<string | null>(null)
 
   return (
-    <div className="bg-background min-h-screen">
+    <div className="min-h-screen bg-background">
       <header className="mx-auto flex max-w-3xl items-center justify-between p-4 sm:p-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-[-0.03em]">
             <span className="text-primary">flicky</span>
           </h1>
-          <p className="text-ink-subtle text-sm tracking-[-0.005em]">
+          <p className="text-sm tracking-[-0.005em] text-ink-subtle">
             swipe BTC binaries · PvP on Sui testnet
           </p>
         </div>
@@ -526,7 +612,7 @@ export default function App() {
 function ConnectPrompt() {
   return (
     <Card className="border-dashed">
-      <CardContent className="text-muted-foreground py-12 text-center text-base">
+      <CardContent className="py-12 text-center text-base text-muted-foreground">
         Connect a Sui testnet wallet to play.
       </CardContent>
     </Card>
@@ -535,9 +621,11 @@ function ConnectPrompt() {
 
 function Footer() {
   return (
-    <p className="text-muted-foreground pt-4 text-center text-sm">
+    <p className="pt-4 text-center text-sm text-muted-foreground">
       package <code>{shortId(CONFIG.packageId)}</code>{" "}
-      <ExplorerLink href={objectUrl(CONFIG.packageId)}>flicky on chain</ExplorerLink>
+      <ExplorerLink href={objectUrl(CONFIG.packageId)}>
+        flicky on chain
+      </ExplorerLink>
     </p>
   )
 }
@@ -545,19 +633,17 @@ function Footer() {
 // ─── oracle strip (always visible) ──────────────────────────────────────────
 
 function useOracle() {
-  const client = useCurrentClient()
-  const oracleIdQuery = useQuery({
-    queryKey: ["oracle-id"],
-    queryFn: () => findLatestOracleSvi(client),
-    staleTime: 60_000,
-  })
-  const oracleQuery = useQuery({
-    queryKey: ["oracle", oracleIdQuery.data],
-    queryFn: () => fetchOracleSvi(client, oracleIdQuery.data!),
-    enabled: !!oracleIdQuery.data,
+  // Server-driven market discovery (6-24 has no client-readable OracleSVI
+  // equivalent) — reads the flicky server's indexer-backed `/oracle/list`,
+  // nearest-expiry-first, and just takes the first live BTC market.
+  const marketsQuery = useQuery({
+    queryKey: ["oracle-markets"],
+    queryFn: fetchOracleList,
+    staleTime: 5_000,
     refetchInterval: 5_000,
   })
-  return { oracleId: oracleIdQuery.data, oracle: oracleQuery.data }
+  const oracle = marketsQuery.data?.[0]
+  return { oracleId: oracle?.id, oracle }
 }
 
 function OracleStrip() {
@@ -565,10 +651,10 @@ function OracleStrip() {
   const now = useNow(5_000)
 
   return (
-    <Card className="bg-surface-1 border-hairline">
+    <Card className="border-hairline bg-surface-1">
       <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4 text-base">
         <div className="flex items-baseline gap-2">
-          <span className="text-ink-subtle text-xs font-medium uppercase tracking-[0.06em]">
+          <span className="text-xs font-medium tracking-[0.06em] text-ink-subtle uppercase">
             BTC
           </span>
           {oracle ? (
@@ -576,12 +662,12 @@ function OracleStrip() {
               <span className="text-xl font-semibold tabular-nums">
                 {fmtUsd(oracle.spot)}
               </span>
-              <span className="text-muted-foreground text-sm">
+              <span className="text-sm text-muted-foreground">
                 fwd {fmtUsd(oracle.forward)}
               </span>
             </>
           ) : (
-            <span className="text-muted-foreground text-sm">connecting…</span>
+            <span className="text-sm text-muted-foreground">connecting…</span>
           )}
         </div>
         <div className="flex items-center gap-3 text-sm">
@@ -595,7 +681,9 @@ function OracleStrip() {
             </Badge>
           )}
           {oracleId && (
-            <ExplorerLink href={objectUrl(oracleId)}>{shortId(oracleId)}</ExplorerLink>
+            <ExplorerLink href={objectUrl(oracleId)}>
+              {shortId(oracleId)}
+            </ExplorerLink>
           )}
         </div>
       </CardContent>
@@ -603,7 +691,7 @@ function OracleStrip() {
   )
 }
 
-function expiresIn(o: OracleSviInfo, now: number): string {
+function expiresIn(o: OracleView, now: number): string {
   const ms = Number(o.expiry) - now
   if (ms <= 0) return "expired"
   const min = Math.floor(ms / 60_000)
@@ -634,8 +722,8 @@ function Lobby({
     refetchInterval: 6_000,
   })
 
-  // Probe the player's dUSDC wallet balance + PredictManager state up
-  // front, regardless of which tier is currently selected. The Predict
+  // Probe the player's dUSDC wallet balance + Predict AccountWrapper state
+  // up front, regardless of which tier is currently selected. The Predict
   // setup checklist is surfaced as a persistent panel in the Lobby so
   // the player can fund ahead of switching to Staked — discovery should
   // not be gated behind a tier toggle.
@@ -644,22 +732,13 @@ function Lobby({
     queryFn: () => getWalletDusdcBalance(client, address),
     refetchInterval: 8_000,
   })
-  const managerQuery = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
-    refetchInterval: 12_000,
-  })
-  const managerBalanceQuery = useQuery({
-    queryKey: ["predict-manager-balance", managerQuery.data?.id],
-    queryFn: () =>
-      managerQuery.data
-        ? getManagerDusdcBalance(client, managerQuery.data.id)
-        : Promise.resolve(0n),
-    enabled: !!managerQuery.data,
+  const accountQuery = useQuery({
+    queryKey: ["predict-account", address],
+    queryFn: () => fetchAccountState(address),
     refetchInterval: 10_000,
   })
   const stakedReady =
-    !!managerQuery.data && (managerBalanceQuery.data ?? 0n) > 0n
+    !!accountQuery.data?.wrapperId && (accountQuery.data?.balance ?? 0n) > 0n
 
   async function createDuel(stake: StakeTier) {
     if (!oracleId || !oracle) return
@@ -676,13 +755,13 @@ function Lobby({
       const tx =
         stake.coinType === DEEPBOOK.dusdcType
           ? await buildCreateDuelDusdcTx(
-            client,
-            address,
-            deck.hash,
-            stake.amount,
-            stake.coinType,
-            deckSize,
-          )
+              client,
+              address,
+              deck.hash,
+              stake.amount,
+              stake.coinType,
+              deckSize
+            )
           : buildCreateDuelTx(deck.hash, stake.amount, stake.coinType, deckSize)
 
       const res = await signAndExec({ transaction: tx })
@@ -709,18 +788,24 @@ function Lobby({
         </CardHeader>
         <CardContent className="space-y-3">
           {/* Tier toggle */}
-          <div className="bg-muted inline-flex rounded-md p-0.5 text-sm">
+          <div className="inline-flex rounded-md bg-muted p-0.5 text-sm">
             <button
               onClick={() => setTier("free")}
-              className={`rounded px-3 py-1 transition ${tier === "free" ? "bg-background shadow-sm" : "text-muted-foreground"
-                }`}
+              className={`rounded px-3 py-1 transition ${
+                tier === "free"
+                  ? "bg-background shadow-sm"
+                  : "text-muted-foreground"
+              }`}
             >
               Free · SUI
             </button>
             <button
               onClick={() => setTier("staked")}
-              className={`rounded px-3 py-1 transition ${tier === "staked" ? "bg-background shadow-sm" : "text-muted-foreground"
-                }`}
+              className={`rounded px-3 py-1 transition ${
+                tier === "staked"
+                  ? "bg-background shadow-sm"
+                  : "text-muted-foreground"
+              }`}
             >
               Staked · dUSDC
             </button>
@@ -747,15 +832,15 @@ function Lobby({
                   disabled={isPending || busy || !oracle || blocked}
                   onClick={() => createDuel(t)}
                   title={reason ?? undefined}
-                  className="border-input bg-background hover:border-primary hover:bg-primary/5 group flex flex-col rounded-lg border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-50 sm:p-4"
+                  className="group flex flex-col rounded-lg border border-input bg-background p-3 text-left transition hover:border-primary hover:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-50 sm:p-4"
                 >
-                  <span className="text-muted-foreground text-sm tracking-wide uppercase">
+                  <span className="text-sm tracking-wide text-muted-foreground uppercase">
                     {t.label}
                   </span>
                   <span className="mt-1 text-base font-semibold sm:text-lg">
                     {t.blurb}
                   </span>
-                  <span className="text-muted-foreground mt-2 text-sm">
+                  <span className="mt-2 text-sm text-muted-foreground">
                     {reason ? (
                       <span className="text-amber-500">{reason}</span>
                     ) : (
@@ -771,9 +856,11 @@ function Lobby({
               {err}
             </p>
           )}
-          <p className="text-muted-foreground text-sm">
+          <p className="text-sm text-muted-foreground">
             your wallet:{" "}
-            <ExplorerLink href={addressUrl(address)}>{shortId(address)}</ExplorerLink>
+            <ExplorerLink href={addressUrl(address)}>
+              {shortId(address)}
+            </ExplorerLink>
           </p>
         </CardContent>
       </Card>
@@ -784,10 +871,12 @@ function Lobby({
         </CardHeader>
         <CardContent className="space-y-2">
           {duelsQuery.isLoading && (
-            <p className="text-muted-foreground text-base">loading…</p>
+            <p className="text-base text-muted-foreground">loading…</p>
           )}
           {duelsQuery.data?.length === 0 && (
-            <p className="text-muted-foreground text-base">no duels yet. be the first.</p>
+            <p className="text-base text-muted-foreground">
+              no duels yet. be the first.
+            </p>
           )}
           {duelsQuery.data?.map((id) => (
             <DuelSummary
@@ -815,9 +904,9 @@ const DEFAULT_DEPOSIT_DUSDC = 1n
 
 /**
  * Staked-tier onboarding checklist. Surfaces the two prerequisites for
- * real `predict::mint` swipes:
- *   ① PredictManager exists (one-time `predict::create_manager`)
- *   ② Manager holds enough dUSDC to mint positions
+ * real minted swipes:
+ *   ① Predict AccountWrapper exists (one-time `account_registry::new`)
+ *   ② Account holds enough dUSDC to mint positions
  *
  * Both steps emit transactions through the sponsor-or-fallback path so
  * players who only hold dUSDC can still onboard without SUI for gas.
@@ -849,18 +938,9 @@ function DepositPanel({
     return () => clearTimeout(t)
   }, [toast])
 
-  const managerQuery = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
-    refetchInterval: 12_000,
-  })
-  const managerBalanceQuery = useQuery({
-    queryKey: ["predict-manager-balance", managerQuery.data?.id],
-    queryFn: () =>
-      managerQuery.data
-        ? getManagerDusdcBalance(client, managerQuery.data.id)
-        : Promise.resolve(0n),
-    enabled: !!managerQuery.data,
+  const accountQuery = useQuery({
+    queryKey: ["predict-account", address],
+    queryFn: () => fetchAccountState(address),
     refetchInterval: 10_000,
   })
 
@@ -874,37 +954,25 @@ function DepositPanel({
     }
   }
 
-  async function createManager() {
+  async function createAccount() {
     setBusy("create")
     setErr(null)
     setToast(null)
     try {
-      const res = await signAndExec({ transaction: buildCreateManagerTx() })
-      // Wait for indexing + read the tx's created objects so we can
-      // pre-populate the query cache with the new manager id instead of
-      // waiting for the next 12s refetch tick. UI updates within ~1s of
-      // tx finality.
-      const newManagerId = await waitForCreatedManagerId(client, res.digest)
-      if (newManagerId) {
-        // Persist to localStorage so F5 / next session doesn't pay the
-        // event-scan cost and so the UI shows the manager id immediately
-        // before any RPC roundtrip completes.
-        writeManagerCache(address, newManagerId)
-        queryClient.setQueryData(["predict-manager", address], {
-          id: newManagerId,
-        })
-      } else {
-        // Fallback if the digest's objectChanges didn't surface — refetch
-        // forces an immediate event-scan rather than waiting for the
-        // polling interval.
-        await queryClient.refetchQueries({
-          queryKey: ["predict-manager", address],
-        })
-      }
+      const res = await signAndExec({ transaction: buildCreateAccountTx() })
+      // The wrapper address is deterministic but needs the tx to land
+      // before the server can resolve it — wait, then pre-populate the
+      // query cache so the UI updates within ~1s of tx finality instead
+      // of waiting for the next 10s refetch tick.
+      const wrapperId = await waitForCreatedWrapper(client, res.digest, address)
+      queryClient.setQueryData(["predict-account", address], {
+        wrapperId,
+        balance: 0n,
+      })
       setToast({
         kind: "create",
         digest: res.digest,
-        label: "PredictManager created",
+        label: "Predict account created",
       })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -914,7 +982,7 @@ function DepositPanel({
   }
 
   async function deposit() {
-    if (!managerQuery.data) return
+    if (!accountQuery.data?.wrapperId) return
     const dec = Number(depositAmount)
     if (!Number.isFinite(dec) || dec <= 0) {
       setErr("enter a positive dUSDC amount")
@@ -929,18 +997,13 @@ function DepositPanel({
     setErr(null)
     setToast(null)
     try {
-      const tx = await buildDepositDusdcTx(
-        client,
-        address,
-        managerQuery.data.id,
-        micro,
-      )
+      const tx = buildDepositDusdcTx(accountQuery.data.wrapperId, micro)
       const res = await signAndExec({ transaction: tx })
       await client.core.waitForTransaction({ digest: res.digest })
       // Force immediate refetch instead of waiting for the polling tick.
       await Promise.all([
         queryClient.refetchQueries({
-          queryKey: ["predict-manager-balance", managerQuery.data.id],
+          queryKey: ["predict-account", address],
         }),
         queryClient.refetchQueries({
           queryKey: ["dusdc-balance", address],
@@ -958,48 +1021,48 @@ function DepositPanel({
     }
   }
 
-  const hasManager = !!managerQuery.data
-  const managerBalance = managerBalanceQuery.data ?? 0n
-  const hasManagerBalance = managerBalance > 0n
+  const hasAccount = !!accountQuery.data?.wrapperId
+  const accountBalance = accountQuery.data?.balance ?? 0n
+  const hasAccountBalance = accountBalance > 0n
 
   return (
-    <div className="border-muted/60 bg-muted/20 space-y-3 rounded-md border border-dashed p-3 text-sm">
+    <div className="space-y-3 rounded-md border border-dashed border-muted/60 bg-muted/20 p-3 text-sm">
       <div className="flex items-center justify-between">
-        <span className="text-muted-foreground tracking-wide uppercase">
-          {hasManager ? "Predict wallet" : "Predict setup"}
+        <span className="tracking-wide text-muted-foreground uppercase">
+          {hasAccount ? "Predict wallet" : "Predict setup"}
         </span>
-        <span className="text-muted-foreground text-xs">
-          {hasManager ? "ready for Staked duels" : "two one-time steps"}
+        <span className="text-xs text-muted-foreground">
+          {hasAccount ? "ready for Staked duels" : "two one-time steps"}
         </span>
       </div>
 
-      {/* ─── Step ① PredictManager ─── */}
+      {/* ─── Step ① Predict AccountWrapper ─── */}
       <ChecklistRow
-        done={hasManager}
+        done={hasAccount}
         index={1}
-        title="PredictManager"
+        title="Predict account"
         detail={
-          hasManager ? (
+          hasAccount ? (
             <a
-              href={objectUrl(managerQuery.data!.id)}
+              href={objectUrl(accountQuery.data!.wrapperId!)}
               target="_blank"
               rel="noreferrer"
               className="font-mono underline-offset-2 hover:underline"
-              title={managerQuery.data!.id}
+              title={accountQuery.data!.wrapperId!}
             >
-              {shortId(managerQuery.data!.id)} ↗
+              {shortId(accountQuery.data!.wrapperId!)} ↗
             </a>
           ) : (
-            "one-time `predict::create_manager` — gasless via sponsor"
+            "one-time `account_registry::new` — gasless via sponsor"
           )
         }
         action={
-          !hasManager && (
+          !hasAccount && (
             <Button
               size="sm"
               variant="default"
               disabled={busy !== null}
-              onClick={createManager}
+              onClick={createAccount}
               className="h-7 px-2 text-sm"
             >
               {busy === "create" ? "creating…" : "Create"}
@@ -1008,20 +1071,20 @@ function DepositPanel({
         }
       />
 
-      {/* ─── Step ② Manager balance ─── */}
+      {/* ─── Step ② Account balance ─── */}
       <ChecklistRow
-        done={hasManagerBalance}
+        done={hasAccountBalance}
         index={2}
-        title="dUSDC in manager"
+        title="dUSDC in account"
         detail={
-          hasManager ? (
-            <span className="font-mono">{fmtDusdc(managerBalance)}</span>
+          hasAccount ? (
+            <span className="font-mono">{fmtDusdc(accountBalance)}</span>
           ) : (
             <span className="opacity-60">unlocked after step ①</span>
           )
         }
         action={
-          hasManager && (
+          hasAccount && (
             <div className="flex items-center gap-1">
               <input
                 type="number"
@@ -1030,13 +1093,13 @@ function DepositPanel({
                 value={depositAmount}
                 onChange={(e) => setDepositAmount(e.target.value)}
                 disabled={busy !== null}
-                className="bg-background h-7 w-16 rounded border px-2 text-right font-mono text-sm"
+                className="h-7 w-16 rounded border bg-background px-2 text-right font-mono text-sm"
                 aria-label="dUSDC amount to deposit"
               />
               <Button
                 size="sm"
-                variant={hasManagerBalance ? "outline" : "default"}
-                disabled={busy !== null || !hasManager}
+                variant={hasAccountBalance ? "outline" : "default"}
+                disabled={busy !== null || !hasAccount}
                 onClick={deposit}
                 className="h-7 px-2 text-sm"
               >
@@ -1069,13 +1132,13 @@ function DepositPanel({
         <div className="flex items-center justify-between gap-2">
           <span className="text-muted-foreground">
             wallet dUSDC:{" "}
-            <strong className="text-foreground font-mono">
+            <strong className="font-mono text-foreground">
               {walletBalance !== undefined ? fmtDusdc(walletBalance) : "…"}
             </strong>
           </span>
         </div>
         <div className="mt-1 flex items-center gap-2">
-          <code className="bg-background flex-1 truncate rounded border px-2 py-1 font-mono text-xs">
+          <code className="flex-1 truncate rounded border bg-background px-2 py-1 font-mono text-xs">
             {address}
           </code>
           <Button
@@ -1087,14 +1150,12 @@ function DepositPanel({
             {copied ? "copied!" : "copy"}
           </Button>
         </div>
-        <p className="text-muted-foreground mt-1 text-xs">
+        <p className="mt-1 text-xs text-muted-foreground">
           dUSDC has no testnet faucet — receive from another wallet that has
-          some. Default deposit ({Number(DEFAULT_DEPOSIT_DUSDC)} dUSDC) covers
-          ~{Number(DEFAULT_DEPOSIT_DUSDC) * 10} swipes.
+          some. Default deposit ({Number(DEFAULT_DEPOSIT_DUSDC)} dUSDC) covers ~
+          {Number(DEFAULT_DEPOSIT_DUSDC) * 10} swipes.
         </p>
-        {err && (
-          <p className="text-red-500 mt-1 text-xs break-all">{err}</p>
-        )}
+        {err && <p className="mt-1 text-xs break-all text-red-500">{err}</p>}
       </div>
     </div>
   )
@@ -1127,10 +1188,8 @@ function ChecklistRow({
           {done ? "✓" : index}
         </span>
         <div className="min-w-0">
-          <div className="text-foreground font-medium">{title}</div>
-          <div className="text-muted-foreground truncate text-xs">
-            {detail}
-          </div>
+          <div className="font-medium text-foreground">{title}</div>
+          <div className="truncate text-xs text-muted-foreground">{detail}</div>
         </div>
       </div>
       {action}
@@ -1156,7 +1215,10 @@ function DuelSummary({
   if (!d) return null
 
   const mine = d.creator === address || d.challenger === address
-  const statusColor: Record<typeof d.status, "default" | "secondary" | "outline"> = {
+  const statusColor: Record<
+    typeof d.status,
+    "default" | "secondary" | "outline"
+  > = {
     PENDING: "outline",
     ACTIVE: "default",
     COMPLETE: "secondary",
@@ -1164,7 +1226,7 @@ function DuelSummary({
   return (
     <button
       onClick={onOpen}
-      className="hover:bg-muted/50 flex w-full items-center justify-between rounded p-2 text-left transition"
+      className="flex w-full items-center justify-between rounded p-2 text-left transition hover:bg-muted/50"
     >
       <div className="text-base">
         <div className="flex items-center gap-2">
@@ -1172,12 +1234,12 @@ function DuelSummary({
           <Badge variant={statusColor[d.status]}>{d.status}</Badge>
           {mine && <Badge variant="outline">yours</Badge>}
         </div>
-        <div className="text-muted-foreground text-sm">
+        <div className="text-sm text-muted-foreground">
           pot {fmtStake(d.p0Stake + d.p1Stake, d.stakeCoinType)} · settled{" "}
-          {d.settledCount.toString()}/5
+          {d.settledCount.toString()}/{Number(d.deckSize)}
         </div>
       </div>
-      <span className="text-muted-foreground text-sm">→</span>
+      <span className="text-sm text-muted-foreground">→</span>
     </button>
   )
 }
@@ -1208,18 +1270,27 @@ function DuelView({
         <div className="flex items-center justify-between">
           <button
             onClick={onBack}
-            className="text-muted-foreground hover:text-foreground text-base"
+            className="text-base text-muted-foreground hover:text-foreground"
           >
             ← lobby
           </button>
-          <ExplorerLink href={objectUrl(duelId)}>{shortId(duelId)}</ExplorerLink>
+          <ExplorerLink href={objectUrl(duelId)}>
+            {shortId(duelId)}
+          </ExplorerLink>
         </div>
       </CardHeader>
       <CardContent>
         {!d ? (
-          <p className="text-muted-foreground py-12 text-center text-base">loading…</p>
+          <p className="py-12 text-center text-base text-muted-foreground">
+            loading…
+          </p>
         ) : (
-          <PhaseDispatcher duel={d} address={address} duelId={duelId} oracle={oracle} />
+          <PhaseDispatcher
+            duel={d}
+            address={address}
+            duelId={duelId}
+            oracle={oracle}
+          />
         )}
       </CardContent>
     </Card>
@@ -1235,16 +1306,19 @@ function PhaseDispatcher({
   duel: DuelState
   address: string
   duelId: string
-  oracle: OracleSviInfo | undefined
+  oracle: OracleView | undefined
 }) {
   const isCreator = duel.creator === address
   const isChallenger = duel.challenger === address
   const isPlayer = isCreator || isChallenger
-  const myNextIdx = isCreator ? Number(duel.p0NextCardIdx) : Number(duel.p1NextCardIdx)
+  const myNextIdx = isCreator
+    ? Number(duel.p0NextCardIdx)
+    : Number(duel.p1NextCardIdx)
   const opponentNextIdx = isCreator
     ? Number(duel.p1NextCardIdx)
     : Number(duel.p0NextCardIdx)
-  const allSwiped = myNextIdx === 5 && opponentNextIdx === 5
+  const deckSize = Number(duel.deckSize)
+  const allSwiped = myNextIdx === deckSize && opponentNextIdx === deckSize
 
   if (duel.status === "COMPLETE") {
     return <ResultView duel={duel} address={address} />
@@ -1269,7 +1343,7 @@ function PhaseDispatcher({
       />
     )
   }
-  if (myNextIdx < 5) {
+  if (myNextIdx < deckSize) {
     return (
       <SwipingView
         duel={duel}
@@ -1282,10 +1356,22 @@ function PhaseDispatcher({
     )
   }
   if (!allSwiped) {
-    return <LockupView myNextIdx={myNextIdx} opponentNextIdx={opponentNextIdx} />
+    return (
+      <LockupView
+        myNextIdx={myNextIdx}
+        opponentNextIdx={opponentNextIdx}
+        deckSize={deckSize}
+      />
+    )
   }
   if (oracle && oracle.settlementPrice === null) {
-    return <LockupView myNextIdx={myNextIdx} opponentNextIdx={opponentNextIdx} />
+    return (
+      <LockupView
+        myNextIdx={myNextIdx}
+        opponentNextIdx={opponentNextIdx}
+        deckSize={deckSize}
+      />
+    )
   }
   return <SettlingView duel={duel} duelId={duelId} />
 }
@@ -1308,13 +1394,13 @@ function WaitingForOpponentView({
   return (
     <div className="space-y-4 py-8 text-center">
       <div className="flex justify-center">
-        <span className="border-primary inline-block h-12 w-12 animate-spin rounded-full border-4 border-t-transparent" />
+        <span className="inline-block h-12 w-12 animate-spin rounded-full border-4 border-primary border-t-transparent" />
       </div>
       <div className="space-y-1">
         <div className="text-lg font-semibold">matching…</div>
-        <div className="text-muted-foreground text-sm">{elapsed}s elapsed</div>
+        <div className="text-sm text-muted-foreground">{elapsed}s elapsed</div>
       </div>
-      <p className="text-muted-foreground text-base">
+      <p className="text-base text-muted-foreground">
         you staked{" "}
         <strong className="text-foreground">
           {fmtStake(duel.p0Stake, duel.stakeCoinType)}
@@ -1326,13 +1412,15 @@ function WaitingForOpponentView({
       </p>
       {showShareEscape && (
         <div className="space-y-1 pt-3">
-          <p className="text-muted-foreground text-sm">
+          <p className="text-sm text-muted-foreground">
             still no opponent. share manually:
           </p>
-          <code className="bg-muted block break-all rounded p-2 text-sm">{duelId}</code>
+          <code className="block rounded bg-muted p-2 text-sm break-all">
+            {duelId}
+          </code>
         </div>
       )}
-      <p className="text-muted-foreground pt-2 text-sm">
+      <p className="pt-2 text-sm text-muted-foreground">
         pot when full {fmtStake(duel.p0Stake * 2n, duel.stakeCoinType)}
       </p>
     </div>
@@ -1363,7 +1451,7 @@ function JoinView({
     queryKey: ["deckmaster-reveal", duel.deckHashHex],
     queryFn: async () => {
       const res = await fetch(
-        `${DECKMASTER_BASE_URL}/deckmaster/reveal?hash=${encodeURIComponent(duel.deckHashHex)}`,
+        `${DECKMASTER_BASE_URL}/deckmaster/reveal?hash=${encodeURIComponent(duel.deckHashHex)}`
       )
       if (res.status === 404) return { available: false as const }
       if (!res.ok) throw new Error(`reveal lookup failed: ${res.status}`)
@@ -1374,43 +1462,35 @@ function JoinView({
   })
   const plaintextMissing = plaintextQuery.data?.available === false
 
-  // PredictManager gate for dUSDC duels — every staked swipe bundles
-  // `predict::mint` which requires the joiner's manager to exist + hold
-  // dUSDC. Block the join here so the player isn't trapped mid-duel
-  // unable to swipe.
-  const managerQuery = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
+  // Predict AccountWrapper gate for dUSDC duels — every staked swipe
+  // bundles `expiry_market::mint_exact_quantity` which requires the
+  // joiner's account to exist + hold dUSDC. Block the join here so the
+  // player isn't trapped mid-duel unable to swipe.
+  const accountQuery = useQuery({
+    queryKey: ["predict-account", address],
+    queryFn: () => fetchAccountState(address),
     enabled: isDusdc,
     refetchInterval: 12_000,
   })
-  const managerBalanceQuery = useQuery({
-    queryKey: ["predict-manager-balance", managerQuery.data?.id],
-    queryFn: () =>
-      managerQuery.data
-        ? getManagerDusdcBalance(client, managerQuery.data.id)
-        : Promise.resolve(0n),
-    enabled: isDusdc && !!managerQuery.data,
-    refetchInterval: 10_000,
-  })
-  const needsManager = isDusdc && !managerQuery.data && !managerQuery.isLoading
+  const needsManager =
+    isDusdc && !accountQuery.data?.wrapperId && !accountQuery.isLoading
   const needsDeposit =
     isDusdc &&
-    !!managerQuery.data &&
-    (managerBalanceQuery.data ?? 0n) === 0n &&
-    !managerBalanceQuery.isLoading
+    !!accountQuery.data?.wrapperId &&
+    (accountQuery.data?.balance ?? 0n) === 0n &&
+    !accountQuery.isLoading
 
   async function join() {
     setErr(null)
     try {
       const tx = isDusdc
         ? await buildJoinDuelDusdcTx(
-          client,
-          address,
-          duelId,
-          duel.p0Stake,
-          duel.stakeCoinType,
-        )
+            client,
+            address,
+            duelId,
+            duel.p0Stake,
+            duel.stakeCoinType
+          )
         : buildJoinDuelTx(duelId, duel.p0Stake, duel.stakeCoinType)
       await signAndExec({ transaction: tx })
       queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
@@ -1431,16 +1511,16 @@ function JoinView({
   return (
     <div className="space-y-3 py-4 text-center">
       <Badge variant="outline">open duel</Badge>
-      <p className="text-muted-foreground text-base">
+      <p className="text-base text-muted-foreground">
         creator staked <strong>{stake}</strong>. match it to start swiping.
       </p>
       {isDusdc && stakedBlocked && (
-        <div className="bg-amber-500/5 border-amber-500/30 text-amber-600 rounded border-l-2 p-2 text-left text-sm">
+        <div className="rounded border-l-2 border-amber-500/30 bg-amber-500/5 p-2 text-left text-sm text-amber-600">
           <strong>Staked-tier setup required</strong>
           <div className="mt-1 text-xs opacity-90">
             {needsManager
-              ? "You don't have a PredictManager yet — every staked swipe bundles `predict::mint` against it. Go back to the lobby and complete step ① of the Staked-tier setup."
-              : "Your PredictManager has 0 dUSDC. Deposit some via the lobby's Staked-tier setup so each swipe can mint a Predict position."}
+              ? "You don't have a Predict account yet — every staked swipe bundles a real mint against it. Go back to the lobby and complete step ① of the Staked-tier setup."
+              : "Your Predict account has 0 dUSDC. Deposit some via the lobby's Staked-tier setup so each swipe can mint a Predict position."}
           </div>
         </div>
       )}
@@ -1458,7 +1538,7 @@ function JoinView({
         {blockReason ?? `join · stake ${stake}`}
       </Button>
       {plaintextMissing && (
-        <p className="text-muted-foreground text-sm">
+        <p className="text-sm text-muted-foreground">
           deckmaster lost this duel's plaintext (server restart). ask the
           creator to re-create the duel.
         </p>
@@ -1487,18 +1567,17 @@ function SwipingView({
 }: {
   duel: DuelState
   duelId: string
-  oracle: OracleSviInfo | undefined
+  oracle: OracleView | undefined
   myNextIdx: number
   isCreator: boolean
   address: string
 }) {
-  const client = useCurrentClient()
   const { mutateAsync: signAndExec, isPending } = useFlickySign()
   const queryClient = useQueryClient()
   const now = useNow(250)
   const card = duel.cards[myNextIdx]
   // Contract no longer tracks per-player "last swipe ms" — the new design
-  // bounds the whole match with a single 10-min `SWIPE_WINDOW_MS` from
+  // bounds the whole match with a single 5-min `SWIPE_WINDOW_MS` from
   // `started_at_ms`. Per-card pacing UI uses join-time as the baseline.
   const baselineMs = Number(duel.startedAtMs)
   const elapsedMs = Math.max(0, now - baselineMs)
@@ -1506,34 +1585,26 @@ function SwipingView({
   const speed = speedMultiplier(elapsedMs)
   const [err, setErr] = useState<string | null>(null)
 
-  // For dUSDC duels, look up the player's PredictManager. Per PRD
+  // For dUSDC duels, look up the player's Predict AccountWrapper. Per PRD
   // §Match-anatomy step 2 every staked swipe is an atomic PTB combining
-  // `predict::mint` + `duel::record_swipe`, so the manager (and its
-  // dUSDC balance) is a hard prerequisite — the Lobby / JoinView gates
-  // enforce that, and SwipingView refuses to swipe if either ever falls
-  // back to null (defence in depth).
+  // `expiry_market::mint_exact_quantity` + `duel::record_swipe`, so the
+  // account (and its dUSDC balance) is a hard prerequisite — the Lobby /
+  // JoinView gates enforce that, and SwipingView refuses to swipe if
+  // either ever falls back to null (defence in depth).
   const isDusdc = duel.stakeCoinType === DEEPBOOK.dusdcType
-  const managerQuery = useQuery({
-    queryKey: ["predict-manager", address],
-    queryFn: () => findPredictManager(client, address),
+  const accountQuery = useQuery({
+    queryKey: ["predict-account", address],
+    queryFn: () => fetchAccountState(address),
     enabled: isDusdc,
-    staleTime: 30_000,
-  })
-  const managerBalanceQuery = useQuery({
-    queryKey: ["predict-manager-balance", managerQuery.data?.id],
-    queryFn: () =>
-      managerQuery.data
-        ? getManagerDusdcBalance(client, managerQuery.data.id)
-        : Promise.resolve(0n),
-    enabled: isDusdc && !!managerQuery.data,
     staleTime: 10_000,
   })
   // Quantity to mint per swipe — small relative to the duel stake so the
-  // manager doesn't drain across 5 cards. 10% of stake / 5 = 2% per card.
+  // account doesn't drain across 5 cards. 10% of stake / 5 = 2% per card.
   const mintQuantity = (duel.p0Stake * 2n) / 100n
   const managerReady =
     !isDusdc ||
-    (!!managerQuery.data && (managerBalanceQuery.data ?? 0n) >= mintQuantity)
+    (!!accountQuery.data?.wrapperId &&
+      (accountQuery.data?.balance ?? 0n) >= mintQuantity)
 
   // ── drag state ────────────────────────────────────────────────────────
   const cardRef = useRef<HTMLDivElement>(null)
@@ -1557,53 +1628,50 @@ function SwipingView({
       try {
         let tx
         if (isDusdc) {
-          // Hard requirement: dUSDC duel ⇒ manager + balance ⇒ bundled
+          // Hard requirement: dUSDC duel ⇒ account + balance ⇒ bundled
           // mint. The Lobby + JoinView gates make this the steady-state
-          // truth; this branch only fires if state drifted (e.g. manager
-          // withdrew all dUSDC mid-duel).
-          if (!managerQuery.data) {
-            throw new Error("PredictManager missing — return to lobby to create one")
-          }
-          if ((managerBalanceQuery.data ?? 0n) < mintQuantity) {
+          // truth; this branch only fires if state drifted (e.g. the
+          // account withdrew all dUSDC mid-duel).
+          if (!accountQuery.data?.wrapperId) {
             throw new Error(
-              `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC.`,
+              "Predict account missing — return to lobby to create one"
             )
           }
-          if (!oracle) {
-            throw new Error("Oracle not loaded")
+          if ((accountQuery.data?.balance ?? 0n) < mintQuantity) {
+            throw new Error(
+              `Account balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC.`
+            )
           }
-          // Premium + p_swiped are snapshotted on-chain by the contract
-          // (via predict::get_trade_amounts inside record_swipe) — the FE
-          // only supplies the mint quantity.
+          // tick_size is a fixed market parameter (not a quote) — resolved
+          // from the predict indexer, needed to derive the (lower_tick,
+          // higher_tick] pair for the mint.
+          const tickSize = await fetchMarketTickSize(card.expiryMarketId)
           tx = buildStakedSwipeTx({
             duelId,
-            oracleSviId: card.oracleId,
-            managerId: managerQuery.data.id,
-            oracleExpiry: oracle.expiry,
+            wrapperId: accountQuery.data.wrapperId,
+            marketId: card.expiryMarketId,
             strike: card.strike,
+            tickSize,
+            cardIdx: myNextIdx,
             isUp,
             quantity: mintQuantity,
-            cardIdx: myNextIdx,
+            stakeCoinType: duel.stakeCoinType,
           })
         } else {
-          // Legacy non-staked path (free/SUI duels) — PRD has
-          // replaced this with Practice Mode (server-only). The
-          // builder needs a manager + quantity for the new contract;
-          // this branch is effectively dead code in the staked-only world.
+          // Free/SUI duels don't touch Predict at all — no mint, no
+          // account, just the bare `record_swipe_free` call.
           tx = buildSwipeTx({
+            tier: "free",
             duelId,
-            managerId: managerQuery.data?.id ?? "0x0",
-            oracleId: card.oracleId,
             cardIdx: myNextIdx,
             isUp,
-            quantity: 1n,
             stakeCoinType: duel.stakeCoinType,
           })
         }
         await signAndExec({ transaction: tx })
         queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
         queryClient.invalidateQueries({
-          queryKey: ["predict-manager-balance", managerQuery.data?.id],
+          queryKey: ["predict-account", address],
         })
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e))
@@ -1612,18 +1680,17 @@ function SwipingView({
     },
     [
       duelId,
-      card.oracleId,
+      card.expiryMarketId,
       card.strike,
       myNextIdx,
       duel.stakeCoinType,
       isDusdc,
-      managerQuery.data,
-      managerBalanceQuery.data,
-      oracle,
+      accountQuery.data,
+      address,
       mintQuantity,
       signAndExec,
       queryClient,
-    ],
+    ]
   )
 
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
@@ -1662,9 +1729,13 @@ function SwipingView({
   const w = cardWidth.current || 320
   const rotate = (drag.x / (w / 2)) * DRAG_MAX_ROTATE_DEG
   const transform =
-    flyOff ?? (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
+    flyOff ??
+    (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
 
-  const overlayProgress = Math.min(1, Math.abs(drag.x) / (w * DRAG_COMMIT_FRACTION))
+  const overlayProgress = Math.min(
+    1,
+    Math.abs(drag.x) / (w * DRAG_COMMIT_FRACTION)
+  )
   const upOverlay = drag.x > 0 ? overlayProgress : 0
   const downOverlay = drag.x < 0 ? overlayProgress : 0
 
@@ -1682,11 +1753,12 @@ function SwipingView({
       {/* phase header */}
       <div className="flex items-center justify-between text-sm">
         <span className="text-muted-foreground">
-          card <strong className="text-foreground">{myNextIdx + 1}</strong>/5
+          card <strong className="text-foreground">{myNextIdx + 1}</strong>/
+          {Number(duel.deckSize)}
           {isDusdc && managerReady && (
             <span
-              className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs uppercase tracking-wide text-emerald-500"
-              title={`mints ${fmtDusdc(mintQuantity)} per swipe into your PredictManager`}
+              className="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs tracking-wide text-emerald-500 uppercase"
+              title={`mints ${fmtDusdc(mintQuantity)} per swipe against your Predict account`}
             >
               + predict mint
             </span>
@@ -1702,9 +1774,9 @@ function SwipingView({
           {timerSec}s
         </span>
       </div>
-      <div className="bg-muted h-1.5 overflow-hidden rounded-full">
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
         <div
-          className="bg-primary h-full transition-all duration-300"
+          className="h-full bg-primary transition-all duration-300"
           style={{ width: `${timerPct}%` }}
         />
       </div>
@@ -1717,8 +1789,9 @@ function SwipingView({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
-          className={`bg-surface-1 border-hairline relative cursor-grab overflow-hidden rounded-xl border p-6 shadow-[0_1px_0_0_var(--surface-3)_inset,0_24px_64px_-32px_rgba(0,0,0,0.6)] active:cursor-grabbing ${drag.active ? "" : "transition-transform duration-300 ease-out"
-            } ${drag.flying ? "pointer-events-none" : ""}`}
+          className={`relative cursor-grab overflow-hidden rounded-xl border border-hairline bg-surface-1 p-6 shadow-[0_1px_0_0_var(--surface-3)_inset,0_24px_64px_-32px_rgba(0,0,0,0.6)] active:cursor-grabbing ${
+            drag.active ? "" : "transition-transform duration-300 ease-out"
+          } ${drag.flying ? "pointer-events-none" : ""}`}
           style={{ transform, willChange: "transform" }}
         >
           {/* swipe-direction overlays — fade in with drag distance */}
@@ -1732,33 +1805,40 @@ function SwipingView({
           />
           {/* Direction badge that appears on whichever side is committing */}
           {drag.x > 20 && (
-            <div className="absolute right-4 top-4 rotate-12 rounded border-2 border-emerald-500 px-2 py-0.5 text-lg font-black uppercase text-emerald-500">
+            <div className="absolute top-4 right-4 rotate-12 rounded border-2 border-emerald-500 px-2 py-0.5 text-lg font-black text-emerald-500 uppercase">
               ↑ UP
             </div>
           )}
           {drag.x < -20 && (
-            <div className="absolute left-4 top-4 -rotate-12 rounded border-2 border-red-500 px-2 py-0.5 text-lg font-black uppercase text-red-500">
+            <div className="absolute top-4 left-4 -rotate-12 rounded border-2 border-red-500 px-2 py-0.5 text-lg font-black text-red-500 uppercase">
               ↓ DOWN
             </div>
           )}
 
-          <div className="text-ink-subtle text-xs font-medium uppercase tracking-[0.06em]">
+          <div className="text-xs font-medium tracking-[0.06em] text-ink-subtle uppercase">
             BTC at expiry
           </div>
-          <div className="mt-3 text-5xl font-semibold tabular-nums tracking-[-0.04em] sm:text-6xl">
+          <div className="mt-3 text-5xl font-semibold tracking-[-0.04em] tabular-nums sm:text-6xl">
             {fmtUsd(card.strike)}
           </div>
-          <div className="text-muted-foreground mt-2 text-base tracking-[-0.01em]">
+          <div className="mt-2 text-base tracking-[-0.01em] text-muted-foreground">
             will BTC settle{" "}
-            <strong className="text-foreground font-semibold">above</strong> this strike?
+            <strong className="font-semibold text-foreground">above</strong>{" "}
+            this strike?
           </div>
           {oracle && (
-            <div className="text-muted-foreground mt-4 flex justify-between border-t pt-3 text-sm">
+            <div className="mt-4 flex justify-between border-t pt-3 text-sm text-muted-foreground">
               <span>
-                now <strong className="text-foreground">{fmtUsd(oracle.spot)}</strong>
+                now{" "}
+                <strong className="text-foreground">
+                  {fmtUsd(oracle.spot)}
+                </strong>
               </span>
               <span>
-                fwd <strong className="text-foreground">{fmtUsd(oracle.forward)}</strong>
+                fwd{" "}
+                <strong className="text-foreground">
+                  {fmtUsd(oracle.forward)}
+                </strong>
               </span>
               <span>
                 {oracle.spot > card.strike ? (
@@ -1777,7 +1857,7 @@ function SwipingView({
 
         {/* hint shown only on card 1 before any drag */}
         {myNextIdx === 0 && drag.x === 0 && !drag.flying && (
-          <p className="text-muted-foreground mt-3 text-center text-sm">
+          <p className="mt-3 text-center text-sm text-muted-foreground">
             ← swipe DOWN · swipe UP →
           </p>
         )}
@@ -1797,7 +1877,7 @@ function SwipingView({
         >
           <div className="flex flex-col">
             <span>↓ DOWN</span>
-            <span className="text-muted-foreground text-sm font-normal">
+            <span className="text-sm font-normal text-muted-foreground">
               ≤ {fmtUsd(card.strike)}
             </span>
           </div>
@@ -1813,7 +1893,7 @@ function SwipingView({
         >
           <div className="flex flex-col">
             <span>↑ UP</span>
-            <span className="text-primary-foreground/80 text-sm font-normal">
+            <span className="text-sm font-normal text-primary-foreground/80">
               &gt; {fmtUsd(card.strike)}
             </span>
           </div>
@@ -1822,13 +1902,13 @@ function SwipingView({
 
       {isDusdc && !managerReady && (
         <p className="rounded border-l-2 border-amber-500 bg-amber-500/5 p-2 text-sm text-amber-600">
-          {managerQuery.data
-            ? `Manager balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC via the lobby setup.`
-            : "PredictManager not found. Return to the lobby and complete Staked-tier setup."}
+          {accountQuery.data?.wrapperId
+            ? `Account balance below per-card mint (${fmtDusdc(mintQuantity)}). Deposit more dUSDC via the lobby setup.`
+            : "Predict account not found. Return to the lobby and complete Staked-tier setup."}
         </p>
       )}
 
-      <p className="text-muted-foreground text-center text-sm">
+      <p className="text-center text-sm text-muted-foreground">
         decide fast: 0–5s = 1.5× · 5–20s = 1.0× · 20–60s = 0.75×
       </p>
 
@@ -1866,15 +1946,15 @@ function RevealingView({
     queryKey: ["deckmaster-reveal", deckHashHex],
     queryFn: async () => {
       const res = await fetch(
-        `${DECKMASTER_BASE_URL}/deckmaster/reveal?hash=${encodeURIComponent(deckHashHex)}`,
+        `${DECKMASTER_BASE_URL}/deckmaster/reveal?hash=${encodeURIComponent(deckHashHex)}`
       )
       if (res.status === 404) return null
       if (!res.ok) throw new Error(`reveal lookup failed: ${res.status}`)
       const body = (await res.json()) as {
-        cards: Array<{ oracle_id: string; strike: string }>
+        cards: Array<{ expiry_market_id: string; strike: string }>
       }
       return body.cards.map((c) => ({
-        oracleId: c.oracle_id,
+        expiryMarketId: c.expiry_market_id,
         strike: BigInt(c.strike),
       }))
     },
@@ -1901,16 +1981,18 @@ function RevealingView({
   return (
     <div className="space-y-4 py-8 text-center">
       <div className="flex justify-center">
-        <span className="border-primary inline-block h-10 w-10 animate-spin rounded-full border-4 border-t-transparent" />
+        <span className="inline-block h-10 w-10 animate-spin rounded-full border-4 border-primary border-t-transparent" />
       </div>
-      <p className="text-lg font-semibold tracking-[-0.01em]">revealing deck…</p>
-      <p className="text-muted-foreground text-base">
+      <p className="text-lg font-semibold tracking-[-0.01em]">
+        revealing deck…
+      </p>
+      <p className="text-base text-muted-foreground">
         the keeper pushes the plaintext on-chain once the challenger joins.
         usually clears within a few seconds.
       </p>
       {cards && (
         <div className="space-y-2 pt-2">
-          <p className="text-muted-foreground text-sm">
+          <p className="text-sm text-muted-foreground">
             keeper looks slow — you can reveal manually.
           </p>
           <Button onClick={manualReveal} disabled={isPending} size="sm">
@@ -1919,7 +2001,7 @@ function RevealingView({
         </div>
       )}
       {err && (
-        <p className="text-destructive text-sm break-all" role="alert">
+        <p className="text-sm break-all text-destructive" role="alert">
           {err}
         </p>
       )}
@@ -1930,11 +2012,13 @@ function RevealingView({
 function LockupView({
   myNextIdx,
   opponentNextIdx,
+  deckSize,
 }: {
   myNextIdx: number
   opponentNextIdx: number
+  deckSize: number
 }) {
-  const allSwiped = myNextIdx === 5 && opponentNextIdx === 5
+  const allSwiped = myNextIdx === deckSize && opponentNextIdx === deckSize
   return (
     <div className="space-y-4 py-6 text-center">
       <Badge variant="outline">lockup phase</Badge>
@@ -1944,83 +2028,44 @@ function LockupView({
           ? "watching the oracle tick toward settlement…"
           : "waiting for opponent to finish swiping…"}
       </p>
-      <p className="text-muted-foreground text-base">
+      <p className="text-base text-muted-foreground">
         swipes are locked. the deck settles when BTC's oracle resolves.
       </p>
-      <div className="text-muted-foreground flex justify-center gap-6 pt-2 text-sm">
+      <div className="flex justify-center gap-6 pt-2 text-sm text-muted-foreground">
         <span>
-          you <strong className="text-foreground">{myNextIdx}</strong>/5
+          you <strong className="text-foreground">{myNextIdx}</strong>/
+          {deckSize}
         </span>
         <span>
-          opponent <strong className="text-foreground">{opponentNextIdx}</strong>/5
+          opponent{" "}
+          <strong className="text-foreground">{opponentNextIdx}</strong>/
+          {deckSize}
         </span>
       </div>
     </div>
   )
 }
 
-function SettlingView({ duel, duelId }: { duel: DuelState; duelId: string }) {
-  const { mutateAsync: signAndExec, isPending } = useFlickySign()
-  const client = useCurrentClient()
-  const queryClient = useQueryClient()
-  const [err, setErr] = useState<string | null>(null)
-  const [digest, setDigest] = useState<string | null>(null)
-
-  async function settle() {
-    setErr(null)
-    try {
-      // Two-phase: settle_card × deck_size reads both players' Predict
-      // managers for anti-replay (and that card's oracle for the
-      // settlement_price), then finalize compares the accumulated PnL.
-      // All chained into one PTB by `buildFinalizeTx`.
-      const [p0Manager, p1Manager] = await Promise.all([
-        findPredictManager(client, duel.creator),
-        findPredictManager(client, duel.challenger),
-      ])
-      if (!p0Manager || !p1Manager)
-        throw new Error("could not resolve both players' PredictManagers")
-      const tx = buildFinalizeTx(
-        duelId,
-        duel.cards,
-        p0Manager.id,
-        p1Manager.id,
-        duel.stakeCoinType,
-      )
-      const res = await signAndExec({ transaction: tx })
-      setDigest(res.digest)
-      queryClient.invalidateQueries({ queryKey: ["duel", duelId] })
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    }
-  }
-
+/**
+ * Both players have finished swiping and the oracle has settled. There's
+ * nothing left for either player to sign — `settle_card` × deck_size +
+ * `finalize` are keeper-only now (see reference doc's "flicky settle
+ * (keeper...)" recipe), so this is a passive waiting state. The polling
+ * `duelQuery` in `DuelView` picks up `status: COMPLETE` on its own and
+ * routes into `ResultView` once the keeper lands the finalize tx — no
+ * WS in this (unrouted) polling-based view, but the same "duel state
+ * flips to COMPLETE" signal the routed `ActiveDuel` gets from
+ * `DuelFinalized` / `room_state`.
+ */
+function SettlingView(_: { duel: DuelState; duelId: string }) {
   return (
     <div className="space-y-4 py-6 text-center">
       <Badge variant="default">oracle settled</Badge>
-      <p className="text-lg">paying out…</p>
-      <p className="text-muted-foreground text-base">
-        the keeper auto-closes settled duels — payouts appear within ~10s.
+      <p className="text-lg">settling…</p>
+      <p className="text-base text-muted-foreground">
+        the keeper closes settled duels automatically — payouts appear within
+        ~10s.
       </p>
-      <details className="text-muted-foreground mx-auto max-w-sm text-left text-sm">
-        <summary className="cursor-pointer text-center underline-offset-2 hover:underline">
-          impatient? settle manually
-        </summary>
-        <div className="mt-3 space-y-2">
-          <Button size="sm" onClick={settle} disabled={isPending} className="w-full">
-            settle + finalize
-          </Button>
-          {digest && (
-            <p>
-              tx <ExplorerLink href={txExplorerUrl(digest)}>{shortId(digest)}</ExplorerLink>
-            </p>
-          )}
-          {err && (
-            <p className="rounded border-l-2 border-red-500 bg-red-500/5 p-2 text-red-500">
-              {err}
-            </p>
-          )}
-        </div>
-      </details>
     </div>
   )
 }
@@ -2041,7 +2086,13 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
   const lost = !tie && myScore < oppScore
 
   const total = duel.p0Stake + duel.p1Stake
-  const myPayout = won ? total : tie ? (isCreator ? duel.p0Stake : duel.p1Stake) : 0n
+  const myPayout = won
+    ? total
+    : tie
+      ? isCreator
+        ? duel.p0Stake
+        : duel.p1Stake
+      : 0n
 
   const banner = won
     ? { emoji: "🏆", text: "you won", tone: "text-emerald-500" }
@@ -2073,7 +2124,8 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
       const { toPng } = await import("html-to-image")
       const dataUrl = await toPng(captureRef.current, {
         pixelRatio: 2,
-        backgroundColor: getComputedStyle(document.body).backgroundColor || "#000",
+        backgroundColor:
+          getComputedStyle(document.body).backgroundColor || "#000",
         cacheBust: true,
       })
       const a = document.createElement("a")
@@ -2089,14 +2141,16 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
 
   return (
     <div className="space-y-5">
-      <div ref={captureRef} className="bg-card space-y-5 rounded-lg p-2">
+      <div ref={captureRef} className="space-y-5 rounded-lg bg-card p-2">
         <div className="space-y-2 py-6 text-center">
           <div className="text-6xl">{banner.emoji}</div>
-          <div className={`text-3xl font-semibold uppercase tracking-[-0.02em] ${banner.tone}`}>
+          <div
+            className={`text-3xl font-semibold tracking-[-0.02em] uppercase ${banner.tone}`}
+          >
             {banner.text}
           </div>
           {myPayout > 0n && (
-            <div className="text-muted-foreground text-base">
+            <div className="text-base text-muted-foreground">
               payout{" "}
               <strong className="text-foreground">
                 {fmtStake(myPayout, duel.stakeCoinType)}
@@ -2108,14 +2162,14 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
         <Separator />
 
         <div className="grid grid-cols-2 gap-3 text-base">
-          <div className="bg-muted/40 rounded p-3">
-            <div className="text-muted-foreground text-sm">your score</div>
+          <div className="rounded bg-muted/40 p-3">
+            <div className="text-sm text-muted-foreground">your score</div>
             <div className="text-2xl font-semibold tabular-nums">
               {(Number(myScore) / 1e9).toFixed(2)}
             </div>
           </div>
-          <div className="bg-muted/40 rounded p-3">
-            <div className="text-muted-foreground text-sm">opponent</div>
+          <div className="rounded bg-muted/40 p-3">
+            <div className="text-sm text-muted-foreground">opponent</div>
             <div className="text-2xl font-semibold tabular-nums">
               {(Number(oppScore) / 1e9).toFixed(2)}
             </div>
@@ -2123,14 +2177,14 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
         </div>
 
         <div>
-          <h3 className="text-muted-foreground mb-2 text-sm uppercase tracking-wide">
+          <h3 className="mb-2 text-sm tracking-wide text-muted-foreground uppercase">
             cards
           </h3>
           <div className="space-y-1.5">
             {myCards.map((m, i) => (
               <div
                 key={i}
-                className="bg-muted/30 flex items-center justify-between rounded p-2 text-base"
+                className="flex items-center justify-between rounded bg-muted/30 p-2 text-base"
               >
                 <div>
                   <span className="text-muted-foreground">card {i + 1} · </span>
@@ -2142,7 +2196,9 @@ function ResultView({ duel, address }: { duel: DuelState; address: string }) {
                       you {m.swipe.isUp ? "↑" : "↓"}
                     </span>
                   ) : (
-                    <span className="text-muted-foreground italic">no swipe</span>
+                    <span className="text-muted-foreground italic">
+                      no swipe
+                    </span>
                   )}
                   <span>
                     settled{" "}
@@ -2188,28 +2244,28 @@ function SpectatorView({ duel }: { duel: DuelState }) {
   return (
     <div className="space-y-3 py-4 text-center">
       <Badge variant="secondary">spectating</Badge>
-      <p className="text-muted-foreground text-base">
+      <p className="text-base text-muted-foreground">
         you're not a player in this duel. pot{" "}
         {fmtStake(duel.p0Stake + duel.p1Stake, duel.stakeCoinType)}.
       </p>
       <div className="grid grid-cols-2 gap-3 text-base">
-        <div className="bg-muted/40 rounded p-3">
-          <div className="text-muted-foreground text-sm">creator net</div>
+        <div className="rounded bg-muted/40 p-3">
+          <div className="text-sm text-muted-foreground">creator net</div>
           <div className="font-semibold">
             {fmtStake(duel.p0Payout - duel.p0Premium, duel.stakeCoinType)}
           </div>
         </div>
-        <div className="bg-muted/40 rounded p-3">
-          <div className="text-muted-foreground text-sm">challenger net</div>
+        <div className="rounded bg-muted/40 p-3">
+          <div className="text-sm text-muted-foreground">challenger net</div>
           <div className="font-semibold">
             {fmtStake(duel.p1Payout - duel.p1Premium, duel.stakeCoinType)}
           </div>
         </div>
       </div>
-      <p className="text-muted-foreground text-sm">
+      <p className="text-sm text-muted-foreground">
         swipes {Number(duel.p0NextCardIdx)}/{Number(duel.deckSize)} ·{" "}
         {Number(duel.p1NextCardIdx)}/{Number(duel.deckSize)} · settled{" "}
-        {duel.settledCount.toString()}/5
+        {duel.settledCount.toString()}/{Number(duel.deckSize)}
       </p>
     </div>
   )

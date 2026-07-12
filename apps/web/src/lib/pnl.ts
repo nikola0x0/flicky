@@ -4,19 +4,27 @@
  * Settled cards use the contract's binary PnL — `payout - premium`,
  * available through `room_state.p{0,1}Payout` / `p{0,1}Premium` once
  * `settle_card` lands (accumulated incrementally per card; `finalize`
- * then distributes the pot). Unsettled-but-swiped cards use a smooth
- * mark-to-market projection from `oracle_tick`'s live forward price:
+ * then distributes the pot) and, per-card, through `cardOutcomes[i].p{0,1}Pnl`
+ * (server-computed with the true premium). Unsettled-but-swiped cards use a
+ * projection from `oracle_tick`'s live spot price instead.
  *
- *   diff = isUp ? (forward - strike) : (strike - forward)
- *   pnl  = diff * quantity / FLOAT_SCALING (1e9)
+ * 6-24: the swipe wire dropped per-swipe `premium` (only `orderId` remains
+ * — the real premium needs a server-side lookup by `orderId` that isn't
+ * wired in yet). Without a cost basis to net out, the live projection below
+ * mirrors the contract's binary payout shape (`payout = correct ? quantity
+ * : 0`) but reframed as a symmetric win/lose PnL: `+quantity` when the
+ * current spot favors the swiped direction, `-quantity` when it doesn't.
+ * This is a projection of the win/lose outcome, not a true (payout −
+ * premium) P&L — settled cards should prefer the server-computed
+ * `cardOutcomes[i].p{0,1}Pnl` and only fall back to this for the brief
+ * pre-indexer window right after on-chain settlement.
  *
- * Mirrors `liveCardPnl` / `runningPnl` in apps/playground.
+ * Mirrors `liveCardPnl` / `markCardPnl` usage in apps/playground.
  */
 
 export interface SwipeLite {
   isUp: boolean
   quantity: string
-  premium: string
 }
 
 /**
@@ -24,25 +32,24 @@ export interface SwipeLite {
  * lack the inputs (no swipe / tick / strike).
  *
  * These are BINARY options, not futures — so the mark isn't a linear
- * price-diff. We use the "if it settled at the current forward" outcome:
- * a position currently in-the-money is worth its full `quantity` (so PnL =
- * quantity − premium), and out-of-the-money is worth 0 (PnL = −premium).
- * Bounded to [−premium, quantity − premium], flipping as the forward
- * crosses the strike. Settled cards skip this and use the contract's binary
- * PnL from `cardOutcomes`.
+ * price-diff. We use the "if it settled at the current spot" outcome: a
+ * position currently in-the-money projects to `+quantity` (the full stake
+ * at risk, matching a correct on-chain `payout = correct ? quantity : 0`),
+ * out-of-the-money projects to `-quantity` (the stake lost). Flips as the
+ * spot crosses the strike. Settled cards skip this and use the contract's
+ * binary PnL from `cardOutcomes`.
  */
 export function liveCardPnl(
   swipe: SwipeLite | null,
   strike: string | undefined,
-  forward: string | undefined,
+  spot: string | undefined
 ): bigint | null {
-  if (!swipe || strike === undefined || forward === undefined) return null
+  if (!swipe || strike === undefined || spot === undefined) return null
   const s = BigInt(strike)
-  const f = BigInt(forward)
-  const inMoney = swipe.isUp ? f >= s : f < s
+  const p = BigInt(spot)
+  const inMoney = swipe.isUp ? p > s : p <= s
   const q = BigInt(swipe.quantity)
-  const premium = BigInt(swipe.premium)
-  return inMoney ? q - premium : -premium
+  return inMoney ? q : -q
 }
 
 /**
@@ -72,89 +79,58 @@ function normCdf(x: number): number {
 /**
  * Continuous mark-to-market for one swipe, in dUSDC micro-units (1e6).
  *
- * Unlike {@link liveCardPnl} (a binary step that only flips when the forward
- * crosses the strike), this prices the card as the *fair value* of a binary
- * option: `quantity × P(in-the-money) − premium`. The probability is a
- * digital Black-Scholes estimate from the live forward, strike, and
- * remaining time, so the mark slides smoothly between `−premium` (p→0) and
- * `quantity − premium` (p→1) as the forward and clock move — and converges
- * to the exact binary outcome at expiry. This is what makes the live chart
- * move continuously instead of sitting flat between strike crossings.
+ * Unlike {@link liveCardPnl} (a binary step that only flips when the spot
+ * crosses the strike), this prices the card as the *expected value* of the
+ * symmetric win/lose projection: `quantity × (2 × P(in-the-money) − 1)`,
+ * which ranges over `[-quantity, +quantity]`. The probability is a digital
+ * Black-Scholes estimate from the live spot, strike, and remaining time, so
+ * the mark slides smoothly between `-quantity` (p→0) and `+quantity` (p→1)
+ * as the spot and clock move — and converges to the exact binary outcome
+ * (`liveCardPnl`) at expiry. This is what makes the live chart move
+ * continuously instead of sitting flat between strike crossings.
  *
- * Falls back to the binary outcome when `expiryMs` is unknown or already
- * reached. Returns null when core inputs are missing.
+ * No premium is netted in (the wire no longer carries a per-swipe premium)
+ * — this is a projection of the win/lose outcome, not a true (payout −
+ * premium) P&L. Falls back to the binary outcome when `expiryMs` is
+ * unknown or already reached. Returns null when core inputs are missing.
  */
+/**
+ * Digital "BTC settles strictly above `strike`" probability under the same
+ * Black-Scholes model {@link markCardPnl} prices — so a card's shown per-side
+ * win odds and its live PnL always agree. Collapses to the binary 0/1 outcome
+ * at/after expiry (matching the contract's `actual_up = settlement > strike`).
+ * Returns null when `strike`/`spot` are missing or non-positive.
+ */
+export function upProbability(
+  strike: string | undefined,
+  spot: string | undefined,
+  expiryMs: number | undefined,
+  nowMs: number
+): number | null {
+  if (strike === undefined || spot === undefined) return null
+  const f = Number(BigInt(spot))
+  const k = Number(BigInt(strike))
+  if (!(f > 0) || !(k > 0)) return null
+  const tYears = expiryMs !== undefined ? (expiryMs - nowMs) / MS_PER_YEAR : 0
+  if (!(tYears > 0)) return f > k ? 1 : 0
+  const v = ASSUMED_VOL * Math.sqrt(tYears)
+  const d2 = (Math.log(f / k) - 0.5 * v * v) / v
+  return normCdf(d2)
+}
+
 export function markCardPnl(
   swipe: SwipeLite | null,
   strike: string | undefined,
-  forward: string | undefined,
+  spot: string | undefined,
   expiryMs: number | undefined,
-  nowMs: number,
+  nowMs: number
 ): bigint | null {
-  if (!swipe || strike === undefined || forward === undefined) return null
-  const f = Number(BigInt(forward))
-  const k = Number(BigInt(strike))
-  if (!(f > 0) || !(k > 0)) return null
+  if (!swipe) return null
+  const pUp = upProbability(strike, spot, expiryMs, nowMs)
+  if (pUp === null) return null
   const q = Number(BigInt(swipe.quantity))
-  const premium = Number(BigInt(swipe.premium))
-  const tYears = expiryMs !== undefined ? (expiryMs - nowMs) / MS_PER_YEAR : 0
-  let pUp: number
-  if (!(tYears > 0)) {
-    // Expired or unknown expiry — collapse to the binary outcome.
-    pUp = f >= k ? 1 : 0
-  } else {
-    const v = ASSUMED_VOL * Math.sqrt(tYears)
-    const d2 = (Math.log(f / k) - 0.5 * v * v) / v
-    pUp = normCdf(d2)
-  }
   const pIn = swipe.isUp ? pUp : 1 - pUp
-  return BigInt(Math.round(q * pIn - premium))
-}
-
-/**
- * Combined running PnL for `side` = settled real PnL + live mark-to-market.
- *
- * Settled portion: `payout - premium` from the contract's aggregate
- * fields (truth — already netted across all settled cards).
- * Live portion: sum of `liveCardPnl` over cards that have a swipe + a
- * tick but aren't in `cardOutcomes` yet. Swiped cards without a tick
- * are skipped (honest unknown), unswiped cards contribute 0.
- */
-export function runningPnl(
-  rs: {
-    p0Payout: string
-    p0Premium: string
-    p1Payout: string
-    p1Premium: string
-    cardOutcomes: Array<{ cardIdx: number }>
-    swipes: Array<{
-      cardIdx: number
-      p0Swipe: SwipeLite | null
-      p1Swipe: SwipeLite | null
-    }>
-  },
-  side: "p0" | "p1",
-  deck: { cards: Array<{ oracle_id: string; strike: string }> } | null,
-  ticks: Record<string, { spot: string; forward: string }>,
-): bigint {
-  const settled =
-    side === "p0"
-      ? BigInt(rs.p0Payout) - BigInt(rs.p0Premium)
-      : BigInt(rs.p1Payout) - BigInt(rs.p1Premium)
-  const settledIdx = new Set(rs.cardOutcomes.map((o) => o.cardIdx))
-  let live = 0n
-  for (const s of rs.swipes) {
-    if (settledIdx.has(s.cardIdx)) continue
-    const swipe = side === "p0" ? s.p0Swipe : s.p1Swipe
-    if (!swipe) continue
-    const card = deck?.cards[s.cardIdx]
-    if (!card) continue
-    const tick = ticks[card.oracle_id]
-    if (!tick) continue
-    const pnl = liveCardPnl(swipe, card.strike, tick.forward)
-    if (pnl !== null) live += pnl
-  }
-  return settled + live
+  return BigInt(Math.round(q * (2 * pIn - 1)))
 }
 
 /**
@@ -170,13 +146,19 @@ export function fmtDusdcSigned(microUnits: bigint): string {
 }
 
 /**
- * Format a PnL as a signed % return on the premium paid, e.g. "+48x"-grade
- * upside on a long-shot card or "-100%" on a lost one. Both args are dUSDC
- * micro-units. Falls back to "—" when there's no premium to measure against.
+ * Format a PnL as a signed % return relative to `baseMicro`, e.g. "+100%"
+ * on a won card or "-100%" on a lost one. Both args are dUSDC micro-units.
+ *
+ * `baseMicro` is whatever cost basis / notional the caller has: the real
+ * per-duel premium aggregate (`p{0,1}Premium`, still available on chain —
+ * see `history.tsx`) when computing a true return, or the swiped
+ * `quantity` as a projection when no premium is available (per-swipe
+ * `premium` was dropped from the wire — see `liveCardPnl`/`markCardPnl`).
+ * Falls back to "—" only when there's nothing to divide by.
  */
-export function fmtPnlPct(pnlMicro: bigint, premiumMicro: bigint): string {
-  if (premiumMicro <= 0n) return "—"
-  const pct = (Number(pnlMicro) / Number(premiumMicro)) * 100
+export function fmtPnlPct(pnlMicro: bigint, baseMicro: bigint): string {
+  if (baseMicro <= 0n) return "—"
+  const pct = (Number(pnlMicro) / Number(baseMicro)) * 100
   const sign = pct > 0 ? "+" : ""
   return `${sign}${pct.toFixed(0)}%`
 }

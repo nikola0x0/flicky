@@ -7,7 +7,7 @@
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
-    "test": "bun test src/lib src/ws src/db.test.ts src/deckmaster.test.ts src/mmr.test.ts src/sponsor.test.ts src/keeper.test.ts src/e2e-ws.test.ts src/indexer.test.ts --timeout 10000",
+    "test": "bun test src/lib src/ws src/db.test.ts src/deckmaster.test.ts src/mmr.test.ts src/sponsor.test.ts src/keeper.test.ts src/e2e-ws.test.ts src/indexer.test.ts src/predict.test.ts --timeout 10000",
     "test:e2e": "bun test src/scripts/e2e.test.ts",
     "lint": "eslint",
     "format": "prettier --write \"**/*.ts\"",
@@ -16,7 +16,8 @@
     "demo:duel": "bun run src/scripts/demo-duel.ts",
     "probe:oracles": "bun run src/scripts/probe-oracles.ts",
     "clear:duels": "bun run src/scripts/clear-duels.ts",
-    "backfill:ratings": "bun run src/scripts/backfill-ratings.ts"
+    "backfill:ratings": "bun run src/scripts/backfill-ratings.ts",
+    "check:6-24": "bun run src/scripts/check-6-24-live.ts"
   },
   "dependencies": {
     "@mysten/enoki": "^1.2.2",

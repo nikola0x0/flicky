@@ -6,8 +6,8 @@
 import type { WebSocketHandler } from "bun"
 import { getSuiClient } from "../lib/sui"
 import { makeLogger, shortId } from "../log"
-import { checkQueueBalanceGate, MIN_BALANCE_FOR_QUEUE } from "../predict"
-import { findDeckOracles } from "../deckmaster"
+import { checkQueueBalanceGate, requiredQueueBalance } from "../predict"
+import { findDeckMarkets } from "../deckmaster"
 import { consume } from "../ratelimit"
 import { handleChatReact, handleChatSend, sendChatHistory } from "./chat"
 import {
@@ -44,16 +44,25 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
   },
 
   async message(ws, message) {
-    const raw = typeof message === "string" ? message : message.toString("utf-8")
+    const raw =
+      typeof message === "string" ? message : message.toString("utf-8")
     const msg = parseClientMsg(raw)
     if (!msg) {
-      send(ws, { type: "error", code: "bad_message", message: "invalid JSON or missing `type`" })
+      send(ws, {
+        type: "error",
+        code: "bad_message",
+        message: "invalid JSON or missing `type`",
+      })
       return
     }
     switch (msg.type) {
       case "hello": {
         if (typeof msg.address !== "string" || !msg.address.startsWith("0x")) {
-          send(ws, { type: "error", code: "bad_address", message: "address must be a 0x… string" })
+          send(ws, {
+            type: "error",
+            code: "bad_address",
+            message: "address must be a 0x… string",
+          })
           return
         }
         registerAddress(ws, msg.address)
@@ -63,7 +72,11 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
       }
       case "queue_join": {
         if (!isValidTier(msg.tier)) {
-          send(ws, { type: "error", code: "bad_tier", message: `unknown tier: ${msg.tier}` })
+          send(ws, {
+            type: "error",
+            code: "bad_tier",
+            message: `unknown tier: ${msg.tier}`,
+          })
           return
         }
         const rlKey = ws.data.address ?? "anon"
@@ -90,54 +103,81 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
           })
           return
         }
-        // PRD §Matchmaking: PredictManager balance ≥ 5 dUSDC is required
-        // before queueing. Check via devInspect (no signing, no gas).
-        const gate = await checkQueueBalanceGate(getSuiClient(), ws.data.address)
+        // PRD §Matchmaking: funding-account (6-24 AccountWrapper) balance
+        // must cover the tier stake plus the worst-case 5-card premium
+        // budget before queueing — see `requiredQueueBalance`. Check via
+        // devInspect (no signing, no gas).
+        const required = requiredQueueBalance(msg.tier)
+        const gate = await checkQueueBalanceGate(
+          getSuiClient(),
+          ws.data.address,
+          required
+        )
         if (!gate.ok) {
           if (gate.reason === "no_manager") {
             send(ws, {
               type: "error",
-              code: "no_predict_manager",
+              code: "no_wrapper",
               message:
-                "no PredictManager found for this address — sign in completes the bootstrap on first run",
+                "no funding account found for this address — sign in completes the bootstrap on first run",
             })
           } else if (gate.reason === "insufficient_balance") {
             send(ws, {
               type: "error",
               code: "insufficient_balance",
-              message: `PredictManager balance < ${MIN_BALANCE_FOR_QUEUE} (5 dUSDC) — deposit before queueing`,
-              detail: { need: MIN_BALANCE_FOR_QUEUE.toString(), have: gate.balance.toString() },
+              message: `account balance < ${required} (need stake + ~15 dUSDC premium budget) — deposit before queueing`,
+              detail: {
+                need: required.toString(),
+                have: gate.balance.toString(),
+              },
             })
           } else {
             send(ws, {
               type: "error",
               code: "balance_check_failed",
-              message: "could not verify PredictManager balance; retry shortly",
+              message: "could not verify account balance; retry shortly",
             })
           }
           return
         }
-        // Pre-flight the BTC oracle pool so players get a clear "try
+        // Pre-flight the BTC market pool so players get a clear "try
         // again in a few" instead of silently entering a queue that's
-        // going to fail at deck-gen. Upstream Predict creates oracles
-        // on a 15-min cron with occasional skipped ticks — when the
-        // cron drops we sit at 4/5 eligible oracles until the next
-        // beat. Letting the match form anyway leads to a retry loop
-        // that the player sees as a permanent "searching".
+        // going to fail at deck-gen. Deck-gen distributes multiple cards
+        // per market (round-robin + strike dedup — see buildDeck in
+        // deckmaster.ts) and, at match time, the mint probe
+        // (filterMintableMarkets) further narrows to currently-backed
+        // markets. A near-ATM deck from a single market is fine, so this
+        // gate only needs ONE headroom-eligible market; the real backing
+        // check happens at deck-gen. Fetch up to 5 for a fuller spread.
         try {
-          const oracles = await findDeckOracles(getSuiClient(), "BTC", 5)
-          if (oracles.length < 5) {
+          // Absorb a momentary market dip the way match-time deck-gen does:
+          // retry a few times before rejecting, so a 1-2s flicker in the thin
+          // 30min-3h band doesn't bounce the player out of the queue. (This is
+          // the loose headroom-only check; deck-gen at match time still runs
+          // its own stricter, mint-probed retry — see matchmaking.ts.)
+          const MIN_DECK_MARKETS = 1
+          const PREFLIGHT_ATTEMPTS = 3
+          const PREFLIGHT_RETRY_MS = 1_500
+          let available = 0
+          for (let attempt = 1; attempt <= PREFLIGHT_ATTEMPTS; attempt++) {
+            available = (await findDeckMarkets(5)).length
+            if (available >= MIN_DECK_MARKETS) break
+            if (attempt < PREFLIGHT_ATTEMPTS) {
+              await new Promise((r) => setTimeout(r, PREFLIGHT_RETRY_MS))
+            }
+          }
+          if (available < MIN_DECK_MARKETS) {
             send(ws, {
               type: "error",
               code: "oracles_unavailable",
-              message: `Only ${oracles.length}/5 BTC oracles are live right now. The upstream cron should produce another in a few minutes — try again then.`,
-              detail: { available: oracles.length, required: 5 },
+              message: `No BTC markets live right now — try again in a couple of minutes.`,
+              detail: { available, required: MIN_DECK_MARKETS },
             })
             return
           }
         } catch (e) {
           log.warn(
-            `oracle preflight failed: ${e instanceof Error ? e.message : String(e)}`,
+            `oracle preflight failed: ${e instanceof Error ? e.message : String(e)}`
           )
           send(ws, {
             type: "error",
@@ -170,7 +210,11 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
       }
       case "room_subscribe": {
         if (typeof msg.duelId !== "string" || !msg.duelId.startsWith("0x")) {
-          send(ws, { type: "error", code: "bad_duel_id", message: "duelId must be a 0x… string" })
+          send(ws, {
+            type: "error",
+            code: "bad_duel_id",
+            message: "duelId must be a 0x… string",
+          })
           return
         }
         subscribeRoom(ws, msg.duelId)
@@ -210,11 +254,11 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         return
       }
       case "oracle_subscribe": {
-        subscribeOracles(ws, msg.oracleIds)
+        subscribeOracles(ws, msg.marketIds)
         return
       }
       case "oracle_unsubscribe": {
-        unsubscribeOracles(ws, msg.oracleIds)
+        unsubscribeOracles(ws, msg.marketIds)
         return
       }
       case "ping": {
@@ -222,7 +266,11 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         return
       }
       default: {
-        send(ws, { type: "error", code: "unknown_type", message: `unknown message type` })
+        send(ws, {
+          type: "error",
+          code: "unknown_type",
+          message: `unknown message type`,
+        })
       }
     }
   },

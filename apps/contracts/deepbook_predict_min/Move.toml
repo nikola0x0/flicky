@@ -1,10 +1,14 @@
 [package]
 name = "deepbook_predict"
 edition = "2024"
-published-at = "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
+published-at = "0xdb3ef5a5129920e59c9b2ae25a77eddb48acd0e1c6307b97073f0e076016446e"
 
 [dependencies]
-deepbook = { local = "../deepbook_min" }
+account = { local = "../account_min" }
 
 [addresses]
-deepbook_predict = "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
+deepbook_predict = "0xdb3ef5a5129920e59c9b2ae25a77eddb48acd0e1c6307b97073f0e076016446e"
+
+[dev-dependencies]
+
+[dev-addresses]
