@@ -150,14 +150,28 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
         // gate only needs ONE headroom-eligible market; the real backing
         // check happens at deck-gen. Fetch up to 5 for a fuller spread.
         try {
+          // Absorb a momentary market dip the way match-time deck-gen does:
+          // retry a few times before rejecting, so a 1-2s flicker in the thin
+          // 30min-3h band doesn't bounce the player out of the queue. (This is
+          // the loose headroom-only check; deck-gen at match time still runs
+          // its own stricter, mint-probed retry — see matchmaking.ts.)
           const MIN_DECK_MARKETS = 1
-          const markets = await findDeckMarkets(5)
-          if (markets.length < MIN_DECK_MARKETS) {
+          const PREFLIGHT_ATTEMPTS = 3
+          const PREFLIGHT_RETRY_MS = 1_500
+          let available = 0
+          for (let attempt = 1; attempt <= PREFLIGHT_ATTEMPTS; attempt++) {
+            available = (await findDeckMarkets(5)).length
+            if (available >= MIN_DECK_MARKETS) break
+            if (attempt < PREFLIGHT_ATTEMPTS) {
+              await new Promise((r) => setTimeout(r, PREFLIGHT_RETRY_MS))
+            }
+          }
+          if (available < MIN_DECK_MARKETS) {
             send(ws, {
               type: "error",
               code: "oracles_unavailable",
               message: `No BTC markets live right now — try again in a couple of minutes.`,
-              detail: { available: markets.length, required: MIN_DECK_MARKETS },
+              detail: { available, required: MIN_DECK_MARKETS },
             })
             return
           }

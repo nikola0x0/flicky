@@ -159,8 +159,14 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
   // invokes it in dev — both paths cause duplicate `queue_join` sends
   // and a benign rate_limit error toast.
   const firedRef = useRef(false)
+  // Reset to a clean slate on close so a re-open never inherits a stale
+  // `ready` phase or a tripped fire-once guard — either would strand the
+  // modal on "joining queue…" with `onReady` never re-firing.
   useEffect(() => {
-    if (!open) firedRef.current = false
+    if (!open) {
+      firedRef.current = false
+      setPhase({ kind: "checking" })
+    }
   }, [open])
   useEffect(() => {
     if (phase.kind !== "ready") return
@@ -168,6 +174,21 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
     firedRef.current = true
     onReady(phase.managerId)
   }, [phase, onReady])
+
+  // Backstop against a stuck "joining queue…": the parent closes us on
+  // `onReady`, so reaching `ready` should unmount this modal within a frame.
+  // If we're still on `ready` after a grace period, the queue-join stalled —
+  // surface the recoverable error (Retry/Close) instead of hanging forever.
+  useEffect(() => {
+    if (!open || phase.kind !== "ready") return
+    const t = setTimeout(() => {
+      setPhase({
+        kind: "error",
+        message: "Joining is taking longer than expected — try again.",
+      })
+    }, 8_000)
+    return () => clearTimeout(t)
+  }, [open, phase])
 
   // Escape-to-close + body-scroll lock, matching DepositModal/WithdrawModal.
   useEffect(() => {
