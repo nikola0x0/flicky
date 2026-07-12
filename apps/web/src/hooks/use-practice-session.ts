@@ -119,6 +119,15 @@ export function usePracticeSession({
   }, [lastTick])
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const cardShownAtRef = useRef(0)
+  // Duplicate-delivery latch for the WS intake. Because `phaseRef` is
+  // synced in a passive effect, React does NOT guarantee a flush between
+  // two back-to-back WebSocket `message` macrotasks — a second
+  // `practice_session` arriving right behind the first could still read
+  // the stale "STARTING" phase, pass the guard, and restart the deck
+  // (wiping card 0's just-recorded state). This ref flips SYNCHRONOUSLY
+  // inside the handler — within the same macrotask that accepts the
+  // session — so the duplicate bails no matter when React commits.
+  const sessionAcceptedRef = useRef(false)
 
   const clearTimers = useCallback(() => {
     for (const t of timersRef.current) clearTimeout(t)
@@ -128,6 +137,7 @@ export function usePracticeSession({
   const start = useCallback(() => {
     if (!address) return
     clearTimers()
+    sessionAcceptedRef.current = false
     setSession(null)
     setPlayerSwipes([])
     setBotRevealed([])
@@ -140,6 +150,7 @@ export function usePracticeSession({
 
   const reset = useCallback(() => {
     clearTimers()
+    sessionAcceptedRef.current = false
     send({ type: "spot_unsubscribe" })
     setSession(null)
     setPlayerSwipes([])
@@ -176,6 +187,11 @@ export function usePracticeSession({
     return onMessage((msg: ServerMsg) => {
       if (msg.type === "practice_session") {
         if (phaseRef.current.kind !== "STARTING") return
+        if (sessionAcceptedRef.current) return
+        // Latch BEFORE any setState: a duplicate delivered in the very
+        // next macrotask (before React flushes phaseRef's sync effect)
+        // must bail here rather than restart the deck.
+        sessionAcceptedRef.current = true
         setSession({
           id: `practice-${Date.now()}`,
           cards: msg.cards,
@@ -193,7 +209,11 @@ export function usePracticeSession({
       } else if (
         msg.type === "error" &&
         msg.code === "practice_failed" &&
-        phaseRef.current.kind === "STARTING"
+        phaseRef.current.kind === "STARTING" &&
+        // A late error right behind a successful practice_session (same
+        // stale-phaseRef window) must not flip an in-progress match to
+        // ERROR — the latch is the synchronous source of truth.
+        !sessionAcceptedRef.current
       ) {
         setPhase({ kind: "ERROR", message: msg.message })
       }
