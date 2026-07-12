@@ -103,13 +103,13 @@ export function clientIp(req: Request, fallback: string | null): string {
 //
 // Tuned per-endpoint based on the cost of the underlying work:
 //   - deckmaster:generate hits RPC + writes disk → 1 req / 5 s, burst 3
-//   - sponsor             Enoki call (paid)       → 2 req/s sustained,
+//   - sponsor             address-balance gas     → 2 req/s sustained,
 //                                                    burst 200
 //     A single match burns ~6 sponsor calls per player (create/join_duel
 //     + 5 swipes). In dev two windows share an IP, and in prod a NAT can
 //     put dozens of players behind one. The previous 5/60s burst tripped
 //     mid-match. Generous limits here are fine — the real cost gate is
-//     Enoki itself + the per-tx allowlist. Tighten once we key by
+//     the dry-run + per-tx allowlist. Tighten once we key by
 //     address instead of IP.
 //   - practice_start      RPC                     → 1 req / 10 s, burst 2
 //   - queue_join          RPC (balance check)     → 1 req / 2 s,  burst 3

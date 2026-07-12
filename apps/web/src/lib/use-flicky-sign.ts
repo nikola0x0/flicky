@@ -1,7 +1,7 @@
 /**
  * Single signing entrypoint for the app. Try the sponsored path first
- * (Enoki via apps/server/POST /sponsor), fall back to wallet-paid gas
- * if the server is unreachable / unconfigured / rejects.
+ * (address-balance sponsor via apps/server/POST /sponsor), fall back to
+ * wallet-paid gas if the server is unreachable / unconfigured / rejects.
  *
  * Shape matches `useSignAndExecuteTransaction` from dapp-kit so call
  * sites can swap with a one-line change.
