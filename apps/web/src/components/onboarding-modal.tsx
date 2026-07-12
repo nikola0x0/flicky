@@ -18,6 +18,7 @@ import {
 } from "@/lib/deepbook"
 import { DepositModal } from "@/components/deposit-modal"
 import { PixelButton } from "@/components/pixel-button"
+import { MAX_PREMIUM_BUDGET, requiredManagerBalance } from "@/lib/funding"
 
 const ORANGE_BRAND_STYLE = {
   "--btn-bg": "#e08a2b",
@@ -29,39 +30,10 @@ const BLUE_BRAND_STYLE = {
   "--btn-highlight": "#7eb6ff",
 } as CSSProperties
 
-/**
- * Per-swipe Predict `mint_exact_quantity` size (notional, dUSDC micro-units).
- *
- * This is the position NOTIONAL, not the premium paid. The mint's
- * `net_premium = entry_probability × quantity / leverage` must clear the
- * protocol's `min_net_premium` floor ($1 = 1_000_000) or the mint aborts
- * with `ENetPremiumBelowMinimum` (`strike_exposure_config::assert_mint_admission`,
- * abort code 4). By design the position is kept as CHEAP as the protocol
- * allows — the duel STAKE (side-pot) is the game's real prize, the mint is
- * just how each swipe takes a genuine Predict position for scoring. So this
- * sits at 3 dUSDC notional: at this quantity BOTH sides of an offset-strike
- * card clear the floor (band widens to p ∈ [0.334, 0.666], covering every
- * `ZONE_TARGET_PROB` zone in deckmaster) — the favored side (win prob ≳ 0.56)
- * yields a premium of ~$1.68–1.89, and the long-shot side ~$1.11–1.32 — while
- * a 5-card duel draws ~$7.5–9 of premium total, so a stake pool of a few
- * dUSDC per side still dominates it. (2 dUSDC notional could not clear the
- * floor on the long-shot side of an offset strike — that's why this was
- * raised from 2 to 3.)
- */
-export const SWIPE_QUANTITY = 3_000_000n
-
-/**
- * Floor the AccountWrapper must hold before queueing — kept at 5 dUSDC to
- * match the server's absolute `MIN_BALANCE_FOR_QUEUE` floor. NOTE: this is
- * a floor, not full worst-case coverage — the server's real queue gate
- * (`requiredQueueBalance` in `apps/server/src/predict.ts`) requires
- * `stake + 5 cards × SWIPE_QUANTITY` (~stake + $15), so a `standard`-tier
- * player needs ~20 dUSDC in the account for a full 5-card duel without a
- * mid-game top-up. Decoupled from `SWIPE_QUANTITY` on purpose (raising the
- * notional must not silently raise this onboarding floor) — the web check
- * here stays a cheap pre-swipe backstop, not the authoritative budget.
- */
-export const MIN_MANAGER_BALANCE = 5_000_000n
+// `SWIPE_QUANTITY`, `MIN_MANAGER_BALANCE`, `MAX_PREMIUM_BUDGET`, and
+// `requiredManagerBalance` now live in `@/lib/funding` — the web's single
+// source for duel funding economics, mirrored server-side in `predict.ts`, so
+// the pure math is unit-tested and can't drift out of the component.
 
 interface Props {
   open: boolean
@@ -85,7 +57,7 @@ type Phase =
     }
   /** Wallet OK; no AccountWrapper yet. */
   | { kind: "needs_manager" }
-  /** Wallet OK; manager exists but balance < 5 dUSDC. */
+  /** Wallet OK; manager exists but balance < requiredManagerBalance(stake). */
   | { kind: "needs_manager_deposit"; managerId: string; current: bigint }
   /** Both checks passed. */
   | { kind: "ready"; managerId: string }
@@ -113,17 +85,18 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
       const { wrapperId, balance: wrapperBal } = await fetchAccountState(
         account.address
       )
+      // Both the stake AND every swipe premium are withdrawn from the
+      // AccountWrapper (`account::withdraw_funds`, see buildCreateDuelDusdcTx),
+      // so the account — not the wallet — must hold `stake + premium budget`.
+      // The wallet's only job is to fund that account deposit; it does NOT pay
+      // the stake on top. Mirrors the server's `requiredQueueBalance` gate.
+      const target = requiredManagerBalance(stake)
       // How much MORE dUSDC must move from wallet into the account.
-      const topup =
-        wrapperBal >= MIN_MANAGER_BALANCE
-          ? 0n
-          : MIN_MANAGER_BALANCE - wrapperBal
-      // Wallet must cover both the stake escrow AND the account top-up.
-      const walletNeeded = stake + topup
-      if (wallet < walletNeeded) {
+      const topup = wrapperBal >= target ? 0n : target - wrapperBal
+      if (wallet < topup) {
         setPhase({
           kind: "needs_wallet",
-          needed: walletNeeded,
+          needed: topup,
           current: wallet,
         })
         return
@@ -132,7 +105,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         setPhase({ kind: "needs_manager" })
         return
       }
-      if (wrapperBal < MIN_MANAGER_BALANCE) {
+      if (wrapperBal < target) {
         setPhase({
           kind: "needs_manager_deposit",
           managerId: wrapperId,
@@ -251,6 +224,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         {phase.kind === "needs_manager" && (
           <NeedsManagerStep
             walletDusdc={walletDusdc}
+            target={requiredManagerBalance(stake)}
             onCreate={async () => {
               if (!account) return
               try {
@@ -285,9 +259,10 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         {phase.kind === "needs_manager_deposit" && (
           <NeedsDepositStep
             current={phase.current}
+            stake={stake}
             onDeposit={async () => {
               if (!account) return
-              const needed = MIN_MANAGER_BALANCE - phase.current
+              const needed = requiredManagerBalance(stake) - phase.current
               try {
                 const tx = buildDepositDusdcTx(phase.managerId, needed)
                 await sign.mutateAsync({ transaction: tx })
@@ -410,9 +385,10 @@ function NeedsWalletStep({
         </span>
       </div>
       <p className="text-base text-white/80">
-        Your wallet needs <strong>{fmtDusdc(needed)}</strong> total to play this
-        stake: {fmtDusdc(stake)} for the duel escrow plus the manager top-up to{" "}
-        {fmtDusdc(MIN_MANAGER_BALANCE)}.
+        Your manager needs <strong>{fmtDusdc(requiredManagerBalance(stake))}</strong>{" "}
+        for this stake — the {fmtDusdc(stake)} stake plus the{" "}
+        {fmtDusdc(MAX_PREMIUM_BUDGET)} swipe-premium budget both come out of it.
+        Funding it takes {fmtDusdc(needed)} from your wallet.
       </p>
       <p className="text-sm text-white/55">
         Have: {fmtDusdc(current)} &nbsp;&middot;&nbsp; need {fmtDusdc(short)}{" "}
@@ -431,9 +407,11 @@ function NeedsWalletStep({
 
 function NeedsManagerStep({
   walletDusdc,
+  target,
   onCreate,
 }: {
   walletDusdc: bigint
+  target: bigint
   onCreate: () => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
@@ -442,7 +420,8 @@ function NeedsManagerStep({
       <WalletToManagerFlow />
       <p className="text-base text-white/80">
         You need a manager to swipe. We&rsquo;ll create one, then deposit{" "}
-        {fmtDusdc(MIN_MANAGER_BALANCE)} from your wallet.
+        {fmtDusdc(target)} from your wallet — enough for this duel&rsquo;s stake
+        and swipe premiums, which both draw from the manager.
       </p>
       <p className="text-sm text-white/55">
         Wallet balance: {fmtDusdc(walletDusdc)}
@@ -469,21 +448,24 @@ function NeedsManagerStep({
 
 function NeedsDepositStep({
   current,
+  stake,
   onDeposit,
 }: {
   current: bigint
+  stake: bigint
   onDeposit: () => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
-  const needed = MIN_MANAGER_BALANCE - current
+  const target = requiredManagerBalance(stake)
+  const needed = target - current
   return (
     <div className="space-y-3">
       <WalletToManagerFlow />
       <p className="text-base text-white/80">
         Your manager has {fmtDusdc(current)}. Depositing {fmtDusdc(needed)}{" "}
-        brings it to {fmtDusdc(MIN_MANAGER_BALANCE)} — the minimum to get
-        started. A full 5-card duel draws more (your stake + ~15 dUSDC), checked
-        when you queue.
+        brings it to {fmtDusdc(target)} — enough for this duel&rsquo;s{" "}
+        {fmtDusdc(stake)} stake plus its swipe premiums, which both draw from
+        the manager.
       </p>
       <OneTimeNote />
       <PixelButton

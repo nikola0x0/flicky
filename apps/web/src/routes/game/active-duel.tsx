@@ -31,7 +31,7 @@ import {
   type SwipeLite,
 } from "@/lib/pnl"
 import { SWIPE_WINDOW_MS, swipeWindowRemainingMs } from "@/lib/swipe-window"
-import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
+import { SWIPE_QUANTITY } from "@/lib/funding"
 import { WsErrorBanner } from "@/components/ws-error-banner"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
