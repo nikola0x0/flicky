@@ -38,6 +38,8 @@ export type ClientMsg =
   | { type: "chat_react"; duelId: string; emoji: string }
   | { type: "oracle_subscribe"; marketIds: string[] }
   | { type: "oracle_unsubscribe"; marketIds: string[] }
+  | { type: "spot_subscribe" }
+  | { type: "spot_unsubscribe" }
   | { type: "ping" }
 
 // ─── Server → Client ────────────────────────────────────────────────────────
@@ -134,8 +136,15 @@ export type ServerMsg =
   | { type: "peer_rejoined"; duelId: string; address: string }
   | { type: "peer_forfeit"; duelId: string; address: string }
   | {
+      /**
+       * Practice deck — synthetic cards, no on-chain markets. `strike` is
+       * 1e9-fixed (same scale as `oracle_tick.spot`); `expiryOffsetMs` is
+       * relative to lockup start (the client anchors the clock when the
+       * 5th swipe lands); `pUp` is the design win-probability of UP and
+       * doubles as the scoring `p_swiped` (UP → pUp, DOWN → 1 − pUp).
+       */
       type: "practice_session"
-      cards: Array<{ expiry_market_id: string; strike: string; expiry: string }>
+      cards: Array<{ strike: string; expiryOffsetMs: number; pUp: number }>
       botSwipes: boolean[]
     }
   | {
@@ -173,6 +182,16 @@ export type ServerMsg =
       spot: string
       expiry: string
       settlementPrice: string | null
+      timestampMs: number
+    }
+  | {
+      /**
+       * Market-less live Pyth BTC spot for practice mode — same source,
+       * cadence, and 1e9 scale as `oracle_tick.spot`, but requires no
+       * `ExpiryMarket` id. Sent only to sockets that `spot_subscribe`d.
+       */
+      type: "spot_tick"
+      spot: string
       timestampMs: number
     }
   | {

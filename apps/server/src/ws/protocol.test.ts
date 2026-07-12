@@ -64,4 +64,13 @@ describe("parseClientMsg", () => {
     expect(parseClientMsg(JSON.stringify(null))).toBeNull()
     expect(parseClientMsg(JSON.stringify("string-not-object"))).toBeNull()
   })
+
+  test("parses spot_subscribe / spot_unsubscribe (no args)", () => {
+    expect(parseClientMsg(JSON.stringify({ type: "spot_subscribe" }))?.type).toBe(
+      "spot_subscribe"
+    )
+    expect(
+      parseClientMsg(JSON.stringify({ type: "spot_unsubscribe" }))?.type
+    ).toBe("spot_unsubscribe")
+  })
 })
