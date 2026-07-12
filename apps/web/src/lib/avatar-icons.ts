@@ -75,7 +75,7 @@ export const AVATAR_CATEGORY_LABELS: Record<AvatarCategory, string> = {
 
 const ICON_IDS = new Set(AVATAR_ICONS.map((i) => i.id))
 
-export function isValidIconId(id: string | null | undefined): id is string {
+export function isValidIconId(id: unknown): id is string {
   return typeof id === "string" && ICON_IDS.has(id)
 }
 
