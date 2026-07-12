@@ -154,21 +154,15 @@ export const env = {
   // at a modest max_connections; 10 leaves headroom for psql / migrations.
   dbPoolMax: Number(process.env.DB_POOL_MAX ?? 10),
 
-  // Sponsored gas (Enoki, primary). Falls back to self-sponsor below when
-  // Enoki is unconfigured or its call fails.
-  enokiPrivateKey: process.env.ENOKI_PRIVATE_KEY,
+  // Sponsored gas (address-balance sponsor). SPONSOR_SECRET_KEY is a bech32
+  // suiprivkey1… key whose address holds SUI in its on-chain address balance
+  // (fund once via src/scripts/fund-sponsor.ts). Unset → POST /sponsor 503s
+  // and the web client falls back to wallet-paid gas.
+  sponsorSecretKey: process.env.SPONSOR_SECRET_KEY,
+  // Max gas (MIST) the sponsor will cover per transaction — a defensive cap
+  // enforced by the `gasBudget` validator (default 0.1 SUI).
+  sponsorMaxGasBudget: BigInt(process.env.SPONSOR_MAX_GAS_BUDGET ?? 100_000_000),
   allowedOrigin: process.env.ALLOWED_ORIGIN, // unset/"" → *
-
-  // Self-sponsor fallback for /sponsor: when Enoki is unconfigured or a
-  // `createSponsoredTransaction`/`executeSponsoredTransaction` call throws,
-  // the server pays gas itself from this address's SUI balance instead of
-  // failing the request. Defaults to the keeper/bot key so a deploy that
-  // already funds the keeper wallet gets the fallback for free; set
-  // SPONSOR_SECRET_KEY explicitly to use a dedicated sponsor wallet.
-  sponsorSecretKey:
-    process.env.SPONSOR_SECRET_KEY ??
-    process.env.KEEPER_SECRET_KEY ??
-    process.env.BOT_SECRET_KEY,
 
   // Matchmaking: sync-only PvP. No bot-fill — Practice Mode covers
   // solo-vs-bot through a separate WS message.

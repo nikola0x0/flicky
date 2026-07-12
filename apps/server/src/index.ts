@@ -6,7 +6,8 @@
  *     POST /deckmaster/generate
  *     GET  /deckmaster/reveal?hash=0x…
  *     GET  /manager?owner=0x…   (resolve a player's AccountWrapper id)
- *     POST /sponsor   (Enoki sponsored gas, allowlisted)
+ *     GET  /sponsor             (sponsor address + network the client builds against)
+ *     POST /sponsor   (address-balance sponsored gas, allowlisted)
  *
  *   WS:
  *     /ws             matchmaking queue + duel-room broadcasts
@@ -95,9 +96,9 @@ const server = Bun.serve({
           queues: queueStats(),
         },
         services: {
-          sponsor: env.enokiPrivateKey
+          sponsor: env.sponsorSecretKey
             ? "enabled"
-            : "disabled (no ENOKI_PRIVATE_KEY)",
+            : "disabled (no SPONSOR_SECRET_KEY)",
           keeper: env.keeperEnabled
             ? env.keeperSecretKey
               ? "enabled"
@@ -148,6 +149,7 @@ log.info(`listening on http://localhost:${server.port}`)
 log.info(`  GET  /health`)
 log.info(`  POST /deckmaster/generate`)
 log.info(`  GET  /deckmaster/reveal?hash=0x...`)
+log.info(`  GET  /sponsor`)
 log.info(`  POST /sponsor`)
 log.info(`  GET  /oracle/list?asset=BTC`)
 log.info(`  GET  /oracle/{id}`)
@@ -159,8 +161,8 @@ log.info(`  GET  /openapi.json`)
 log.info(`  GET  /docs (Scalar UI)`)
 log.info(`  WS   /ws`)
 log.info(`Go to http://localhost:${server.port}/docs for documentation`)
-if (!env.enokiPrivateKey) {
-  log.warn(`sponsor disabled — set ENOKI_PRIVATE_KEY in apps/server/.env`)
+if (!env.sponsorSecretKey) {
+  log.warn(`sponsor disabled — set SPONSOR_SECRET_KEY in apps/server/.env`)
 }
 if (!env.flickyPackageId) {
   log.warn(

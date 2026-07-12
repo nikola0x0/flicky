@@ -7,7 +7,7 @@
  *   room_subscribe + chat_react (player-only filter via mirror).
  *
  * No network: indexer + keeper + match-clock + oracle-stream are all
- * disabled via env. Sponsor stays disabled (no ENOKI_PRIVATE_KEY). The
+ * disabled via env. Sponsor stays disabled (no SPONSOR_SECRET_KEY). The
  * test focuses on the WS protocol surface that doesn't require the
  * Sui RPC to be reachable.
  */
