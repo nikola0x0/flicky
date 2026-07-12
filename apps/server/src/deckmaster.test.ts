@@ -8,12 +8,14 @@ import {
   allocateSignBalance,
   allocateZones,
   buildDeck,
+  buildPracticeDeck,
   commitDeck,
   decideDeckSize,
   fetchDeck,
   hashToHex,
   knownHashCount,
   POS_INF_TICK,
+  PRACTICE_EXPIRY_OFFSETS_MS,
   rememberDeck,
   resolveDeckBounds,
   selectMarketRows,
@@ -797,3 +799,53 @@ describe.skipIf(!HAS_TEST_DB)(
     })
   }
 )
+
+describe("buildPracticeDeck", () => {
+  const SPOT = 67_000_000_000_000n // $67k, 1e9-fixed
+
+  test("returns 5 cards with the staggered expiry offsets, in order", () => {
+    const cards = buildPracticeDeck(SPOT, SEED_A)
+    expect(cards.length).toBe(5)
+    expect(cards.map((c) => c.expiryOffsetMs)).toEqual([
+      ...PRACTICE_EXPIRY_OFFSETS_MS,
+    ])
+  })
+
+  test("strikes sit on the correct side of spot for their pUp", () => {
+    // pUp > 0.5 → UP favored → strike below spot; pUp < 0.5 → above.
+    for (const c of buildPracticeDeck(SPOT, SEED_A)) {
+      expect(c.pUp).not.toBe(0.5)
+      if (c.pUp > 0.5) expect(c.strike < SPOT).toBe(true)
+      else expect(c.strike > SPOT).toBe(true)
+    }
+  })
+
+  test("strikes are near-ATM (0 < |offset| < 20 bps) at 15-45s horizons", () => {
+    for (const c of buildPracticeDeck(SPOT, SEED_A)) {
+      const diff = c.strike > SPOT ? c.strike - SPOT : SPOT - c.strike
+      expect(diff > 0n).toBe(true)
+      expect(Number((diff * 10_000n) / SPOT)).toBeLessThan(20)
+    }
+  })
+
+  test("pUp values come from the zone ladder, sign-balanced 2/3 or 3/2", () => {
+    const cards = buildPracticeDeck(SPOT, SEED_A)
+    const favored = cards.map((c) => Math.max(c.pUp, 1 - c.pUp))
+    for (const p of favored) expect([0.56, 0.61, 0.63]).toContain(p)
+    const upFavored = cards.filter((c) => c.pUp > 0.5).length
+    expect(upFavored === 2 || upFavored === 3).toBe(true)
+  })
+
+  test("deterministic per seed, varies across seeds", () => {
+    expect(buildPracticeDeck(SPOT, SEED_A)).toEqual(
+      buildPracticeDeck(SPOT, SEED_A)
+    )
+    expect(buildPracticeDeck(SPOT, SEED_A)).not.toEqual(
+      buildPracticeDeck(SPOT, SEED_B)
+    )
+  })
+
+  test("rejects non-positive spot", () => {
+    expect(() => buildPracticeDeck(0n, SEED_A)).toThrow()
+  })
+})

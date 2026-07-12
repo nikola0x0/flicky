@@ -543,6 +543,66 @@ function buildSviDeck(
   })
 }
 
+// ─── Practice deck (synthetic — no markets, no commit-reveal) ────────────────
+
+/** Per-card settle times for a practice match, ms after lockup start
+ *  (lockup = the moment the player swipes their 5th card). Staggered so the
+ *  45s watch phase pays off card-by-card instead of all at once. */
+export const PRACTICE_EXPIRY_OFFSETS_MS = [
+  15_000, 22_500, 30_000, 37_500, 45_000,
+] as const
+
+export interface PracticeCard {
+  /** Strike price, 1e9-fixed USD — same scale as `readBtcSpot`. */
+  strike: bigint
+  /** Settle time relative to lockup start; the client anchors the clock. */
+  expiryOffsetMs: number
+  /** Digital-BS win-probability of UP at gen time. Doubles as the scoring
+   *  `p_swiped` (practice has no Predict SVI to snapshot): a swipe UP scores
+   *  against `pUp`, DOWN against `1 - pUp`. */
+  pUp: number
+}
+
+/**
+ * Synthetic practice deck. Same placement machinery as `buildSviDeck`
+ * (PRG-shuffled sign balance + difficulty zones, `ZONE_TARGET_PROB`
+ * probability ladder, digital-BS inversion via `sviRawStrike`) but with
+ * time-to-expiry = each card's short `PRACTICE_EXPIRY_OFFSETS_MS` — so
+ * strikes land close enough to spot (single-digit bps) that the live Pyth
+ * feed genuinely crosses them during the 45s lockup. No market snapping, no
+ * dedup, no mint probing: nothing on-chain ever sees these strikes.
+ *
+ * Strikes are anchored at gen-time spot; the player may swipe for a while
+ * before lockup, drifting the true probabilities. Acceptable for practice —
+ * outcomes stay live-price-driven either way.
+ */
+export function buildPracticeDeck(
+  spot: bigint,
+  seed: Uint8Array,
+  deckSize = PRACTICE_EXPIRY_OFFSETS_MS.length
+): PracticeCard[] {
+  if (spot <= 0n) {
+    throw new Error("buildPracticeDeck: spot must be positive")
+  }
+  const stream = prgStream(seed)
+  const signs = allocateSignBalance(deckSize, stream)
+  const zones = allocateZones(deckSize, stream)
+  return Array.from({ length: deckSize }, (_, i) => {
+    const expiryOffsetMs =
+      PRACTICE_EXPIRY_OFFSETS_MS[
+        Math.min(i, PRACTICE_EXPIRY_OFFSETS_MS.length - 1)
+      ]
+    const targetP = ZONE_TARGET_PROB[zones[i]]
+    // T = the card's offset (as if lockup started now): expiry=offset, now=0.
+    const strike = sviRawStrike(spot, signs[i], targetP, expiryOffsetMs, 0)
+    return {
+      strike,
+      expiryOffsetMs,
+      pUp: signs[i] < 0 ? targetP : 1 - targetP,
+    }
+  })
+}
+
 /**
  * Build a price-space deck of `deckSize` cards distributed round-robin
  * across `markets` (so a full deck can be built from as few as ONE live
