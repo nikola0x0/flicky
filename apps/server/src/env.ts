@@ -96,8 +96,14 @@ export const env = {
   // at a modest max_connections; 10 leaves headroom for psql / migrations.
   dbPoolMax: Number(process.env.DB_POOL_MAX ?? 10),
 
-  // Sponsored gas (Enoki).
-  enokiPrivateKey: process.env.ENOKI_PRIVATE_KEY,
+  // Sponsored gas (address-balance sponsor). SPONSOR_SECRET_KEY is a bech32
+  // suiprivkey1… key whose address holds SUI in its on-chain address balance
+  // (fund once via src/scripts/fund-sponsor.ts). Unset → POST /sponsor 503s
+  // and the web client falls back to wallet-paid gas.
+  sponsorSecretKey: process.env.SPONSOR_SECRET_KEY,
+  // Max gas (MIST) the sponsor will cover per transaction — a defensive cap
+  // enforced by the `gasBudget` validator (default 0.1 SUI).
+  sponsorMaxGasBudget: BigInt(process.env.SPONSOR_MAX_GAS_BUDGET ?? 100_000_000),
   allowedOrigin: process.env.ALLOWED_ORIGIN, // unset/"" → *
 
   // Matchmaking: sync-only PvP. No bot-fill — Practice Mode covers

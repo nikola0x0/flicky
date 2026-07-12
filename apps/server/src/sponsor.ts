@@ -1,28 +1,50 @@
 /**
- * Enoki sponsored-transaction service.
+ * Address-balance sponsored-transaction service.
  *
- * Two-step protocol:
+ * The server holds a sponsor **keypair** (`SPONSOR_SECRET_KEY`) whose SUI
+ * sits in its on-chain **address balance** (funded once via
+ * `0x2::coin::send_funds` — see `src/scripts/fund-sponsor.ts`). Gas is paid
+ * from that balance with an empty gas payment (`setGasPayment([])`), NOT from
+ * nominated gas coins, so concurrent sponsored transactions don't contend for
+ * a shared gas coin.
  *
- *   POST /sponsor  { action: "create", network, transactionKindBytes, sender }
- *     → { bytes, digest }                  Enoki sponsor signature pre-baked
+ * Protocol (client-builds flow — the SDK-recommended one):
  *
- *   POST /sponsor  { action: "execute", digest, signature }
- *     → { digest }                         Final on-chain digest
+ *   GET  /sponsor
+ *     → { sponsor, network }               so the client learns the gas owner
  *
- * Client signs the `bytes` field returned from `create` with the user's
- * wallet (`signTransaction`, NOT signAndExecute — the wallet must NOT pay
- * gas), then POSTs the resulting signature back as `execute`. The
- * fallback path (wallet-paid signAndExecute) is wired in
- * `apps/web/src/lib/sponsor.ts` so a server outage degrades gracefully.
+ *   POST /sponsor  { transaction, userSignature }
+ *     → { digest }                         validated, co-signed, executed
  *
- * Allowlist:
- *   Every entry function flicky's PTBs issue is listed below. Enoki
- *   rejects any transaction whose MoveCalls escape this list — protects
- *   the sponsor wallet from being drained by an attacker crafting
- *   arbitrary transactions through the public sponsor route.
+ * The client sets the sponsor as gas owner + an empty gas payment, builds the
+ * transaction, and the player's wallet signs the *final* bytes. It POSTs those
+ * bytes + the user signature; the server validates them against the policy
+ * below, adds the sponsor's signature, and executes. The client falls back to
+ * wallet-paid gas (dev only) when the server is unreachable / unconfigured —
+ * wired in `apps/web/src/lib/sponsor.ts`.
+ *
+ * Policy (validators, replacing Enoki's `allowedMoveCallTargets`):
+ *   - `defaults()`   — valid sender (not the sponsor), address-balance-only
+ *                      gas, gas coin unused, sender-only withdrawals, dry-run
+ *                      succeeds, bounded epoch expiration.
+ *   - `userSignatureMatchesSender()` — the supplied signature is the sender's,
+ *                      verified before the sponsor co-signs.
+ *   - `gasBudget({ max })` — cap the gas the sponsor will cover.
+ *   - `allowedFunctions([...])` — every entry function flicky's PTBs issue.
+ *                      Any MoveCall outside this list is rejected, protecting
+ *                      the sponsor's balance from being drained by arbitrary
+ *                      transactions through the public route.
  */
-import { EnokiClient } from "@mysten/enoki"
+import {
+  allowedFunctions,
+  createSponsor,
+  defaults,
+  gasBudget,
+  userSignatureMatchesSender,
+  type Sponsor,
+} from "@mysten-incubation/sponsor"
 import { env } from "./env"
+import { decodeKeypair, getSuiClient } from "./lib/sui"
 import { makeLogger } from "./log"
 import { clientIp, consume } from "./ratelimit"
 
@@ -82,7 +104,7 @@ const DEEPBOOK_PREDICT_FNS = [
   "market_key::down",
 ]
 
-export type EnokiNetwork = "testnet" | "mainnet"
+export type SponsorNetwork = "testnet" | "mainnet"
 
 /**
  * DeepBook Predict package ids per network. Testnet defaults to what
@@ -91,12 +113,12 @@ export type EnokiNetwork = "testnet" | "mainnet"
  * `DEEPBOOK_PREDICT_PACKAGE_ID` if you only target one network) at
  * deploy time so a typo can't silently approve an attacker's package.
  */
-function resolveDeepbookPackage(network: EnokiNetwork): string {
+function resolveDeepbookPackage(network: SponsorNetwork): string {
   if (network === "testnet") return env.deepbookPredictPackageId
   // network === "mainnet"
   const mainnet =
     process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET ??
-    (network === ("mainnet" as EnokiNetwork) ? null : null)
+    (network === ("mainnet" as SponsorNetwork) ? null : null)
   if (mainnet) return mainnet
   throw new Error(
     "DeepBook Predict mainnet package not configured. Set DEEPBOOK_PREDICT_PACKAGE_MAINNET " +
@@ -104,7 +126,7 @@ function resolveDeepbookPackage(network: EnokiNetwork): string {
   )
 }
 
-function resolveFlickyPackage(network: EnokiNetwork): string {
+function resolveFlickyPackage(network: SponsorNetwork): string {
   const override = process.env[`FLICKY_PACKAGE_${network.toUpperCase()}`]
   if (override) return override
   if (network === "testnet" && env.flickyPackageId) return env.flickyPackageId
@@ -114,7 +136,7 @@ function resolveFlickyPackage(network: EnokiNetwork): string {
   )
 }
 
-function resolveSwapPackage(network: EnokiNetwork): string | null {
+function resolveSwapPackage(network: SponsorNetwork): string | null {
   const override = process.env[`SWAP_PACKAGE_${network.toUpperCase()}`]
   if (override) return override
   if (network === "testnet") return env.swapPackageId
@@ -123,7 +145,7 @@ function resolveSwapPackage(network: EnokiNetwork): string | null {
   return null
 }
 
-export function buildAllowedTargets(network: EnokiNetwork): string[] {
+export function buildAllowedTargets(network: SponsorNetwork): string[] {
   const flicky = resolveFlickyPackage(network)
   const deepbook = resolveDeepbookPackage(network)
   const swap = resolveSwapPackage(network)
@@ -142,7 +164,7 @@ export function sponsorCorsHeaders(reqOrigin: string | null): Record<string, str
   if (!raw || raw === "*") {
     return {
       "Access-Control-Allow-Origin": reqOrigin || "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "content-type",
       "Access-Control-Max-Age": "86400",
       Vary: "Origin",
@@ -155,7 +177,7 @@ export function sponsorCorsHeaders(reqOrigin: string | null): Record<string, str
   const match = reqOrigin && allowed.includes(reqOrigin) ? reqOrigin : allowed[0]
   return {
     "Access-Control-Allow-Origin": match,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "content-type",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
@@ -173,6 +195,36 @@ export function isSponsorOriginAllowed(reqOrigin: string | null): boolean {
     .includes(reqOrigin)
 }
 
+// ─── Sponsor instance ────────────────────────────────────────────────────────
+
+/**
+ * The sponsor is bound to a single network (`env.network`) and client — its
+ * funded address balance and allowlist only make sense there. The web client
+ * reads the network back from `GET /sponsor`; per-request `network` overrides
+ * are intentionally ignored (a mismatched network would just fail the dry-run).
+ */
+function sponsorNetwork(): SponsorNetwork {
+  return env.network === "mainnet" ? "mainnet" : "testnet"
+}
+
+let _sponsor: Sponsor | null = null
+function getSponsor(): Sponsor | null {
+  if (_sponsor) return _sponsor
+  if (!env.sponsorSecretKey) return null
+  const signer = decodeKeypair(env.sponsorSecretKey)
+  _sponsor = createSponsor({
+    signer,
+    client: getSuiClient(),
+    validate: [
+      defaults(),
+      userSignatureMatchesSender(),
+      gasBudget({ max: env.sponsorMaxGasBudget }),
+      allowedFunctions(buildAllowedTargets(sponsorNetwork())),
+    ],
+  })
+  return _sponsor
+}
+
 // ─── Handler ────────────────────────────────────────────────────────────────
 
 function jsonRes(body: unknown, status: number, origin: string | null): Response {
@@ -182,17 +234,9 @@ function jsonRes(body: unknown, status: number, origin: string | null): Response
   })
 }
 
-let _enoki: EnokiClient | null = null
-function getEnoki(): EnokiClient | null {
-  if (_enoki) return _enoki
-  if (!env.enokiPrivateKey) return null
-  _enoki = new EnokiClient({ apiKey: env.enokiPrivateKey })
-  return _enoki
-}
-
 /**
- * Handle a POST /sponsor request. Returns null if the path/method isn't
- * sponsor-related so the caller can fall through to other handlers.
+ * Handle a /sponsor request. Returns null if the path isn't sponsor-related so
+ * the caller can fall through to other handlers.
  */
 export async function handleSponsorRequest(req: Request): Promise<Response | null> {
   const url = new URL(req.url)
@@ -203,24 +247,26 @@ export async function handleSponsorRequest(req: Request): Promise<Response | nul
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: sponsorCorsHeaders(origin) })
   }
-  if (req.method !== "POST") {
-    return jsonRes({ error: "POST only" }, 405, origin)
-  }
   if (!isSponsorOriginAllowed(origin)) {
     return jsonRes({ error: "Origin not allowed" }, 403, origin)
   }
-  const gate = consume("sponsor", clientIp(req, null))
-  if (!gate.ok) {
-    return jsonRes(
-      { error: "rate limited", retryMs: gate.retryMs },
-      429,
-      origin,
-    )
+
+  const sponsor = getSponsor()
+  if (!sponsor) {
+    return jsonRes({ error: "SPONSOR_SECRET_KEY not configured" }, 503, origin)
   }
 
-  const enoki = getEnoki()
-  if (!enoki) {
-    return jsonRes({ error: "ENOKI_PRIVATE_KEY not configured" }, 503, origin)
+  // GET /sponsor — config: the gas owner + network the client builds against.
+  if (req.method === "GET") {
+    return jsonRes({ sponsor: sponsor.address, network: sponsorNetwork() }, 200, origin)
+  }
+  if (req.method !== "POST") {
+    return jsonRes({ error: "GET or POST only" }, 405, origin)
+  }
+
+  const gate = consume("sponsor", clientIp(req, null))
+  if (!gate.ok) {
+    return jsonRes({ error: "rate limited", retryMs: gate.retryMs }, 429, origin)
   }
 
   let body: Record<string, unknown>
@@ -230,52 +276,49 @@ export async function handleSponsorRequest(req: Request): Promise<Response | nul
     return jsonRes({ error: "Invalid JSON body" }, 400, origin)
   }
 
+  const transaction = body.transaction as string | undefined
+  const userSignature = body.userSignature as string | string[] | undefined
+  if (!transaction || !userSignature) {
+    return jsonRes({ error: "Missing transaction or userSignature" }, 400, origin)
+  }
+
   try {
-    if (body.action === "create") {
-      // Default to testnet so the client doesn't have to send `network`
-      // for the common case. Explicit values are validated.
-      const networkRaw = (body.network as string | undefined) ?? "testnet"
-      if (networkRaw !== "testnet" && networkRaw !== "mainnet") {
-        return jsonRes({ error: "network must be testnet | mainnet" }, 400, origin)
-      }
-      const network = networkRaw as EnokiNetwork
-      const transactionKindBytes = body.transactionKindBytes as string | undefined
-      const sender = body.sender as string | undefined
-      if (!transactionKindBytes || !sender) {
+    // signAndExecuteTransaction validates the policy, co-signs, and executes.
+    // A policy decline is RETURNED ($kind: 'Rejected'), not thrown — only
+    // genuine errors (network, malformed bytes) reach the catch below.
+    const result = await sponsor.signAndExecuteTransaction({ transaction, userSignature })
+
+    switch (result.$kind) {
+      case "Rejected":
         return jsonRes(
-          { error: "Missing transactionKindBytes or sender" },
-          400,
+          {
+            error: "Sponsor policy rejected the transaction",
+            reason: result.reason,
+            issues: result.issues,
+          },
+          403,
           origin,
         )
+      case "FailedTransaction":
+        // Executed on-chain but aborted — the sponsor's gas is spent either way.
+        return jsonRes(
+          {
+            error: "Transaction executed but failed on-chain",
+            digest: result.FailedTransaction.digest,
+          },
+          502,
+          origin,
+        )
+      case "Transaction":
+        return jsonRes({ digest: result.Transaction.digest }, 200, origin)
+      default: {
+        const exhaustive: never = result
+        return jsonRes({ error: "Unexpected sponsor result", detail: exhaustive }, 500, origin)
       }
-      const result = await enoki.createSponsoredTransaction({
-        network,
-        transactionKindBytes,
-        sender,
-        allowedMoveCallTargets: buildAllowedTargets(network),
-        allowedAddresses: [sender],
-      })
-      return jsonRes({ bytes: result.bytes, digest: result.digest }, 200, origin)
     }
-
-    if (body.action === "execute") {
-      const digest = body.digest as string | undefined
-      const signature = body.signature as string | undefined
-      if (!digest || !signature) {
-        return jsonRes({ error: "Missing digest or signature" }, 400, origin)
-      }
-      const result = await enoki.executeSponsoredTransaction({ digest, signature })
-      return jsonRes({ digest: result.digest }, 200, origin)
-    }
-
-    return jsonRes(
-      { error: "Unknown action — use 'create' or 'execute'" },
-      400,
-      origin,
-    )
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    log.warn(`enoki call failed: ${message}`)
-    return jsonRes({ error: "Enoki call failed", detail: message }, 502, origin)
+    log.warn(`sponsor call failed: ${message}`)
+    return jsonRes({ error: "Sponsor call failed", detail: message }, 502, origin)
   }
 }
