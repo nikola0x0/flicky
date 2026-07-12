@@ -195,6 +195,17 @@ async function ensureSchema(): Promise<void> {
       updated_at       BIGINT NOT NULL
     )
   `
+  // Cosmetic per-address profile. Today just the chosen avatar icon id
+  // (mirrors apps/web/src/lib/avatar-icons.ts). Keyed by address so it can
+  // grow (display name, …) without depending on a player_rating row.
+  // avatar_icon NULL = gradient-only. All access is by primary key.
+  await sql`
+    CREATE TABLE IF NOT EXISTS player_profile (
+      address     TEXT PRIMARY KEY,
+      avatar_icon TEXT,
+      updated_at  BIGINT NOT NULL
+    )
+  `
   log.info(`schema ready on ${redactUrl(env.databaseUrl ?? "")}`)
 }
 
@@ -724,6 +735,76 @@ export async function clearPlayerRatings(): Promise<number> {
     SELECT COUNT(*)::int AS c FROM deleted
   `) as Array<{ c: number }>
   return rows[0]?.c ?? 0
+}
+
+// ─── Player profile (avatar) ─────────────────────────────────────────────────
+
+/** Chosen avatar icon id for `address`, or null if none set. */
+export async function getAvatarIcon(address: string): Promise<string | null> {
+  await ready()
+  const sql = getSql()
+  try {
+    const rows = (await sql`
+      SELECT avatar_icon FROM player_profile WHERE address = ${address}
+    `) as Array<{ avatar_icon: string | null }>
+    return rows[0]?.avatar_icon ?? null
+  } catch (e) {
+    log.error(`getAvatarIcon(${address}): ${describeError(e)}`)
+    return null
+  }
+}
+
+/**
+ * Batch avatar lookup: `address → iconId` for the addresses that have a
+ * row. Addresses with no profile row are omitted (the caller treats a
+ * missing key as null / gradient-only). One indexed `= ANY` query.
+ */
+export async function getAvatarIcons(
+  addresses: string[]
+): Promise<Record<string, string | null>> {
+  const out: Record<string, string | null> = {}
+  if (addresses.length === 0) return out
+  await ready()
+  const sql = getSql()
+  try {
+    // Bun.sql serializes a tagged-template array as a comma string (not a
+    // Postgres array), so `= ANY(${arr})` fails. Build a bound `IN ($1,…)`
+    // list instead — same `sql.unsafe(query, params)` pattern as
+    // `listRecentDuels`; values are bound, never interpolated.
+    const placeholders = addresses.map((_, i) => `$${i + 1}`).join(", ")
+    const rows = (await sql.unsafe(
+      `SELECT address, avatar_icon FROM player_profile WHERE address IN (${placeholders})`,
+      addresses
+    )) as Array<{ address: string; avatar_icon: string | null }>
+    for (const r of rows) out[r.address] = r.avatar_icon
+  } catch (e) {
+    log.error(`getAvatarIcons(${addresses.length}): ${describeError(e)}`)
+  }
+  return out
+}
+
+/**
+ * Set (or clear) the avatar icon for `address`. `iconId === null` stores
+ * NULL (gradient-only). Upsert — a new pick overwrites the old.
+ */
+export async function setAvatarIcon(
+  address: string,
+  iconId: string | null
+): Promise<void> {
+  await ready()
+  const sql = getSql()
+  try {
+    await sql`
+      INSERT INTO player_profile (address, avatar_icon, updated_at)
+      VALUES (${address}, ${iconId}, ${Date.now()})
+      ON CONFLICT (address) DO UPDATE SET
+        avatar_icon = EXCLUDED.avatar_icon,
+        updated_at  = EXCLUDED.updated_at
+    `
+  } catch (e) {
+    log.error(`setAvatarIcon(${address}): ${describeError(e)}`)
+    throw e
+  }
 }
 
 // ─── Deckmaster plaintext store (commit-reveal) ──────────────────────────────
