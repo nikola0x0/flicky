@@ -111,3 +111,47 @@ describe.skipIf(!HAS_TEST_DB)("predict_manager cache", () => {
     expect(await db.getCachedManager("0xpersist")).toBe("0xmgr-persist")
   })
 })
+
+describe.skipIf(!HAS_TEST_DB)("player_profile (avatar)", () => {
+  beforeEach(async () => {
+    await resetTables()
+  })
+
+  afterAll(async () => {
+    await db.closeDb()
+  })
+
+  test("getAvatarIcon returns null when no row exists", async () => {
+    expect(await db.getAvatarIcon("0xnobody")).toBeNull()
+  })
+
+  test("setAvatarIcon inserts; getAvatarIcon reads it back", async () => {
+    await db.setAvatarIcon("0xalice", "apple")
+    expect(await db.getAvatarIcon("0xalice")).toBe("apple")
+  })
+
+  test("setAvatarIcon upserts — a new pick overwrites the old", async () => {
+    await db.setAvatarIcon("0xalice", "apple")
+    await db.setAvatarIcon("0xalice", "crab")
+    expect(await db.getAvatarIcon("0xalice")).toBe("crab")
+  })
+
+  test("setAvatarIcon(null) clears the selection", async () => {
+    await db.setAvatarIcon("0xalice", "apple")
+    await db.setAvatarIcon("0xalice", null)
+    expect(await db.getAvatarIcon("0xalice")).toBeNull()
+  })
+
+  test("getAvatarIcons batch returns only addresses that have a row", async () => {
+    await db.setAvatarIcon("0xalice", "apple")
+    await db.setAvatarIcon("0xbob", "crab")
+    const map = await db.getAvatarIcons(["0xalice", "0xbob", "0xcarol"])
+    expect(map["0xalice"]).toBe("apple")
+    expect(map["0xbob"]).toBe("crab")
+    expect(map["0xcarol"]).toBeUndefined()
+  })
+
+  test("getAvatarIcons([]) returns an empty object", async () => {
+    expect(await db.getAvatarIcons([])).toEqual({})
+  })
+})
