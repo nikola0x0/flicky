@@ -353,6 +353,25 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     c.close()
   })
 
+  test("spot_subscribe / spot_unsubscribe are accepted silently", async () => {
+    const c = new WSClient(baseUrl)
+    await c.open()
+    c.send({ type: "hello", address: "0xspotwatcher" })
+    await c.waitFor({ type: "hello" })
+    c.send({ type: "spot_subscribe" })
+    c.send({ type: "spot_unsubscribe" })
+    // No error should come back; ping/pong proves the socket is healthy
+    // and both messages were dispatched (not "unknown_type").
+    c.send({ type: "ping" })
+    const pong = await c.waitFor<{ type: string }>({ type: "pong" })
+    expect(pong.type).toBe("pong")
+    const errors = c.received.filter(
+      (m) => (m as { type: string }).type === "error"
+    )
+    expect(errors).toHaveLength(0)
+    c.close()
+  })
+
   test("bad message types produce structured errors", async () => {
     const c = new WSClient(baseUrl)
     await c.open()

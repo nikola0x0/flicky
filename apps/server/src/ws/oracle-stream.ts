@@ -27,6 +27,9 @@ const log = makeLogger("oracle-stream")
 type AnyWs = ServerWebSocket<SocketState>
 
 const marketSubscribers = new Map<string, Set<AnyWs>>()
+// Market-less spot watchers (practice mode) — they get `spot_tick` (live
+// Pyth BTC spot only) instead of per-market `oracle_tick`.
+const spotSubscribers = new Set<AnyWs>()
 let _interval: ReturnType<typeof setInterval> | null = null
 // Last live BTC spot (1e9-fixed, same scale as card strikes). 6-24 exposes no
 // live per-market spot via the indexer (`oracle_prices` is only populated at
@@ -66,7 +69,16 @@ export function unsubscribeOracles(ws: AnyWs, marketIds: unknown): void {
   }
 }
 
+export function subscribeSpot(ws: AnyWs): void {
+  spotSubscribers.add(ws)
+}
+
+export function unsubscribeSpot(ws: AnyWs): void {
+  spotSubscribers.delete(ws)
+}
+
 export function onSocketCloseOracleStream(ws: AnyWs): void {
+  spotSubscribers.delete(ws)
   for (const id of ws.data.subscribedOracles) cleanupOne(ws, id)
   ws.data.subscribedOracles.clear()
 }
@@ -98,7 +110,7 @@ export function stopOracleStream(): void {
 
 async function tick(): Promise<void> {
   const ids = Array.from(marketSubscribers.keys())
-  if (ids.length === 0) return
+  if (ids.length === 0 && spotSubscribers.size === 0) return
   const now = Date.now()
   // One live Pyth BTC spot per tick, shared by every subscribed market (all
   // BTC — they differ by strike/expiry, not underlying). This is the same
@@ -110,6 +122,17 @@ async function tick(): Promise<void> {
     log.warn(`btc spot: ${e instanceof Error ? e.message : String(e)}`)
   }
   const spot = lastBtcSpot ?? "0"
+  // Market-less spot tick for practice sessions.
+  if (spotSubscribers.size > 0) {
+    const wire = JSON.stringify({ type: "spot_tick", spot, timestampMs: now })
+    for (const ws of spotSubscribers) {
+      try {
+        ws.send(wire)
+      } catch {
+        // close handler will clean up
+      }
+    }
+  }
   let pushed = 0
   await Promise.all(
     ids.map(async (id) => {
