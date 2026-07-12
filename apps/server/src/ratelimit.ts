@@ -121,3 +121,7 @@ registerLimit("ws:queue_join", { capacity: 3, refillPerSec: 1 / 2 })
 //   - chat_send / chat_react        1 msg / 1.5 s, burst 4
 registerLimit("ws:chat_send", { capacity: 4, refillPerSec: 1 / 1.5 })
 registerLimit("ws:chat_react", { capacity: 6, refillPerSec: 1 / 1 })
+//   - avatar:write   deliberate icon pick → 1 / 3 s, burst 5
+//   - avatar:read    batched + client-cached PK lookups → generous
+registerLimit("avatar:write", { capacity: 5, refillPerSec: 1 / 3 })
+registerLimit("avatar:read", { capacity: 30, refillPerSec: 5 })
