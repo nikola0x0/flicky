@@ -30,25 +30,33 @@
  *   - `userSignatureMatchesSender()` — the supplied signature is the sender's,
  *                      verified before the sponsor co-signs.
  *   - `gasBudget({ max })` — cap the gas the sponsor will cover.
- *   - `allowedFunctions([...])` — every entry function flicky's PTBs issue.
- *                      Any MoveCall outside this list is rejected, protecting
- *                      the sponsor's balance from being drained by arbitrary
- *                      transactions through the public route.
+ *   - `allowedTargets(network)` — every MoveCall must hit an allowlisted
+ *                      `pkg::module::fn` (see `buildAllowedTargets`) or a Sui
+ *                      system-framework package. Protects the sponsor's
+ *                      balance from being drained by arbitrary transactions
+ *                      through the public route.
  */
 import {
-  allowedFunctions,
+  analyzers,
+  createAnalyzer,
   createSponsor,
   defaults,
   gasBudget,
   userSignatureMatchesSender,
   type Sponsor,
 } from "@mysten-incubation/sponsor"
+import { Transaction } from "@mysten/sui/transactions"
+import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { decodeKeypair, getSuiClient } from "./lib/sui"
 import { makeLogger } from "./log"
 import { clientIp, consume } from "./ratelimit"
 
 const log = makeLogger("sponsor")
+
+// Re-exported so tests (and any consumer) can read the resolved package ids
+// the allowlist is built from without importing `./env` separately.
+export { env }
 
 // ─── Allowlist of MoveCall targets ──────────────────────────────────────────
 
@@ -76,7 +84,7 @@ const FLICKY_FNS = [
   "duel::settle_card_free",
   "duel::finalize",
   "duel::finalize_free",
-  "duel::finalize_test_one_oracle",
+  "duel::finalize_test_one_price",
 ]
 
 /**
@@ -88,20 +96,27 @@ const FLICKY_FNS = [
  * is intentionally NOT in this list — only treasury wallets do that and
  * they don't need sponsored gas.
  */
-const SWAP_FNS = [
-  "swap::swap_x_for_y",
-  "swap::swap_y_for_x",
+const SWAP_FNS = ["swap::swap_x_for_y", "swap::swap_y_for_x"]
+
+/**
+ * Account registry functions (6-24 protocol).
+ *
+ * Player accounts in Enoki ZkLogin context — registry for account discovery
+ * and account-level operations (funding, withdrawals, auth generation).
+ */
+const ACCOUNT_FNS = [
+  "account_registry::new",
+  "account::share",
+  "account::generate_auth",
+  "account::deposit_funds",
+  "account::withdraw_funds",
 ]
 
 const DEEPBOOK_PREDICT_FNS = [
-  "predict::create_manager",
-  "predict::mint",
-  "predict::redeem",
-  "predict::redeem_permissionless",
-  "predict_manager::deposit",
-  "predict_manager::withdraw",
-  "market_key::up",
-  "market_key::down",
+  "expiry_market::load_live_pricer",
+  "expiry_market::mint_exact_quantity",
+  "expiry_market::mint_exact_amount",
+  "expiry_market::redeem_live",
 ]
 
 export type SponsorNetwork = "testnet" | "mainnet"
@@ -136,6 +151,16 @@ function resolveFlickyPackage(network: SponsorNetwork): string {
   )
 }
 
+function resolveAccountPackage(network: SponsorNetwork): string {
+  const override = process.env[`ACCOUNT_PACKAGE_${network.toUpperCase()}`]
+  if (override) return override
+  if (network === "testnet" && env.accountPackageId) return env.accountPackageId
+  throw new Error(
+    `Cannot resolve account package for ${network} — set ACCOUNT_PACKAGE_${network.toUpperCase()} ` +
+      `(or publish via apps/contracts on testnet to populate deployed.json).`,
+  )
+}
+
 function resolveSwapPackage(network: SponsorNetwork): string | null {
   const override = process.env[`SWAP_PACKAGE_${network.toUpperCase()}`]
   if (override) return override
@@ -147,14 +172,113 @@ function resolveSwapPackage(network: SponsorNetwork): string | null {
 
 export function buildAllowedTargets(network: SponsorNetwork): string[] {
   const flicky = resolveFlickyPackage(network)
+  const account = resolveAccountPackage(network)
   const deepbook = resolveDeepbookPackage(network)
   const swap = resolveSwapPackage(network)
   const targets = [
     ...FLICKY_FNS.map((fn) => `${flicky}::${fn}`),
+    ...ACCOUNT_FNS.map((fn) => `${account}::${fn}`),
     ...DEEPBOOK_PREDICT_FNS.map((fn) => `${deepbook}::${fn}`),
   ]
   if (swap) targets.push(...SWAP_FNS.map((fn) => `${swap}::${fn}`))
   return targets
+}
+
+/**
+ * Extract fully-qualified `pkg::module::fn` targets for every MoveCall
+ * command in `tx`. Pure/synchronous — `getData()` reads the in-memory
+ * transaction builder, no RPC involved.
+ */
+export function moveCallTargets(tx: Transaction): string[] {
+  const data = tx.getData() as {
+    commands: Array<{
+      $kind: string
+      MoveCall?: { package: string; module: string; function: string }
+    }>
+  }
+  return data.commands
+    .filter((c) => c.$kind === "MoveCall" && c.MoveCall)
+    .map((c) => {
+      const mc = c.MoveCall as {
+        package: string
+        module: string
+        function: string
+      }
+      return `${normalizeSuiObjectId(mc.package)}::${mc.module}::${mc.function}`
+    })
+}
+
+const SYSTEM_FRAMEWORK_PKGS = new Set([
+  normalizeSuiObjectId("0x1"),
+  normalizeSuiObjectId("0x2"),
+  normalizeSuiObjectId("0x3"),
+])
+
+/**
+ * Assert every MoveCall in `tx` is allowlisted, throwing on the first that
+ * isn't. Sui system-framework packages (0x1/0x2/0x3) are always allowed —
+ * coin/pay/framework plumbing that coin resolution (merge/split for a
+ * multi-coin stake or a `coinWithBalance`) legitimately emits; they operate
+ * only on the sender's own objects and can't drain the sponsor.
+ *
+ * The `allowedTargets` validator enforces the same rule inside the sponsor
+ * pipeline; this standalone form is kept for direct/offline checks and tests.
+ */
+export function assertSelfSponsorTargetsAllowed(
+  tx: Transaction,
+  network: SponsorNetwork,
+): void {
+  const allowed = new Set(
+    buildAllowedTargets(network).map((t) => {
+      const [pkg, mod, fn] = t.split("::")
+      return `${normalizeSuiObjectId(pkg)}::${mod}::${fn}`
+    }),
+  )
+  const targets = moveCallTargets(tx)
+  for (const target of targets) {
+    const pkg = target.split("::")[0]
+    if (SYSTEM_FRAMEWORK_PKGS.has(pkg)) continue
+    if (!allowed.has(target)) {
+      throw new Error(
+        `sponsor: MoveCall target not allowlisted: ${target} (all targets: ${targets.join(", ")})`,
+      )
+    }
+  }
+}
+
+/**
+ * Sponsor-pipeline validator form of {@link assertSelfSponsorTargetsAllowed}:
+ * reject any MoveCall whose target is neither allowlisted nor a system
+ * framework package. Reads only the parsed transaction `data` (no dry-run).
+ */
+function allowedTargets(network: SponsorNetwork) {
+  const allowed = new Set(
+    buildAllowedTargets(network).map((t) => {
+      const [pkg, mod, fn] = t.split("::")
+      return `${normalizeSuiObjectId(pkg)}::${mod}::${fn}`
+    }),
+  )
+  return createAnalyzer({
+    dependencies: { data: analyzers.data },
+    analyze:
+      () =>
+      ({ data }) => {
+        const issues = data.commands
+          .flatMap((command) =>
+            command.$kind === "MoveCall" ? [command.MoveCall] : [],
+          )
+          .filter((mc) => {
+            const pkg = normalizeSuiObjectId(mc.package)
+            if (SYSTEM_FRAMEWORK_PKGS.has(pkg)) return false
+            return !allowed.has(`${pkg}::${mc.module}::${mc.function}`)
+          })
+          .map((mc) => ({
+            code: "FUNCTION_NOT_ALLOWED",
+            message: `MoveCall to disallowed function ${mc.package}::${mc.module}::${mc.function}.`,
+          }))
+        return issues.length ? { result: issues } : { result: null }
+      },
+  })
 }
 
 // ─── CORS ───────────────────────────────────────────────────────────────────
@@ -219,7 +343,7 @@ function getSponsor(): Sponsor | null {
       defaults(),
       userSignatureMatchesSender(),
       gasBudget({ max: env.sponsorMaxGasBudget }),
-      allowedFunctions(buildAllowedTargets(sponsorNetwork())),
+      allowedTargets(sponsorNetwork()),
     ],
   })
   return _sponsor

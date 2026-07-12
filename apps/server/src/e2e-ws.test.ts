@@ -105,7 +105,9 @@ class WSClient {
     this.ws.addEventListener("message", (e) => {
       const msg = JSON.parse(typeof e.data === "string" ? e.data : "")
       this.received.push(msg)
-      const idx = this.waiters.findIndex((w) => (msg as { type: string }).type === w.type)
+      const idx = this.waiters.findIndex(
+        (w) => (msg as { type: string }).type === w.type
+      )
       if (idx >= 0) {
         const w = this.waiters.splice(idx, 1)[0]
         clearTimeout(w.timer)
@@ -118,7 +120,9 @@ class WSClient {
     if (this.ws.readyState === WebSocket.OPEN) return
     await new Promise<void>((resolve, reject) => {
       this.ws.addEventListener("open", () => resolve(), { once: true })
-      this.ws.addEventListener("error", () => reject(new Error("ws error")), { once: true })
+      this.ws.addEventListener("error", () => reject(new Error("ws error")), {
+        once: true,
+      })
     })
   }
 
@@ -128,7 +132,9 @@ class WSClient {
 
   waitFor<T = unknown>({ type, timeoutMs = 2000 }: RecvOpts): Promise<T> {
     // First check already-received.
-    const existing = this.received.find((m) => (m as { type: string }).type === type)
+    const existing = this.received.find(
+      (m) => (m as { type: string }).type === type
+    )
     if (existing) return Promise.resolve(existing as T)
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -136,8 +142,8 @@ class WSClient {
         if (i >= 0) this.waiters.splice(i, 1)
         reject(
           new Error(
-            `timeout waiting for "${type}"; got: ${this.received.map((r) => (r as { type: string }).type).join(", ")}`,
-          ),
+            `timeout waiting for "${type}"; got: ${this.received.map((r) => (r as { type: string }).type).join(", ")}`
+          )
         )
       }, timeoutMs)
       this.waiters.push({ type, resolve: (m) => resolve(m as T), timer })
@@ -160,7 +166,9 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     const c = new WSClient(baseUrl)
     await c.open()
     c.send({ type: "hello", address: "0xalice" })
-    const hello = await c.waitFor<{ type: string; address: string }>({ type: "hello" })
+    const hello = await c.waitFor<{ type: string; address: string }>({
+      type: "hello",
+    })
     expect(hello.address).toBe("0xalice")
     const hist = await c.waitFor<{ type: string; messages: unknown[] }>({
       type: "chat_history",
@@ -178,11 +186,19 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     await a.waitFor({ type: "chat_history" })
     await b.waitFor({ type: "chat_history" })
     a.send({ type: "chat_send", text: "from-alice" })
-    const seenByA = await a.waitFor<{ type: string; from: string; text: string }>({
+    const seenByA = await a.waitFor<{
+      type: string
+      from: string
+      text: string
+    }>({
       type: "chat_message",
       timeoutMs: 2000,
     })
-    const seenByB = await b.waitFor<{ type: string; from: string; text: string }>({
+    const seenByB = await b.waitFor<{
+      type: string
+      from: string
+      text: string
+    }>({
       type: "chat_message",
       timeoutMs: 2000,
     })
@@ -209,7 +225,11 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     c.send({ type: "hello", address: "0xpracticeuser" })
     await c.waitFor({ type: "hello" })
     c.send({ type: "queue_join", tier: "practice" })
-    const err = await c.waitFor<{ type: string; code: string; message: string }>({
+    const err = await c.waitFor<{
+      type: string
+      code: string
+      message: string
+    }>({
       type: "error",
     })
     expect(err.code).toBe("practice_no_queue")
@@ -260,11 +280,16 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     creator.send({ type: "chat_react", duelId: DUEL_ID, emoji: "🔥" })
 
     // Both players should receive the reaction.
-    const creatorReact = await creator.waitFor<{ type: string; emoji: string }>({
-      type: "chat_reaction",
-      timeoutMs: 2000,
-    })
-    const challengerReact = await challenger.waitFor<{ type: string; emoji: string }>({
+    const creatorReact = await creator.waitFor<{ type: string; emoji: string }>(
+      {
+        type: "chat_reaction",
+        timeoutMs: 2000,
+      }
+    )
+    const challengerReact = await challenger.waitFor<{
+      type: string
+      emoji: string
+    }>({
       type: "chat_reaction",
       timeoutMs: 2000,
     })
@@ -276,7 +301,7 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     await flushTick()
     await flushTick()
     const spectatorReacts = spectator.received.filter(
-      (m) => (m as { type: string }).type === "chat_reaction",
+      (m) => (m as { type: string }).type === "chat_reaction"
     )
     expect(spectatorReacts).toHaveLength(0)
 
@@ -291,11 +316,13 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     c.send({ type: "hello", address: "0xoraclesub" })
     await c.waitFor({ type: "hello" })
     // Subscribe + unsubscribe should not produce an error message.
-    c.send({ type: "oracle_subscribe", oracleIds: ["0xabc"] })
-    c.send({ type: "oracle_unsubscribe", oracleIds: ["0xabc"] })
+    c.send({ type: "oracle_subscribe", marketIds: ["0xabc"] })
+    c.send({ type: "oracle_unsubscribe", marketIds: ["0xabc"] })
     await flushTick()
     await flushTick()
-    const errors = c.received.filter((m) => (m as { type: string }).type === "error")
+    const errors = c.received.filter(
+      (m) => (m as { type: string }).type === "error"
+    )
     expect(errors).toHaveLength(0)
     c.close()
   })
@@ -304,7 +331,9 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     const c = new WSClient(baseUrl)
     await c.open()
     c.send({ type: "totally-unknown" })
-    const err = await c.waitFor<{ type: string; code: string }>({ type: "error" })
+    const err = await c.waitFor<{ type: string; code: string }>({
+      type: "error",
+    })
     expect(err.code).toBe("unknown_type")
     c.close()
   })
@@ -313,7 +342,9 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     const c = new WSClient(baseUrl)
     await c.open()
     c.send({ type: "hello", address: "no-prefix" })
-    const err = await c.waitFor<{ type: string; code: string }>({ type: "error" })
+    const err = await c.waitFor<{ type: string; code: string }>({
+      type: "error",
+    })
     expect(err.code).toBe("bad_address")
     c.close()
   })

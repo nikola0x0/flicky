@@ -19,7 +19,6 @@ import { curveMonotoneX } from "@visx/curve"
 
 interface Tick {
   spot: string
-  forward: string
 }
 interface PriceSample {
   t: number
@@ -38,10 +37,10 @@ const PHOSPHOR = "#4aff9a"
  *  fall back to any available tick. `spot` is 1e9-scaled on chain. */
 function pickSpot(
   ticks: Record<string, Tick>,
-  cards: Array<{ oracle_id: string }>,
+  cards: Array<{ expiry_market_id: string }>
 ): number | null {
   for (const c of cards) {
-    const t = ticks[c.oracle_id]
+    const t = ticks[c.expiry_market_id]
     if (t?.spot) {
       const v = Number(t.spot) / 1e9
       if (v > 0) return v
@@ -108,7 +107,7 @@ export function BtcSpotChart({
   cards,
 }: {
   ticks: Record<string, Tick>
-  cards: Array<{ oracle_id: string }>
+  cards: Array<{ expiry_market_id: string }>
 }) {
   const spot = pickSpot(ticks, cards)
   const samples = useSpotHistory(spot)
@@ -126,7 +125,9 @@ export function BtcSpotChart({
     let tMax = Number.NEGATIVE_INFINITY
     let lo = Number.POSITIVE_INFINITY
     let hi = Number.NEGATIVE_INFINITY
-    const cutoff = samples.length ? samples[samples.length - 1].t - WINDOW_MS : 0
+    const cutoff = samples.length
+      ? samples[samples.length - 1].t - WINDOW_MS
+      : 0
     for (const s of samples) {
       if (s.t < cutoff) continue
       if (s.t > tMax) tMax = s.t
@@ -139,21 +140,25 @@ export function BtcSpotChart({
     // Zoom y to the visible range (TradingView-style), with a floor so a
     // dead-flat price still gets a sensible band instead of a zero-height
     // scale. Floor = 0.04% of price (~$27 at $67k).
-    if (!isFinite(lo) || !isFinite(hi)) return { xDomain: xd, yDomain: [0, 1] as [number, number] }
+    if (!isFinite(lo) || !isFinite(hi))
+      return { xDomain: xd, yDomain: [0, 1] as [number, number] }
     const mid = (lo + hi) / 2
     const floor = Math.max(mid * 0.0004, 1)
     let half = Math.max((hi - lo) / 2, floor)
     half *= 1.25 // headroom
-    return { xDomain: xd, yDomain: [mid - half, mid + half] as [number, number] }
+    return {
+      xDomain: xd,
+      yDomain: [mid - half, mid + half] as [number, number],
+    }
   }, [samples])
 
   const xScale = useMemo(
     () => scaleLinear<number>({ domain: xDomain, range: [0, iw] }),
-    [xDomain, iw],
+    [xDomain, iw]
   )
   const yScale = useMemo(
     () => scaleLinear<number>({ domain: yDomain, range: [ih, 0] }),
-    [yDomain, ih],
+    [yDomain, ih]
   )
 
   const last = samples[samples.length - 1]
@@ -230,7 +235,7 @@ export function BtcSpotChart({
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
-        className="font-pixel block h-auto w-full touch-none"
+        className="block h-auto w-full touch-none font-pixel"
         role="img"
         aria-label="BTC spot price"
         onPointerMove={onMove}
@@ -313,7 +318,13 @@ export function BtcSpotChart({
                 strokeDasharray="3 3"
                 strokeWidth={1}
               />
-              <circle cx={xHead} cy={yHead} r={2.6} fill={lineColor} filter="url(#btc-glow)" />
+              <circle
+                cx={xHead}
+                cy={yHead}
+                r={2.6}
+                fill={lineColor}
+                filter="url(#btc-glow)"
+              />
 
               {/* crosshair */}
               {hover && hoverSample && (
@@ -348,7 +359,9 @@ export function BtcSpotChart({
 
         {/* last-price tag pinned on the right axis (TradingView signature) */}
         {hasData && (
-          <g transform={`translate(${ml + iw}, ${mt + (hover ? hover.y : yHead)})`}>
+          <g
+            transform={`translate(${ml + iw}, ${mt + (hover ? hover.y : yHead)})`}
+          >
             <rect
               x={2}
               y={-7}

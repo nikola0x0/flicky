@@ -5,7 +5,7 @@
  *     GET  /health
  *     POST /deckmaster/generate
  *     GET  /deckmaster/reveal?hash=0x…
- *     GET  /manager?owner=0x…   (resolve a player's PredictManager id)
+ *     GET  /manager?owner=0x…   (resolve a player's AccountWrapper id)
  *     GET  /sponsor             (sponsor address + network the client builds against)
  *     POST /sponsor   (address-balance sponsored gas, allowlisted)
  *
@@ -23,10 +23,7 @@ import { env } from "./env"
 import { makeLogger } from "./log"
 import { CORS_HEADERS, corsPreflight, json } from "./lib/http"
 import { getSuiClient, decodeKeypair } from "./lib/sui"
-import {
-  handleDeckmasterRequest,
-  knownHashCount,
-} from "./deckmaster"
+import { handleDeckmasterRequest, knownHashCount } from "./deckmaster"
 import { handleDocsRequest } from "./docs"
 import { handleDuelsRequest } from "./duels-api"
 import { handleLeaderboardRequest } from "./leaderboard-api"
@@ -35,11 +32,7 @@ import { handleOracleRequest } from "./oracle"
 import { handleSponsorRequest } from "./sponsor"
 import { websocketHandler } from "./ws/handlers"
 import { newSocketState } from "./ws/matchmaking"
-import {
-  connectedAddressCount,
-  queueStats,
-  roomCount,
-} from "./ws/matchmaking"
+import { connectedAddressCount, queueStats, roomCount } from "./ws/matchmaking"
 import { startChatPruneLoop } from "./ws/chat"
 import { startMatchClock, stopMatchClock } from "./ws/match-clock"
 import {
@@ -63,7 +56,9 @@ async function safeListCursors(): Promise<unknown> {
   } catch (e) {
     // /health is read on demand and shouldn't 500 — but log so a broken
     // DB is visible in stderr, not silently empty in the response.
-    log.warn(`listCursors failed: ${e instanceof Error ? e.message : String(e)}`)
+    log.warn(
+      `listCursors failed: ${e instanceof Error ? e.message : String(e)}`
+    )
     return { error: "listCursors failed" }
   }
 }
@@ -109,9 +104,8 @@ const server = Bun.serve({
               ? "enabled"
               : "disabled (no KEEPER_SECRET_KEY)"
             : "disabled (KEEPER_ENABLED=false)",
-          indexer: env.indexerEnabled && env.flickyPackageId
-            ? "enabled"
-            : "disabled",
+          indexer:
+            env.indexerEnabled && env.flickyPackageId ? "enabled" : "disabled",
         },
         cursors,
         oracleStream: oracleStreamStats(),
@@ -142,7 +136,10 @@ const server = Bun.serve({
     const manager = await handleManagerRequest(req, url)
     if (manager) return manager
 
-    return new Response("Go to /docs for documentation", { status: 200, headers: CORS_HEADERS })
+    return new Response("Go to /docs for documentation", {
+      status: 200,
+      headers: CORS_HEADERS,
+    })
   },
 
   websocket: websocketHandler,
@@ -169,7 +166,7 @@ if (!env.sponsorSecretKey) {
 }
 if (!env.flickyPackageId) {
   log.warn(
-    `flicky package id not found — set FLICKY_PACKAGE_ID or publish via apps/contracts`,
+    `flicky package id not found — set FLICKY_PACKAGE_ID or publish via apps/contracts`
   )
 }
 
@@ -184,7 +181,9 @@ if (!env.flickyPackageId) {
 void ready()
   .then(() => log.info("postgres schema ready"))
   .catch((e) =>
-    log.error(`postgres init failed: ${e instanceof Error ? e.message : String(e)}`),
+    log.error(
+      `postgres init failed: ${e instanceof Error ? e.message : String(e)}`
+    )
   )
 
 if (env.indexerEnabled && env.flickyPackageId) {
@@ -204,7 +203,9 @@ if (env.keeperEnabled && env.keeperSecretKey && env.flickyPackageId) {
     const keeper = new Keeper(getSuiClient(), keypair, env.flickyPackageId)
     void keeper.start()
   } catch (e) {
-    log.error(`keeper boot failed: ${e instanceof Error ? e.message : String(e)}`)
+    log.error(
+      `keeper boot failed: ${e instanceof Error ? e.message : String(e)}`
+    )
   }
 } else if (env.keeperEnabled) {
   if (!env.keeperSecretKey) {
@@ -225,7 +226,9 @@ async function shutdown(signal: string): Promise<void> {
   try {
     server.stop()
   } catch (e) {
-    log.warn(`server.stop failed: ${e instanceof Error ? e.message : String(e)}`)
+    log.warn(
+      `server.stop failed: ${e instanceof Error ? e.message : String(e)}`
+    )
   }
   // Close the pool so in-flight queries drain and connections are
   // released cleanly before the process exits.

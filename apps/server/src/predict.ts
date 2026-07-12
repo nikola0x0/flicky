@@ -1,12 +1,22 @@
 /**
  * DeepBook Predict reads — used by the WS balance gate (before queueing)
- * and the settle keeper (when redeeming positions). Both need to look up
- * a player's PredictManager + its dUSDC balance.
+ * and the settle keeper (when redeeming positions).
  *
- * `PredictManager` is a shared object with an internal `owner: address`
- * field, so we can't enumerate via `getOwnedObjects`. Instead we walk
- * `PredictManagerCreated` events newest-first and match the `owner`
- * field. Mirrors the web client's `findPredictManager`.
+ * 6-24 model (current, only model left in this file): a player's funding
+ * account is a deterministic `account::AccountWrapper` derived from
+ * `(AccountRegistry, owner)` — see `deriveWrapperFor`/`readAccountBalance`
+ * below. No event scan needed.
+ *
+ * The 4-16 `findManagerFor` (walked `PredictManagerCreated` events to
+ * resolve a legacy `PredictManager` shared object) was deleted in Plan 2
+ * Task 6 — `keeper.ts` fully migrated to the account model in Task 5, and
+ * grep confirmed no remaining importers. The `predict_manager` Postgres
+ * table is still live: it's reused as the owner→wrapper cache for
+ * `deriveWrapperFor` below, but under a namespaced key
+ * (`WRAPPER_CACHE_PREFIX`) so a legacy 4-16 row — keyed by bare owner
+ * address, written by the now-deleted `findManagerFor` on a REUSED
+ * Postgres — can never be mistaken for a validated 6-24 wrapper. See the
+ * SAFETY note above `deriveWrapperFor`.
  */
 import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { Transaction } from "@mysten/sui/transactions"
@@ -15,158 +25,238 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { makeLogger } from "./log"
 import { getCachedManager, cacheManager } from "./db"
-import { getGraphQLClient } from "./lib/sui"
+import { STAKE_TIERS, type Tier } from "./ws/protocol"
 
 const log = makeLogger("predict")
 
-// Descending event scan via GraphQL (gRPC has no filtered event pagination).
-// `last: 50` + `before: startCursor` walks newest-first, page by page.
-const MANAGER_SCAN_QUERY = `query Scan($type: String!, $before: String) {
-  events(filter: { type: $type }, last: 50, before: $before) {
-    pageInfo { hasPreviousPage startCursor }
-    nodes { contents { json } }
-  }
-}`
-type ScanResult = {
-  data?: {
-    events?: {
-      pageInfo?: { hasPreviousPage: boolean; startCursor: string | null }
-      nodes?: Array<{ contents: { json: { manager_id: string; owner: string } } }>
-    }
-  }
+/**
+ * Run a devInspect PTB and return the raw BCS bytes of one command's first
+ * return value (`commandIndex` selects which command in a chained PTB,
+ * default the only/first one).
+ *
+ * Single call site for `client.core.simulateTransaction` in this file: the
+ * gRPC client's TS surface doesn't (yet) declare that method, so it's a
+ * pre-existing baseline typecheck error (see progress.md). Routing every
+ * devInspect through here keeps that at exactly one diagnostic no matter
+ * how many devInspect call sites this file grows — don't inline a second
+ * `client.core.simulateTransaction` call elsewhere.
+ */
+async function devInspectReturn(
+  client: SuiGrpcClient,
+  sender: string,
+  build: (tx: Transaction) => void,
+  commandIndex = 0
+): Promise<Uint8Array | undefined> {
+  const tx = new Transaction()
+  build(tx)
+  tx.setSender(sender)
+  const res = await client.core.simulateTransaction({
+    transaction: tx,
+    include: { commandResults: true },
+    // Plain-devInspect semantics: disable transaction checks. A chained read
+    // like `load_account(wrapper) -> balance<T>(&Account, ...)` returns an
+    // intermediate `&Account` reference that "checks" mode rejects, which
+    // silently drops the later command's return value (readAccountBalance then
+    // sees "no value"). Reads are read-only simulations, so disabling checks
+    // is safe and matches classic devInspect. Single-call reads are unaffected.
+    checksEnabled: false,
+  })
+  return res.commandResults?.[commandIndex]?.returnValues?.[0]?.bcs
 }
-
-// Safety backstop for the event scan: a manager's `PredictManagerCreated`
-// event lives at a fixed depth, but testnet churn (duplicate managers per
-// owner) keeps pushing it deeper. We scan until found or the stream is
-// exhausted; this cap only guards against a misbehaving RPC that never
-// reports `hasNextPage: false`. 5000 events ≈ the full testnet history.
-const MAX_MANAGER_SCAN_PAGES = 100
 
 /** PRD §Matchmaking: entry requires PredictManager balance ≥ 5 dUSDC. */
 export const MIN_BALANCE_FOR_QUEUE = 5_000_000n // 5 dUSDC, 6 decimals
 
+// Per-swipe premium quantity — MUST match web SWIPE_QUANTITY
+// (onboarding-modal.tsx) and server PROBE_QTY (mint-probe.ts). A deck is
+// at most MAX_DECK_SIZE cards.
+export const SWIPE_QUANTITY_MIST = 3_000_000n
+export const MAX_DECK_SIZE = 5n
+
 /**
- * Resolve the PredictManager logically owned by `owner`.
+ * dUSDC the funding account needs before queueing at `tier`: the tier stake
+ * plus the worst-case premium budget (5 cards × per-swipe quantity), since
+ * both the stake and every swipe premium draw from the same account. Floored
+ * at MIN_BALANCE_FOR_QUEUE so no tier drops below the protocol minimum.
+ */
+export function requiredQueueBalance(tier: Tier): bigint {
+  const required = STAKE_TIERS[tier] + MAX_DECK_SIZE * SWIPE_QUANTITY_MIST
+  return required > MIN_BALANCE_FOR_QUEUE ? required : MIN_BALANCE_FOR_QUEUE
+}
+
+// ─── 6-24 account model ─────────────────────────────────────────────────
+//
+// A player's funding account is a deterministic `account::AccountWrapper`
+// shared object derived from `(AccountRegistry, owner)` — no event scan
+// needed, just two devInspect reads (existence, then address), memoized
+// in the same `predict_manager` Postgres table the deleted 4-16
+// `findManagerFor` used to populate.
+//
+// SAFETY: on a REUSED Postgres (the deploy target), `predict_manager` may
+// still carry rows from the 4-16 era, keyed by bare owner address and
+// holding a legacy `PredictManager` id — NOT a 6-24 `AccountWrapper`. If
+// `deriveWrapperFor` read/wrote under the bare `owner` key, a stale 4-16
+// row would short-circuit the cache as if it were a validated wrapper
+// (no devInspect re-check), and that id would then be fed into
+// `settle_card`/`redeem_settled` (abort → keeper stuck) or
+// `readAccountBalance` (breaks the balance gate). `WRAPPER_CACHE_PREFIX`
+// namespaces every read/write this file does to the table under a key a
+// bare-owner legacy row can never match, so a legacy row can never be
+// returned as a wrapper — it just becomes permanently invisible to this
+// cache path, forcing a fresh (correct) devInspect derivation instead.
+
+/**
+ * Cache-key namespace for the 6-24 wrapper cache, so a legacy 4-16 row
+ * (keyed by bare owner address, written by the deleted `findManagerFor`)
+ * can never be matched by `deriveWrapperFor`'s cache read. See the SAFETY
+ * note above. Exported only so `predict.test.ts` can construct/assert
+ * against the exact namespaced key without duplicating the literal.
+ */
+export const WRAPPER_CACHE_PREFIX = "wrapper:v2:"
+
+/**
+ * Resolve the `AccountWrapper` address logically owned by `owner`.
  *
- * Fast path: a persistent SQLite cache (owner → manager_id). Manager ids
- * are permanent, so a hit is authoritative and skips all RPC.
+ * Fast path: a persistent Postgres cache (namespaced `wrapper:v2:${owner}`
+ * → wrapper address — see `WRAPPER_CACHE_PREFIX`). The wrapper address is
+ * deterministic and permanent once derived, so a hit is authoritative and
+ * skips all RPC.
  *
- * Slow path (cache miss): walk `PredictManagerCreated` events newest-first
- * until we match `owner` or the stream is exhausted, then memoize. The scan
- * is deliberately UNBOUNDED — an earlier 250-event cap silently dropped
- * managers older than the window, so the keeper and queue gate reported
- * "missing manager" for players whose manager was simply buried under newer
- * (often duplicate) creations.
+ * Slow path (cache miss): devInspect `derived_wrapper_exists(registry,
+ * owner)`. If false, the registry has no wrapper for this owner yet —
+ * that's authoritative (no unbounded scan involved, unlike the legacy
+ * 4-16 event walk this replaced). If true, devInspect
+ * `derived_wrapper_address(registry, owner)` and memoize the result.
  *
  * RETURN CONTRACT — callers depend on this:
- *   - string  → found.
- *   - null    → AUTHORITATIVE "no manager": we paged to the end of the
- *               stream (`hasNextPage === false`) without a match.
- *   - throws  → the scan could NOT be completed (RPC error, or it hit the
- *               page cap before exhausting). Callers MUST NOT treat this as
- *               "no manager" — doing so lets a transient RPC blip read as a
- *               missing manager, and the web bootstrap would mint a
- *               duplicate (the very churn that buried managers to begin
- *               with). Surface a retryable error instead.
+ *   - string  → found (derived and, since `exists` was true, live on-chain).
+ *   - null    → AUTHORITATIVE "no wrapper yet": `derived_wrapper_exists`
+ *               returned false.
+ *   - throws  → a devInspect call could NOT be completed (RPC error).
+ *               Callers MUST NOT treat this as "no wrapper" — that would
+ *               let a transient RPC blip read as "player has no account"
+ *               and risk the web bootstrap racing a duplicate setup.
  */
-export async function findManagerFor(
-  _client: SuiGrpcClient,
-  owner: string,
+export async function deriveWrapperFor(
+  client: SuiGrpcClient,
+  owner: string
 ): Promise<string | null> {
-  const cached = await getCachedManager(owner)
+  const cached = await getCachedManager(WRAPPER_CACHE_PREFIX + owner)
   if (cached) return cached
-  let before: string | null = null
-  // No try/catch: a query rejection propagates so the caller can tell
-  // "scan failed" apart from "scanned everything, found none".
-  for (let page = 0; page < MAX_MANAGER_SCAN_PAGES; page++) {
-    const res = (await getGraphQLClient().query({
-      query: MANAGER_SCAN_QUERY,
-      variables: {
-        type: `${env.deepbookPredictPackageId}::predict_manager::PredictManagerCreated`,
-        before,
-      },
-    })) as ScanResult
-    const ev = res.data?.events
-    for (const node of ev?.nodes ?? []) {
-      const p = node.contents.json
-      if (p.owner === owner) {
-        const id = normalizeSuiObjectId(p.manager_id)
-        await cacheManager(owner, id)
-        return id
-      }
-    }
-    if (!ev?.pageInfo?.hasPreviousPage) return null // exhausted — authoritative
-    before = ev.pageInfo.startCursor
+
+  // No try/catch: a devInspect rejection propagates so the caller can
+  // tell "lookup failed" apart from "registry says no wrapper".
+  const existsBytes = await devInspectReturn(client, owner, (tx) => {
+    tx.moveCall({
+      target: `${env.accountPackageId}::account_registry::derived_wrapper_exists`,
+      arguments: [tx.object(env.accountRegistryId), tx.pure.address(owner)],
+    })
+  })
+  if (!existsBytes) {
+    throw new Error(
+      `deriveWrapperFor(${owner}): derived_wrapper_exists returned no value`
+    )
   }
-  // Ran out of page budget before reaching the end — the scan is INCOMPLETE,
-  // not exhausted. Never seen at current volume (~10 pages), but we must not
-  // pretend "none found".
-  throw new Error(
-    `findManagerFor(${owner}): scan hit ${MAX_MANAGER_SCAN_PAGES}-page cap without exhausting the event stream`,
-  )
+  if (!bcs.bool().parse(existsBytes)) return null // authoritative — no wrapper yet
+
+  const addrBytes = await devInspectReturn(client, owner, (tx) => {
+    tx.moveCall({
+      target: `${env.accountPackageId}::account_registry::derived_wrapper_address`,
+      arguments: [tx.object(env.accountRegistryId), tx.pure.address(owner)],
+    })
+  })
+  if (!addrBytes) {
+    throw new Error(
+      `deriveWrapperFor(${owner}): derived_wrapper_address returned no value`
+    )
+  }
+  const wrapper = normalizeSuiObjectId(bcs.Address.parse(addrBytes))
+  await cacheManager(WRAPPER_CACHE_PREFIX + owner, wrapper)
+  return wrapper
 }
 
 /**
- * Read a PredictManager's dUSDC balance via devInspect — no signing /
+ * Read an AccountWrapper's dUSDC balance via devInspect — no signing /
  * gas required, but the sender address must be syntactically valid (we
  * pass the owner's address so the call looks natural in traces).
  *
- * Returns null if the call fails for any reason; callers decide whether
- * to fail open or closed.
+ * Chains `account::load_account(wrapper)` → `account::balance<DUSDC>(<that>,
+ * accumulatorRoot, clock)` in a single PTB (the second command consumes
+ * the first's `&Account` result). Throws on any devInspect failure —
+ * callers decide how to handle that (see `checkQueueBalanceGate`).
  */
-export async function readManagerBalance(
+export async function readAccountBalance(
   client: SuiGrpcClient,
   address: string,
-  managerId: string,
-): Promise<bigint | null> {
-  try {
-    const tx = new Transaction()
-    tx.moveCall({
-      target: `${env.deepbookPredictPackageId}::predict_manager::balance`,
-      typeArguments: [env.dusdcCoinType],
-      arguments: [tx.object(managerId)],
-    })
-    tx.setSender(address)
-    const res = await client.core.simulateTransaction({
-      transaction: tx,
-      include: { commandResults: true },
-    })
-    const ret = res.commandResults?.[0]?.returnValues?.[0]
-    if (!ret) return null
-    return BigInt(bcs.u64().parse(ret.bcs))
-  } catch (e) {
-    log.warn(`readManagerBalance(${managerId}): ${e instanceof Error ? e.message : String(e)}`)
-    return null
+  wrapper: string
+): Promise<bigint> {
+  const balanceBytes = await devInspectReturn(
+    client,
+    address,
+    (tx) => {
+      const account = tx.moveCall({
+        target: `${env.accountPackageId}::account::load_account`,
+        arguments: [tx.object(wrapper)],
+      })
+      tx.moveCall({
+        target: `${env.accountPackageId}::account::balance`,
+        typeArguments: [env.dusdcCoinType],
+        arguments: [
+          account,
+          tx.object(env.accumulatorRootId),
+          tx.object("0x6"),
+        ],
+      })
+    },
+    1 // the second command's return value (account::balance's u64)
+  )
+  if (!balanceBytes) {
+    throw new Error(
+      `readAccountBalance(${wrapper}): account::balance returned no value`
+    )
   }
+  return BigInt(bcs.u64().parse(balanceBytes))
 }
 
 export type BalanceGateResult =
-  | { ok: true; managerId: string; balance: bigint }
+  | { ok: true; wrapper: string; balance: bigint }
   | { ok: false; reason: "no_manager" }
-  | { ok: false; reason: "insufficient_balance"; managerId: string; balance: bigint }
-  | { ok: false; reason: "rpc_failed"; managerId?: string }
+  | {
+      ok: false
+      reason: "insufficient_balance"
+      wrapper: string
+      balance: bigint
+    }
+  | { ok: false; reason: "rpc_failed"; wrapper?: string }
 
 export async function checkQueueBalanceGate(
   client: SuiGrpcClient,
   owner: string,
+  required: bigint = MIN_BALANCE_FOR_QUEUE
 ): Promise<BalanceGateResult> {
-  let managerId: string | null
+  let wrapper: string | null
   try {
-    managerId = await findManagerFor(client, owner)
+    wrapper = await deriveWrapperFor(client, owner)
   } catch (e) {
-    // Incomplete scan ≠ "no manager". Fail as retryable so the player is
-    // told to try again, not (wrongly) that they have no PredictManager.
+    // A failed lookup ≠ "no wrapper". Fail as retryable so the player is
+    // told to try again, not (wrongly) that they have no funding account.
     log.warn(
-      `checkQueueBalanceGate(${owner}): manager lookup failed: ${e instanceof Error ? e.message : String(e)}`,
+      `checkQueueBalanceGate(${owner}): wrapper lookup failed: ${e instanceof Error ? e.message : String(e)}`
     )
     return { ok: false, reason: "rpc_failed" }
   }
-  if (!managerId) return { ok: false, reason: "no_manager" }
-  const balance = await readManagerBalance(client, owner, managerId)
-  if (balance === null) return { ok: false, reason: "rpc_failed", managerId }
-  if (balance < MIN_BALANCE_FOR_QUEUE) {
-    return { ok: false, reason: "insufficient_balance", managerId, balance }
+  if (!wrapper) return { ok: false, reason: "no_manager" }
+  let balance: bigint
+  try {
+    balance = await readAccountBalance(client, owner, wrapper)
+  } catch (e) {
+    log.warn(
+      `checkQueueBalanceGate(${owner}): balance read failed: ${e instanceof Error ? e.message : String(e)}`
+    )
+    return { ok: false, reason: "rpc_failed", wrapper }
   }
-  return { ok: true, managerId, balance }
+  if (balance < required) {
+    return { ok: false, reason: "insufficient_balance", wrapper, balance }
+  }
+  return { ok: true, wrapper, balance }
 }

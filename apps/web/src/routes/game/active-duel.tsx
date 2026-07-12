@@ -14,21 +14,38 @@ import type { Unsubscribe } from "@/hooks/use-flicky-socket"
 import {
   buildCreateDuelDusdcTx,
   buildJoinDuelDusdcTx,
-  fetchOracleSvi,
   resolveCreatedDuelId,
 } from "@/lib/flicky"
 import {
   DEEPBOOK,
   buildStakedSwipeTx,
-  quoteSwipePremium,
+  fetchAccountState,
+  fetchMarketTickSize,
+  fmtDusdc,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
-import { liveCardPnl, fmtDusdcSigned, fmtPnlPct } from "@/lib/pnl"
+import {
+  liveCardPnl,
+  fmtPnlPct,
+  upProbability,
+  type SwipeLite,
+} from "@/lib/pnl"
 import { SWIPE_WINDOW_MS, swipeWindowRemainingMs } from "@/lib/swipe-window"
 import { SWIPE_QUANTITY } from "@/components/onboarding-modal"
 import { WsErrorBanner } from "@/components/ws-error-banner"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
+
+/**
+ * Minimum AccountWrapper dUSDC balance to allow a swipe. Each swipe mints a
+ * real position whose premium (`entry_probability × SWIPE_QUANTITY / leverage`
+ * + fees) is withdrawn from the account; below this the mint aborts deep in
+ * `account::withdraw_balance` with an opaque code. The favored side's win
+ * probability is capped at ~0.65 (see deckmaster `ZONE_TARGET_PROB`), so its
+ * premium ≲ 0.7 × quantity — gate on that plus a small headroom so we prompt a
+ * top-up BEFORE the on-chain abort.
+ */
+const MIN_ACCOUNT_PER_SWIPE = (SWIPE_QUANTITY * 7n) / 10n
 
 /** Format a 1e9-scaled on-chain BTC price as a rounded USD string,
  *  e.g. "67235752957751" → "$67,236". Accepts the raw string or bigint. */
@@ -123,7 +140,7 @@ export interface RoomState {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
-  cards: Array<{ oracle_id: string; strike: string }>
+  cards: Array<{ expiry_market_id: string; strike: string }>
   p0Payout: string
   p0Premium: string
   p1Payout: string
@@ -139,14 +156,28 @@ export interface RoomState {
     upWon: boolean
     p0Pnl: string | null
     p1Pnl: string | null
-    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
   }>
   swipes: Array<{
     cardIdx: number
-    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
   }>
+}
+
+/**
+ * Narrows a wire swipe (which carries `orderId`) down to the `SwipeLite`
+ * shape `pnl.ts`'s helpers need. 6-24 dropped per-swipe `premium` from the
+ * wire (only `orderId` remains — the real premium needs a server-side
+ * lookup that isn't wired in yet), and `SwipeLite` no longer has a
+ * `premium` field: `liveCardPnl`/`markCardPnl` now project binary PnL from
+ * spot-vs-strike + `quantity` alone.
+ */
+function toSwipeLite(
+  swipe: { isUp: boolean; quantity: string; orderId: string } | null
+): SwipeLite | null {
+  return swipe ? { isUp: swipe.isUp, quantity: swipe.quantity } : null
 }
 
 export function ActiveDuel({
@@ -169,21 +200,24 @@ export function ActiveDuel({
   const [phase, setPhase] = useState<Phase>(
     resumeDuelId
       ? { kind: "AWAIT_REVEAL", duelId: resumeDuelId }
-      : { kind: "ENTRY", reason: "Setting up the match…" },
+      : { kind: "ENTRY", reason: "Setting up the match…" }
   )
   const [roomState, setRoomState] = useState<RoomState | null>(null)
   // serverNowMs - Date.now() from the latest match_tick. Corrects the local
   // clock so the swipe-window countdown tracks the chain-enforced deadline
   // even when the player's system clock is skewed. 0 until the first tick.
   const [serverClockOffsetMs, setServerClockOffsetMs] = useState(0)
-  // Live oracle prices, keyed by oracle id. Powers mark-to-market PnL.
+  // Live market prices + expiry, keyed by expiry_market_id. The
+  // `oracle_tick` WS message carries both — no separate on-chain/server
+  // expiry lookup needed. Powers mark-to-market PnL + the settle countdown.
   const [ticks, setTicks] = useState<
-    Record<string, { spot: string; forward: string }>
+    Record<string, { spot: string; expiry: string }>
   >({})
-  // Oracle expiries, keyed by oracle id. Needed to build MarketKey for
-  // swipe quotes and the swipe PTB. Resolved once per unique oracle
-  // when the deck arrives.
-  const [expiries, setExpiries] = useState<Record<string, bigint>>({})
+  // Market `tick_size`, keyed by expiry_market_id. Needed to build the
+  // swipe PTB's (lower_tick, higher_tick] pair. Resolved once per unique
+  // market (from the predict indexer, via `fetchMarketTickSize`) when the
+  // deck arrives.
+  const [tickSizes, setTickSizes] = useState<Record<string, bigint>>({})
   // Refs so the WS handler can read latest state without re-subscribing.
   const phaseRef = useRef(phase)
   phaseRef.current = phase
@@ -199,7 +233,7 @@ export function ActiveDuel({
       if (
         phaseRef.current.kind === "AWAIT_REVEAL" &&
         msg.cardsRevealed &&
-        msg.cards.length === 5
+        msg.cards.length === msg.cardCount
       ) {
         setPhase({
           kind: "SWIPING",
@@ -209,7 +243,7 @@ export function ActiveDuel({
       }
       if (
         phaseRef.current.kind === "SWIPING" &&
-        countMySwipes(msg as RoomState, account?.address) === 5
+        countMySwipes(msg as RoomState, account?.address) === msg.cardCount
       ) {
         setPhase({ kind: "AWAIT_SETTLEMENT", duelId: phaseRef.current.duelId })
       }
@@ -232,13 +266,14 @@ export function ActiveDuel({
     return () => send({ type: "room_unsubscribe", duelId: resumeDuelId })
   }, [resumeDuelId, send])
 
-  // Stream oracle ticks into local state. Used by mark-to-market PnL.
+  // Stream market ticks into local state. Used by mark-to-market PnL and
+  // the per-card settle countdown (`expiry`).
   useEffect(() => {
     return onMessage((msg) => {
       if (msg.type !== "oracle_tick") return
       setTicks((prev) => ({
         ...prev,
-        [msg.oracleId]: { spot: msg.spot, forward: msg.forward },
+        [msg.expiryMarketId]: { spot: msg.spot, expiry: msg.expiry },
       }))
     })
   }, [onMessage])
@@ -251,33 +286,39 @@ export function ActiveDuel({
     })
   }, [onMessage])
 
-  // When the deck arrives, fetch each unique oracle's expiry (needed to
-  // build MarketKey for quotes + swipes) and subscribe to ticks.
+  // When the deck arrives, prefetch each unique market's `tick_size`
+  // (needed to build the swipe PTB — see `deriveTicks` in lib/deepbook.ts)
+  // and subscribe to its live ticks. Expiry is NOT fetched here — it rides
+  // in on the `oracle_tick` WS message itself (see `ticks` above), so the
+  // client never discovers markets on its own.
   const oraclesReady =
-    roomState?.cards.length === 5 ? roomState.cards : null
+    roomState && roomState.cards.length === roomState.cardCount
+      ? roomState.cards
+      : null
   useEffect(() => {
     if (!oraclesReady) return
     let cancelled = false
-    const unique = Array.from(new Set(oraclesReady.map((c) => c.oracle_id)))
+    const unique = Array.from(
+      new Set(oraclesReady.map((c) => c.expiry_market_id))
+    )
     ;(async () => {
       const next: Record<string, bigint> = {}
       for (const id of unique) {
         try {
-          const info = await fetchOracleSvi(client, id)
-          next[id] = info.expiry
+          next[id] = await fetchMarketTickSize(id)
         } catch (e) {
-          console.warn(`fetchOracleSvi(${id}) failed`, e)
+          console.warn(`fetchMarketTickSize(${id}) failed`, e)
         }
       }
       if (cancelled) return
-      setExpiries((prev) => ({ ...prev, ...next }))
-      send({ type: "oracle_subscribe", oracleIds: unique })
+      setTickSizes((prev) => ({ ...prev, ...next }))
+      send({ type: "oracle_subscribe", marketIds: unique })
     })()
     return () => {
       cancelled = true
-      send({ type: "oracle_unsubscribe", oracleIds: unique })
+      send({ type: "oracle_unsubscribe", marketIds: unique })
     }
-  }, [oraclesReady, client, send])
+  }, [oraclesReady, send])
 
   // Creator: fire create_duel as soon as we mount with the deckHash
   // already captured from match_found at the pvp.tsx level. Subscribing
@@ -295,7 +336,7 @@ export function ActiveDuel({
         const deckHashBytes = hexToBytes(deckHash)
         if (deckHashBytes.length !== 32) {
           throw new Error(
-            `deck hash must be 32 bytes, got ${deckHashBytes.length}`,
+            `deck hash must be 32 bytes, got ${deckHashBytes.length}`
           )
         }
         const tx = await buildCreateDuelDusdcTx(
@@ -303,7 +344,7 @@ export function ActiveDuel({
           account.address,
           deckHashBytes,
           STAKE_TIERS[tier],
-          DEEPBOOK.dusdcType,
+          DEEPBOOK.dusdcType
         )
         const res = await sign.mutateAsync({ transaction: tx })
         // Sponsored-gas path returns only `{ digest }` — objectChanges
@@ -312,7 +353,7 @@ export function ActiveDuel({
         const duelId = await resolveCreatedDuelId(client, res.digest)
         if (!duelId) {
           throw new Error(
-            "create_duel landed but Duel id not yet indexed — try again",
+            "create_duel landed but Duel id not yet indexed — try again"
           )
         }
         // Hand off to the deep-linkable play route if the matchmaking
@@ -348,7 +389,7 @@ export function ActiveDuel({
           account.address,
           msg.duelId,
           STAKE_TIERS[tier],
-          DEEPBOOK.dusdcType,
+          DEEPBOOK.dusdcType
         )
         await sign.mutateAsync({ transaction: tx })
         if (onDuelReady) {
@@ -434,7 +475,7 @@ export function ActiveDuel({
           cardIdx={phase.cardIdx}
           roomState={roomState}
           managerId={managerId}
-          expiries={expiries}
+          tickSizes={tickSizes}
           ticks={ticks}
           myAddress={account.address}
           isWindowExpired={isWindowExpired}
@@ -443,7 +484,7 @@ export function ActiveDuel({
             setPhase((p) =>
               p.kind === "SWIPING"
                 ? { kind: "SWIPING", duelId: p.duelId, cardIdx: p.cardIdx + 1 }
-                : p,
+                : p
             )
           }
         />
@@ -480,7 +521,9 @@ function SwipeWindowBar({
   return (
     <div
       className={`flex items-center gap-2.5 border-2 px-3 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.5)] ${
-        danger ? "border-rose-500/70 bg-[#3a1717]" : "border-black/60 bg-[#0a0f1f]"
+        danger
+          ? "border-rose-500/70 bg-[#3a1717]"
+          : "border-black/60 bg-[#0a0f1f]"
       } ${urgent ? "countdown-urgent" : ""}`}
     >
       <img
@@ -490,7 +533,7 @@ function SwipeWindowBar({
         className="size-4 shrink-0 [image-rendering:pixelated]"
       />
       <span
-        className={`font-pixel shrink-0 text-base tracking-[0.2em] uppercase tabular-nums ${
+        className={`shrink-0 font-pixel text-base tracking-[0.2em] uppercase tabular-nums ${
           danger ? "text-rose-300" : "text-amber-300"
         }`}
       >
@@ -534,7 +577,7 @@ function PhaseSwiping({
   cardIdx,
   roomState,
   managerId,
-  expiries,
+  tickSizes,
   ticks,
   myAddress,
   isWindowExpired,
@@ -545,31 +588,22 @@ function PhaseSwiping({
   cardIdx: number
   roomState: RoomState
   managerId: string
-  expiries: Record<string, bigint>
-  ticks: Record<string, { spot: string; forward: string }>
+  tickSizes: Record<string, bigint>
+  ticks: Record<string, { spot: string; expiry: string }>
   myAddress: string
   isWindowExpired: boolean
   sign: ReturnType<typeof useFlickySign>
   onSwipeDone: () => void
 }) {
   const card = roomState.cards[cardIdx]
-  const expiry = card ? expiries[card.oracle_id] : undefined
-  const [quoteUp, setQuoteUp] = useState<{
-    premium: bigint
-    pImplied: bigint
-  } | null>(null)
-  const [quoteDown, setQuoteDown] = useState<{
-    premium: bigint
-    pImplied: bigint
-  } | null>(null)
+  const tick = card ? ticks[card.expiry_market_id] : undefined
+  const expiry = tick ? BigInt(tick.expiry) : undefined
+  const tickSize = card ? tickSizes[card.expiry_market_id] : undefined
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [chartModal, setChartModal] = useState<null | "btc" | "pnl">(null)
-  const client = useCurrentClient()
 
-  // 1 Hz wall-clock so the "settles in …" countdown ticks. Keyed off nothing
-  // but the interval — does NOT re-quote (that effect keys on the card), so
-  // it won't hammer devInspect.
+  // 1 Hz wall-clock so the "settles in …" countdown ticks.
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1000)
@@ -589,46 +623,6 @@ function PhaseSwiping({
   useEffect(() => {
     setDrag({ x: 0, active: false, flying: null })
   }, [cardIdx])
-
-  // Pre-quote both directions when the card changes. Frozen for the
-  // duration of this card — re-quoting on every oracle_tick would hammer
-  // devInspect. Contract still snapshots the real premium at swipe time.
-  useEffect(() => {
-    if (!card || !expiry) return
-    let cancelled = false
-    setQuoteUp(null)
-    setQuoteDown(null)
-    setError(null)
-    ;(async () => {
-      try {
-        const [up, down] = await Promise.all([
-          quoteSwipePremium(client, {
-            oracleSviId: card.oracle_id,
-            oracleExpiry: expiry,
-            strike: BigInt(card.strike),
-            isUp: true,
-            quantity: SWIPE_QUANTITY,
-          }),
-          quoteSwipePremium(client, {
-            oracleSviId: card.oracle_id,
-            oracleExpiry: expiry,
-            strike: BigInt(card.strike),
-            isUp: false,
-            quantity: SWIPE_QUANTITY,
-          }),
-        ])
-        if (cancelled) return
-        setQuoteUp(up)
-        setQuoteDown(down)
-      } catch (e) {
-        if (!cancelled)
-          setError(e instanceof Error ? e.message : String(e))
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [card?.oracle_id, card?.strike, expiry, client])
 
   const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
   const opponent = myIsP0 ? roomState.challenger : roomState.creator
@@ -652,27 +646,65 @@ function PhaseSwiping({
     )
   }
 
-  const tick = ticks[card.oracle_id]
-
   const doSwipe = async (isUp: boolean) => {
     if (isWindowExpired) return
+    if (!tickSize) {
+      setError("market tick size not loaded yet — try again in a moment")
+      return
+    }
     setBusy(true)
     setError(null)
     try {
+      // Pre-flight the account balance: each swipe's mint premium is
+      // withdrawn from the AccountWrapper, and if it can't cover it the tx
+      // aborts on-chain with an opaque `account::withdraw_balance` code.
+      // Catch it here and prompt a top-up instead of burning a sponsored tx.
+      const { balance } = await fetchAccountState(myAddress)
+      if (balance < MIN_ACCOUNT_PER_SWIPE) {
+        setError(
+          `Account balance low (${fmtDusdc(balance)}). Each swipe needs about ${fmtDusdc(
+            MIN_ACCOUNT_PER_SWIPE
+          )} of dUSDC in your account for the mint premium — top up your account, then swipe again.`
+        )
+        setDrag({ x: 0, active: false, flying: null })
+        return
+      }
       const tx = buildStakedSwipeTx({
         duelId,
-        oracleSviId: card.oracle_id,
-        managerId,
-        oracleExpiry: expiry,
+        wrapperId: managerId,
+        marketId: card.expiry_market_id,
         strike: BigInt(card.strike),
+        tickSize,
+        cardIdx,
         isUp,
         quantity: SWIPE_QUANTITY,
-        cardIdx,
+        stakeCoinType: roomState.stakeCoinType,
       })
       await sign.mutateAsync({ transaction: tx })
       onSwipeDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      // The mint's premium withdrawal failing surfaces as an opaque
+      // `account::withdraw_balance` abort (code 1) — translate it to the
+      // same actionable top-up guidance as the pre-flight check.
+      const insufficient =
+        /withdraw_balance|EInsufficient|abort code: 1\b/.test(msg)
+      // `strike_exposure_config::assert_mint_admission` (code 4) =
+      // ENetPremiumBelowMinimum: the swiped side is too unlikely for its
+      // premium to clear the protocol's floor — a long-shot bet that isn't
+      // placeable on this (usually short-expiry) market. The card leans the
+      // OTHER way; nudge the player there.
+      const longShotUnavailable =
+        /assert_mint_admission|ENetPremiumBelowMinimum|abort code: 4\b/.test(
+          msg
+        )
+      setError(
+        insufficient
+          ? "Your account ran out of dUSDC for this swipe's mint premium — top up your account and swipe again."
+          : longShotUnavailable
+            ? "That long-shot side is too unlikely to place on this market — swipe the other way (the favored call)."
+            : msg
+      )
       setDrag({ x: 0, active: false, flying: null })
     } finally {
       setBusy(false)
@@ -716,20 +748,33 @@ function PhaseSwiping({
   const cw = cardWidth.current || 320
   const rotate = (drag.x / (cw / 2)) * DRAG_MAX_ROTATE_DEG
   const transform =
-    flyOff ?? (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
+    flyOff ??
+    (drag.x === 0 ? "" : `translateX(${drag.x}px) rotate(${rotate}deg)`)
   const progress = Math.min(1, Math.abs(drag.x) / (cw * DRAG_COMMIT_FRACTION))
   const yesGlow = drag.x > 0 ? progress : 0
   const noGlow = drag.x < 0 ? progress : 0
 
-  const yesCost = quoteUp ? fmtDusdcSigned(-quoteUp.premium).trim() : "…"
-  const noCost = quoteDown ? fmtDusdcSigned(-quoteDown.premium).trim() : "…"
-  const yesOdds = quoteUp ? `${(Number(quoteUp.pImplied) / 1e7).toFixed(0)}%` : "…"
+  // 6-24 exposes no public on-chain quote (`load_live_pricer` runs inside
+  // the swipe PTB itself), so there's no real premium/odds to show
+  // pre-swipe. Both directions mint the same fixed `SWIPE_QUANTITY` of
+  // contracts — that's a stake size, not a quote, so it's honest to show.
+  const stakeLabel = fmtDusdc(SWIPE_QUANTITY)
   const hasNext = cardIdx + 1 < roomState.cards.length
 
   // Live settle countdown — the horizon the player is predicting over.
   // Colour ramps cyan → amber → rose as settlement nears.
   const remainingMs = expiry !== undefined ? Number(expiry) - nowMs : null
   const countdown = remainingMs !== null ? fmtCountdown(remainingMs) : null
+  // Estimated per-side win odds under the same digital-BS model as the live
+  // PnL mark (upProbability) — surfaces which side is the favored call vs the
+  // long-shot (whose premium may be too low to place on a short market), and
+  // drifts toward 0/100% as the card nears settlement.
+  const upProb =
+    tick && card && expiry !== undefined
+      ? upProbability(card.strike, tick.spot, Number(expiry), nowMs)
+      : null
+  const yesPct = upProb === null ? null : Math.round(upProb * 100)
+  const noPct = yesPct === null ? null : 100 - yesPct
   const countdownColor =
     remainingMs === null
       ? "text-white/50"
@@ -772,11 +817,14 @@ function PhaseSwiping({
       </div>
 
       {/* big, centered swipe card — fills the screen; next card peeks behind */}
-      <div className="relative flex-1 select-none" style={{ touchAction: "none" }}>
+      <div
+        className="relative flex-1 select-none"
+        style={{ touchAction: "none" }}
+      >
         {hasNext && (
           <div
             aria-hidden
-            className="pixel-tile no-hover absolute inset-x-4 bottom-3 top-6 bg-[#141d3a] bg-cover bg-center [image-rendering:pixelated]"
+            className="pixel-tile no-hover absolute inset-x-4 top-6 bottom-3 bg-[#141d3a] bg-cover bg-center [image-rendering:pixelated]"
             style={{ backgroundImage: "url(/assets/cards/card-back.png)" }}
           />
         )}
@@ -786,7 +834,7 @@ function PhaseSwiping({
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
-          className={`pixel-tile absolute inset-x-1 bottom-4 top-2 flex cursor-grab flex-col gap-2.5 bg-[#2c3c74] p-3 shadow-[inset_0_3px_0_rgba(255,255,255,0.1),inset_0_-4px_0_rgba(0,0,0,0.4)] ${
+          className={`pixel-tile absolute inset-x-1 top-2 bottom-4 flex cursor-grab flex-col gap-2.5 bg-[#2c3c74] p-3 shadow-[inset_0_3px_0_rgba(255,255,255,0.1),inset_0_-4px_0_rgba(0,0,0,0.4)] ${
             drag.active ? "" : "transition-transform duration-300 ease-out"
           } ${drag.flying ? "pointer-events-none" : "active:cursor-grabbing"}`}
           style={{ transform, willChange: "transform" }}
@@ -801,19 +849,19 @@ function PhaseSwiping({
             style={{ opacity: noGlow }}
           />
           {drag.x > 24 && (
-            <div className="font-pixel absolute bottom-56 left-4 z-30 -rotate-6 border-2 border-emerald-400 bg-[#0e1530]/80 px-3 py-1 text-2xl font-black text-emerald-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
+            <div className="absolute bottom-56 left-4 z-30 -rotate-6 border-2 border-emerald-400 bg-[#0e1530]/80 px-3 py-1 font-pixel text-2xl font-black text-emerald-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
               yes
             </div>
           )}
           {drag.x < -24 && (
-            <div className="font-pixel absolute right-4 bottom-56 z-30 rotate-6 border-2 border-rose-400 bg-[#0e1530]/80 px-3 py-1 text-2xl font-black text-rose-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
+            <div className="absolute right-4 bottom-56 z-30 rotate-6 border-2 border-rose-400 bg-[#0e1530]/80 px-3 py-1 font-pixel text-2xl font-black text-rose-400 uppercase shadow-[3px_3px_0_rgba(0,0,0,0.6)]">
               no
             </div>
           )}
 
           {/* title banner */}
           <div className="flex items-center justify-between border-2 border-black/55 bg-[#0e1530] px-2.5 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.45)]">
-            <span className="font-pixel flex items-center gap-1.5 text-base tracking-[0.18em] text-amber-300 uppercase">
+            <span className="flex items-center gap-1.5 font-pixel text-base tracking-[0.18em] text-amber-300 uppercase">
               <img
                 src="/assets/cards/asset-btc-16.png"
                 alt=""
@@ -829,16 +877,16 @@ function PhaseSwiping({
 
           {/* art window — pixel mascot reacts to the swipe direction */}
           <div className="crt-screen relative flex flex-1 items-center justify-center overflow-hidden border-2 border-black/55 bg-gradient-to-b from-[#243169] to-[#10183a] shadow-[inset_0_3px_0_rgba(255,255,255,0.05),inset_0_-3px_0_rgba(0,0,0,0.5)]">
-            <span className="absolute left-1 top-1 size-1.5 bg-black/50" />
-            <span className="absolute right-1 top-1 size-1.5 bg-black/50" />
+            <span className="absolute top-1 left-1 size-1.5 bg-black/50" />
+            <span className="absolute top-1 right-1 size-1.5 bg-black/50" />
             <span className="absolute bottom-1 left-1 size-1.5 bg-black/50" />
-            <span className="absolute bottom-1 right-1 size-1.5 bg-black/50" />
+            <span className="absolute right-1 bottom-1 size-1.5 bg-black/50" />
             <img
               src={artSrc}
               alt=""
               aria-hidden
               draggable={false}
-              className="pointer-events-none h-[88%] w-[88%] object-contain select-none [image-rendering:pixelated] [-webkit-user-drag:none]"
+              className="pointer-events-none h-[88%] w-[88%] object-contain select-none [-webkit-user-drag:none] [image-rendering:pixelated]"
               style={{
                 transform: `scale(${1 + progress * 0.18}) rotate(${rotate * 0.4}deg)`,
                 filter: `drop-shadow(0 0 12px ${artGlow})`,
@@ -857,7 +905,7 @@ function PhaseSwiping({
             </p>
             {countdown && (
               <p
-                className={`font-pixel mt-1.5 flex items-center gap-1.5 text-sm tracking-[0.2em] uppercase tabular-nums ${countdownColor}`}
+                className={`mt-1.5 flex items-center gap-1.5 font-pixel text-sm tracking-[0.2em] uppercase tabular-nums ${countdownColor}`}
               >
                 <img
                   src="/icons/clock.png"
@@ -899,16 +947,16 @@ function PhaseSwiping({
               />
               <div className="min-w-0">
                 <p className="font-pixel text-xs tracking-[0.2em] text-white/40 uppercase">
-                  yes odds
+                  stake
                 </p>
                 <p className="font-pixel text-lg text-emerald-300 tabular-nums">
-                  {yesOdds}
+                  {stakeLabel}
                 </p>
               </div>
             </div>
           </div>
 
-          {/* yes / no action chips */}
+          {/* yes / no action chips — with estimated per-side win odds */}
           <div className="grid grid-cols-2 gap-2">
             <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#3a1620] px-2 py-2">
               <img
@@ -917,18 +965,24 @@ function PhaseSwiping({
                 aria-hidden
                 className="size-4 [image-rendering:pixelated]"
               />
-              <span className="font-pixel text-lg text-rose-300 uppercase">no</span>
-              <span className="font-pixel text-sm text-rose-200/70 tabular-nums">
-                {noCost}
+              <span className="font-pixel text-lg text-rose-300 uppercase">
+                no
               </span>
+              {noPct !== null && (
+                <span className="font-pixel text-sm text-rose-300/70 tabular-nums">
+                  {noPct}%
+                </span>
+              )}
             </div>
             <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#163a26] px-2 py-2">
-              <span className="font-pixel text-sm text-emerald-200/70 tabular-nums">
-                {yesCost}
-              </span>
               <span className="font-pixel text-lg text-emerald-300 uppercase">
                 yes
               </span>
+              {yesPct !== null && (
+                <span className="font-pixel text-sm text-emerald-300/70 tabular-nums">
+                  {yesPct}%
+                </span>
+              )}
               <img
                 src="/icons/arrow_right.png"
                 alt=""
@@ -940,8 +994,10 @@ function PhaseSwiping({
         </div>
       </div>
 
-      {error && <p className="pt-2 text-center text-sm text-red-400">{error}</p>}
-      <p className="font-pixel pt-2 text-center text-[11px] tracking-[0.25em] text-white/40 uppercase">
+      {error && (
+        <p className="pt-2 text-center text-sm text-red-400">{error}</p>
+      )}
+      <p className="pt-2 text-center font-pixel text-[11px] tracking-[0.25em] text-white/40 uppercase">
         {busy ? "minting position…" : "swipe → yes · ← no"}
       </p>
 
@@ -956,7 +1012,7 @@ function PhaseSwiping({
       </ChartModal>
       <ChartModal
         open={chartModal === "pnl"}
-        title="live pnl"
+        title="projected pnl"
         onClose={() => setChartModal(null)}
       >
         <StreamingPnlChart
@@ -1062,7 +1118,7 @@ function ChartModal({
         {children}
       </div>
     </div>,
-    document.body,
+    document.body
   )
 }
 
@@ -1079,10 +1135,10 @@ function CardLedger({
 }: {
   roomState: RoomState
   myIsP0: boolean
-  ticks: Record<string, { spot: string; forward: string }>
+  ticks: Record<string, { spot: string }>
 }) {
   const settledByIdx = new Map(
-    roomState.cardOutcomes.map((o) => [o.cardIdx, o]),
+    roomState.cardOutcomes.map((o) => [o.cardIdx, o])
   )
   return (
     <div className="rounded border border-white/10 bg-white/5 text-sm">
@@ -1094,28 +1150,35 @@ function CardLedger({
             ? swipeSlot.p0Swipe
             : swipeSlot.p1Swipe
           : null
-        // % return on the premium paid for this card. `net` is the signed
-        // PnL (null when there's nothing to show) — drives the value color.
-        const premium = mySwipe ? BigInt(mySwipe.premium) : 0n
+        // % return relative to the swiped quantity (the wire no longer
+        // carries per-swipe `premium`, so there's no true cost basis here —
+        // `net` relative to `quantity` reads as "how much of your at-risk
+        // stake you're up/down", exact for the binary live projection).
+        // `net` is the signed PnL (null when there's nothing to show) —
+        // drives the value color.
+        const quantity = BigInt(toSwipeLite(mySwipe)?.quantity ?? "0")
         let net: bigint | null = null
         let pnlLabel = "—"
         if (settled) {
           const pnl = myIsP0 ? settled.p0Pnl : settled.p1Pnl
           if (pnl !== null) {
             net = BigInt(pnl)
-            pnlLabel = `${fmtPnlPct(net, premium)} (settled)`
+            pnlLabel = `${fmtPnlPct(net, quantity)} (settled)`
           } else {
             pnlLabel = "skipped"
           }
         } else if (mySwipe) {
           const live = liveCardPnl(
-            mySwipe,
+            toSwipeLite(mySwipe),
             card.strike,
-            ticks[card.oracle_id]?.forward,
+            ticks[card.expiry_market_id]?.spot
           )
           if (live !== null) {
             net = live
-            pnlLabel = `${fmtPnlPct(live, premium)} (live)`
+            // "projected", not "live PnL" — this is ±quantity (full
+            // notional), not the real payout-minus-premium P&L, so it can
+            // overstate the loss side. See lib/pnl.ts's SwipeLite doc.
+            pnlLabel = `${fmtPnlPct(live, quantity)} (projected)`
           } else {
             pnlLabel = "ticking…"
           }
@@ -1163,7 +1226,7 @@ function SettlingHandoff({ duelId }: { duelId: string }) {
         alt=""
         aria-hidden
         draggable={false}
-        className="size-56 select-none [image-rendering:pixelated] [-webkit-user-drag:none] drop-shadow-[0_0_22px_rgba(74,255,154,0.4)]"
+        className="size-56 drop-shadow-[0_0_22px_rgba(74,255,154,0.4)] select-none [-webkit-user-drag:none] [image-rendering:pixelated]"
       />
       <p className="font-pixel text-base tracking-[0.2em] text-emerald-300 uppercase">
         picks locked in
@@ -1230,13 +1293,10 @@ function nextCardIdx(rs: RoomState, myAddress: string | undefined): number {
     const my = isP0 ? s.p0Swipe : s.p1Swipe
     if (my) n = Math.max(n, s.cardIdx + 1)
   }
-  return Math.min(n, 5)
+  return Math.min(n, rs.cardCount)
 }
 
-function countMySwipes(
-  rs: RoomState,
-  myAddress: string | undefined,
-): number {
+function countMySwipes(rs: RoomState, myAddress: string | undefined): number {
   if (!myAddress) return 0
   const isP0 = myAddress.toLowerCase() === rs.creator.toLowerCase()
   let n = 0
@@ -1258,4 +1318,3 @@ function hexToBytes(hex: string): Uint8Array {
   }
   return bytes
 }
-

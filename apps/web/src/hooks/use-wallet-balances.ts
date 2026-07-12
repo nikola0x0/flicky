@@ -1,15 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 
-import {
-  DUSDC_COIN_TYPE,
-  SUI_COIN_TYPE,
-  fetchCoinBalance,
-} from "@/lib/swap"
-import {
-  findPredictManager,
-  getManagerDusdcBalance,
-} from "@/lib/deepbook"
+import { DUSDC_COIN_TYPE, SUI_COIN_TYPE, fetchCoinBalance } from "@/lib/swap"
+import { fetchAccountState } from "@/lib/deepbook"
 
 const BALANCE_ROOT_KEY = "wallet-balance"
 const MANAGER_BALANCE_KEY = "manager-balance"
@@ -55,22 +48,20 @@ export function useInvalidateWalletBalances() {
 }
 
 /**
- * PredictManager dUSDC balance, scaled to the same dUSDC base unit
- * (1e6 micro-units → human dUSDC) as `useDusdcBalance`. Returns the
- * float for direct UI rendering, and `managerId` for callers that
- * need to build deposit/withdraw PTBs.
+ * Predict AccountWrapper dUSDC balance, scaled to the same dUSDC base
+ * unit (1e6 micro-units → human dUSDC) as `useDusdcBalance`. Returns the
+ * float for direct UI rendering, and `managerId` (the wrapper id — kept
+ * under this name so existing call sites don't need to churn) for
+ * callers that need to build deposit/withdraw PTBs.
  */
 export function useManagerBalance() {
   const account = useCurrentAccount()
-  const client = useCurrentClient()
   return useQuery({
     queryKey: [MANAGER_BALANCE_KEY, account?.address ?? null],
     queryFn: async () => {
       if (!account) return { managerId: null as string | null, balance: 0 }
-      const mgr = await findPredictManager(client, account.address)
-      if (!mgr) return { managerId: null, balance: 0 }
-      const micro = await getManagerDusdcBalance(client, mgr.id)
-      return { managerId: mgr.id, balance: Number(micro) / 1e6 }
+      const { wrapperId, balance } = await fetchAccountState(account.address)
+      return { managerId: wrapperId, balance: Number(balance) / 1e6 }
     },
     enabled: !!account,
     refetchInterval: 5_000,
