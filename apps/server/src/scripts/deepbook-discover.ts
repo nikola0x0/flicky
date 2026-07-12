@@ -1,3 +1,4 @@
+// LEGACY 4-16 diagnostic — not migrated to 6-24 (see Plan 2)
 /**
  * Inspect the deployed DeepBook Predict objects on testnet and print the
  * derived address graph (transitive deps, live BTC MarketOracle, configs)
@@ -8,9 +9,12 @@
  */
 import { getSuiClient } from "../lib/sui"
 
-const PREDICT_PACKAGE = "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
-const PREDICT_REGISTRY = "0x43af14fed5480c20ff77e2263d5f794c35b9fab7e2212903127062f4fe2a6e64"
-const PREDICT_OBJECT = "0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a"
+const PREDICT_PACKAGE =
+  "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
+const PREDICT_REGISTRY =
+  "0x43af14fed5480c20ff77e2263d5f794c35b9fab7e2212903127062f4fe2a6e64"
+const PREDICT_OBJECT =
+  "0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a"
 
 async function describe(label: string, id: string) {
   const client = getSuiClient()
@@ -65,7 +69,7 @@ async function discoverLiveMarketOracles() {
       console.log(`  ${evtType}:`)
       for (const e of evts.data) {
         console.log(
-          `    tx=${e.id.txDigest.slice(0, 10)}…  ${JSON.stringify(e.parsedJson)}`,
+          `    tx=${e.id.txDigest.slice(0, 10)}…  ${JSON.stringify(e.parsedJson)}`
         )
       }
     } catch (err) {
@@ -92,9 +96,15 @@ async function discoverPackageDeps() {
       }
     }
     depAddrs.delete(PREDICT_PACKAGE.replace(/^0x/, ""))
-    depAddrs.delete("0000000000000000000000000000000000000000000000000000000000000001")
-    depAddrs.delete("0000000000000000000000000000000000000000000000000000000000000002")
-    console.log("  external addrs referenced by predict's public fn signatures:")
+    depAddrs.delete(
+      "0000000000000000000000000000000000000000000000000000000000000001"
+    )
+    depAddrs.delete(
+      "0000000000000000000000000000000000000000000000000000000000000002"
+    )
+    console.log(
+      "  external addrs referenced by predict's public fn signatures:"
+    )
     for (const a of depAddrs) console.log(`    0x${a}`)
   } catch (err) {
     console.log("  failed:", err instanceof Error ? err.message : err)

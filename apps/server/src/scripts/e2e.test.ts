@@ -1,448 +1,781 @@
 /**
- * End-to-end test against live Sui testnet.
+ * End-to-end test against live Sui testnet — predict-testnet-6-24 flow.
  *
- * Exercises the post-join lifecycle (create → join → settle_card × 5 →
- * finalize) against a real settled BTC `OracleSVI` from DeepBook Predict.
- * Asserts the tie-refund path: both players skip swipes ⇒ scores are
- * 0/0 ⇒ each receives their original stake back.
+ * Exercises the FULL staked-duel lifecycle against real 6-24 DeepBook
+ * Predict infrastructure:
+ *   fund player 1 → onboard both players' `AccountWrapper`s (create + share
+ *   + deposit dUSDC) → discover live BTC `ExpiryMarket`s from the predict
+ *   indexer → create/join/reveal a duel → both players ATOMICALLY mint a
+ *   real 6-24 position AND record the swipe (one PTB per swipe, chaining
+ *   `mint_exact_quantity`'s `order_id` into `duel::record_swipe`) → settle
+ *   via the `finalize_test_one_price` dev shortcut → assert a winner.
  *
- * Why no `record_swipe` step here: the Move contract correctly refuses to
- * record swipes against an already-settled oracle (`EOracleNotLive`). The
- * scoring + speed-multiplier logic is exhaustively covered by the Move
- * unit suite under `apps/contracts/tests/duel_tests.move` against a
- * mocked-active oracle. This test instead validates the chain-level
- * integration: TS signs PTBs → testnet executes → events emit → the
- * payout balances reconcile.
+ * This supersedes the 4-16 version of this file (deleted): that version
+ * discovered a settled `OracleSVI`, created a `PredictManager` via
+ * `predict::create_manager`, and used JSON-RPC `queryEvents` — all gone in
+ * 6-24 (no on-chain oracle scan, account model instead of PredictManager,
+ * gRPC + GraphQL replace JSON-RPC).
  *
- * Required env (in apps/server/.env.local):
- *   - ADMIN_SECRET_KEY (suiprivkey1…) — the test creator + funder
- *   - SUI_NETWORK=testnet (default)
+ * PTB recipes / ids are copied verbatim from this repo's own working code,
+ * NOT re-derived from SDK types (see `check-6-24-live.ts`, `keeper.ts`,
+ * `predict.ts`, `apps/web/src/lib/deepbook.ts`):
+ *   - gRPC `getObject` / `simulateTransaction` / `signAndExecuteTransaction`
+ *     / `waitForTransaction` shapes: `check-6-24-live.ts` + `keeper.ts`.
+ *   - devInspect + `bcs.Address` decode (wrapper resolution): `predict.ts`'s
+ *     `deriveWrapperFor` — reimplemented locally here (see note below) to
+ *     avoid `predict.ts`'s Postgres-backed cache, which throws if
+ *     `DATABASE_URL` is unset (this test has no DB dependency otherwise).
+ *   - atomic mint+record_swipe PTB: `apps/web/src/lib/deepbook.ts`'s
+ *     `buildStakedSwipeTx` (account::generate_auth → load_live_pricer →
+ *     mint_exact_quantity → duel::record_swipe, same arg order).
+ *   - deck hash BCS layout: `deckmaster.ts`'s `CardBcs`/`commitDeck`
+ *     (`{ expiry_market_id: bcs.Address, strike: bcs.u64() }`, sha2-256 of
+ *     the BCS-serialized vector) — this MUST match `duel.move`'s
+ *     `reveal_deck` (`hash::sha2_256(bcs::to_bytes(&cards))`) exactly.
+ *   - market discovery + strike snapping: reuses `deckmaster.ts`'s
+ *     `selectMarketRows` / `snapToAdmissionTick` / `readBtcSpot` directly
+ *     rather than reimplementing.
  *
- * Requirements:
- *   - admin wallet holds ≥ 0.3 testnet SUI
- *   - at least one SETTLED BTC OracleSVI exists on DeepBook Predict
+ * Duel id resolution / DuelFinalized lookup: reads `effects.changedObjects`
+ * (+ `objectTypes`) and `events` straight off the SAME `create_duel` /
+ * `finalize_test_one_price` transaction's `signAndExecuteTransaction`
+ * result (see `signAndWait`'s doc comment). An EARLIER version of this file
+ * used a GraphQL "last N events, filter by type, then filter by field"
+ * poll instead (mirroring `keeper.ts`'s `sweep()`) — confirmed live
+ * 2026-07-10 that poll can return a STALE match (e.g. a `Duel` from a
+ * previous run with the same creator address, not yet superseded in the
+ * indexer) and cause `join_duel` to abort against the wrong object
+ * (`EDuelNotPending`). Reading off the executing tx's own result has no
+ * such indexer-lag race.
  *
- * Skipped when ADMIN_SECRET_KEY is unset so default `bun test` runs in
- * CI (no secrets) stay green.
+ * Required env (apps/server/.env / .env.local) — checked in this priority
+ * order (SUI_DEPLOYER_PRIVATE_KEY / SUI_KEEPER_PRIVATE_KEY per the task
+ * brief's naming; ADMIN_SECRET_KEY as the actually-populated fallback in
+ * this repo's `.env` — all three decode to the same funded test address,
+ * `0x9826b0…`, confirmed live 2026-07-10 to hold ~92.62 dUSDC + ~3.48 SUI):
+ *   - one of SUI_DEPLOYER_PRIVATE_KEY / SUI_KEEPER_PRIVATE_KEY /
+ *     ADMIN_SECRET_KEY (bech32 `suiprivkey1…`) — player 0 (creator), must
+ *     hold SUI (gas) + dUSDC (stake + account deposit + player-1 funding).
+ *   - env.flickyPackageId resolves (apps/contracts/deployed.json or
+ *     FLICKY_PACKAGE_ID override).
+ *
+ * Skipped entirely (describe.skip) when the key or package id is missing,
+ * so a default `bun test` run (no secrets, CI) stays green. Run explicitly
+ * via `bun test:e2e` — spends real testnet gas + dUSDC.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
 import { createHash } from "node:crypto"
-import { Transaction } from "@mysten/sui/transactions"
+import { Transaction, coinWithBalance } from "@mysten/sui/transactions"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography"
 import { bcs } from "@mysten/sui/bcs"
-import { SUI_CLOCK_OBJECT_ID, normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc"
+import { normalizeSuiObjectId, normalizeSuiAddress } from "@mysten/sui/utils"
+import type { SuiGrpcClient } from "@mysten/sui/grpc"
 import { getSuiClient } from "../lib/sui"
+import { env } from "../env"
+import {
+  readBtcSpot,
+  selectMarketRows,
+  snapToAdmissionTick,
+  type MarketRow,
+} from "../deckmaster"
+
+// ─── Deck hash — MUST match duel.move's reveal_deck (sha2_256 of the BCS
+// vector) and deckmaster.ts's CardBcs field order exactly. ─────────────────
 
 const CardBcs = bcs.struct("Card", {
-  oracle_id: bcs.Address,
+  expiry_market_id: bcs.Address,
   strike: bcs.u64(),
 })
 const DeckBcs = bcs.vector(CardBcs)
 
-function deckHash(cards: Array<{ oracle_id: string; strike: bigint }>): Uint8Array {
+interface DeckCardIn {
+  expiryMarketId: string
+  strike: bigint
+}
+
+function deckHash(cards: DeckCardIn[]): Uint8Array {
   const bytes = DeckBcs.serialize(
     cards.map((c) => ({
-      oracle_id: normalizeSuiAddress(c.oracle_id),
+      expiry_market_id: normalizeSuiAddress(c.expiryMarketId),
       strike: c.strike.toString(),
-    })),
+    }))
   ).toBytes()
   return new Uint8Array(createHash("sha256").update(bytes).digest())
 }
 
-const DEEPBOOK_PREDICT_PACKAGE =
-  "0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138"
-const STAKE_MIST = 10_000_000n // 0.01 SUI per side
-const CHALLENGER_FUND_MIST = 200_000_000n // 0.2 SUI
+// ─── Env / gating ───────────────────────────────────────────────────────
 
-interface OracleSVI {
-  id: string
-  spot: bigint
-  forward: bigint
-  expiry: bigint
-  settlementPrice: bigint | null
+const rawKey =
+  process.env.SUI_DEPLOYER_PRIVATE_KEY ??
+  process.env.SUI_KEEPER_PRIVATE_KEY ??
+  process.env.ADMIN_SECRET_KEY
+const hasKey = typeof rawKey === "string" && rawKey.startsWith("suiprivkey1")
+const hasPackage = typeof env.flickyPackageId === "string"
+const canRun = hasKey && hasPackage
+
+// ─── Amounts (kept small — this spends real testnet dUSDC/SUI) ─────────────
+
+const STAKE = 1_000_000n // 1 dUSDC per side
+const DEPOSIT = 8_000_000n // 8 dUSDC — each player's AccountWrapper premium float
+const P1_FUND_SUI = 500_000_000n // 0.5 SUI — gas for ~8 player-1-signed txs
+const P1_FUND_DUSDC = 10_000_000n // 10 dUSDC — covers stake(1) + deposit(8) + buffer
+// `quantity` is NOT "1 contract" — it's raw DUSDC-notional units (same base
+// as `net_premium`/`Coin<DUSDC>`, 1e6 = $1). `strike_exposure_config::
+// assert_mint_admission` (predict pkg, abort code 4 = ENetPremiumBelowMinimum)
+// requires `net_premium = entry_probability * quantity / leverage >= 1_000_000`
+// (min_net_premium, $1). Confirmed live 2026-07-10 via devInspect probe
+// against a real ATM BTC ExpiryMarket (entry_probability ~0.50, both UP and
+// DOWN): quantity=1_000_000 (the value apps/web's SWIPE_QUANTITY currently
+// uses) aborts with code 4 (net_premium ~500k, half the minimum);
+// quantity=2_000_000 clears it right at the edge (net_premium ~1.015M);
+// quantity=3_000_000 clears it with ~50% margin (net_premium ~1.49-1.51M
+// either side, + ~30k trading fee) — used here for headroom against
+// per-market entry_probability drift.
+const SWIPE_QTY = 3_000_000n
+const DECK_SIZE = 5
+const MARKET_HEADROOM_MS = 5 * 60_000 // markets must clear "now + 5min"
+
+const U64_MAX = 2n ** 64n - 1n
+const LEVERAGE_1X = 1_000_000_000n // 1e9-scaled; 1e9 == 1x
+const POS_INF_TICK = (1n << 30n) - 1n
+const CLOCK = "0x6"
+
+/** UP=(K,+inf], lower=K/tick, higher=pos_inf_tick. DOWN=[0,K], lower=0, higher=K/tick. */
+function deriveTicks(strike: bigint, isUp: boolean, tickSize: bigint) {
+  const strikeTick = strike / tickSize
+  return isUp
+    ? { lowerTick: strikeTick, higherTick: POS_INF_TICK }
+    : { lowerTick: 0n, higherTick: strikeTick }
 }
 
-interface DeployedJson {
-  packageId: string | null
-}
+// ─── gRPC tx helpers (mirrors keeper.ts's signAndExecuteTransaction /
+// waitForTransaction call shape verbatim) ───────────────────────────────
 
-const adminKey = process.env.ADMIN_SECRET_KEY
-const hasAdmin = typeof adminKey === "string" && adminKey.startsWith("suiprivkey1")
-
-function loadPackageId(): string | null {
-  try {
-    const path = resolve(import.meta.dir, "../../../contracts/deployed.json")
-    const deployed = JSON.parse(readFileSync(path, "utf-8")) as DeployedJson
-    return deployed.packageId
-  } catch {
-    return null
-  }
-}
-
-async function findSettledBtcOracle(client: SuiJsonRpcClient): Promise<OracleSVI | null> {
-  const evts = await client.queryEvents({
-    query: { MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::registry::OracleCreated` },
-    limit: 30,
-    order: "descending",
-  })
-  for (const e of evts.data) {
-    const parsed = e.parsedJson as { oracle_id: string; underlying_asset: string }
-    if (parsed.underlying_asset !== "BTC") continue
-    const obj = await client.getObject({
-      id: parsed.oracle_id,
-      options: { showContent: true },
-    })
-    if (obj.data?.content?.dataType !== "moveObject") continue
-    const f = obj.data.content.fields as {
-      prices: { fields: { spot: string; forward: string } }
-      expiry: string
-      settlement_price:
-        | string
-        | null
-        | { fields: { vec: string[] } }
-    }
-    let settlementPrice: bigint | null = null
-    if (typeof f.settlement_price === "string") {
-      settlementPrice = BigInt(f.settlement_price)
-    } else if (f.settlement_price && typeof f.settlement_price === "object") {
-      const vec = f.settlement_price.fields?.vec ?? []
-      if (vec.length > 0) settlementPrice = BigInt(vec[0])
-    }
-    if (settlementPrice === null) continue // skip unsettled
-    return {
-      id: normalizeSuiObjectId(parsed.oracle_id),
-      spot: BigInt(f.prices.fields.spot),
-      forward: BigInt(f.prices.fields.forward),
-      expiry: BigInt(f.expiry),
-      settlementPrice,
-    }
-  }
-  return null
+interface SignAndWaitResult {
+  digest: string
+  /** `objectId -> Move type string` for every object touched by the tx
+   *  (only populated when `include.objectTypes` — always requested here). */
+  objectTypes: Record<string, string>
+  /** Created object ids (a subset of `objectTypes`' keys). */
+  createdObjectIds: string[]
+  /** Emitted events' `.json` payloads (only populated when
+   *  `include.events` — always requested here). */
+  events: Record<string, unknown>[]
 }
 
 /**
- * Resolve an address's PredictManager object id via the
- * `predict_manager::PredictManagerCreated` events filtered by owner.
- * Returns null when no manager exists for that owner — caller skips.
+ * gRPC signAndExecuteTransaction + waitForTransaction, requesting
+ * `effects`/`objectTypes`/`events` on the FIRST call so callers can read
+ * created-object ids and emitted events straight off the executing
+ * transaction — no separate GraphQL event query, hence no indexer-lag
+ * window. (An earlier version of this file used a GraphQL "last N events
+ * by type, filter by field" poll for both the created `Duel` id and the
+ * `DuelFinalized` event; confirmed live 2026-07-10 that poll can return a
+ * STALE match — e.g. an older `Duel` from a previous test run with the
+ * same creator address — while the freshly created one hadn't been
+ * indexed yet, causing `join_duel` to abort with `EDuelNotPending`
+ * against the wrong object. Reading straight off this tx's own effects
+ * has no such race.)
  */
-async function findManagerObject(
-  client: SuiJsonRpcClient,
-  owner: string,
-): Promise<string | null> {
-  const evts = await client.queryEvents({
-    query: {
-      MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::predict_manager::PredictManagerCreated`,
-    },
-    limit: 50,
-    order: "descending",
-  })
-  const normalized = normalizeSuiAddress(owner).toLowerCase()
-  for (const e of evts.data) {
-    const p = e.parsedJson as { manager_id: string; owner: string }
-    if (normalizeSuiAddress(p.owner).toLowerCase() === normalized) {
-      return normalizeSuiObjectId(p.manager_id)
-    }
-  }
-  return null
-}
-
-/**
- * Return `owner`'s PredictManager, creating one via `predict::create_manager`
- * if none exists. The `settle_card` no-swipe path never dereferences the
- * manager's positions (the `Option<Swipe>` slot is `None`, so the scorer
- * returns early), so any owned manager works as the arg — we just need a
- * real object id to pass.
- */
-async function ensureManagerObject(
-  client: SuiJsonRpcClient,
+async function signAndWait(
+  client: SuiGrpcClient,
   signer: Ed25519Keypair,
-): Promise<string> {
-  const owner = signer.toSuiAddress()
-  const existing = await findManagerObject(client, owner)
-  if (existing) return existing
-  const tx = new Transaction()
-  tx.moveCall({
-    target: `${DEEPBOOK_PREDICT_PACKAGE}::predict::create_manager`,
-    arguments: [],
-  })
+  tx: Transaction,
+  label: string
+): Promise<SignAndWaitResult> {
   const res = await client.signAndExecuteTransaction({
     transaction: tx,
     signer,
-    options: { showObjectChanges: true, showEffects: true },
+    include: { effects: true, objectTypes: true, events: true },
   })
-  if (res.effects?.status.status !== "success") {
-    throw new Error(`create_manager failed: ${res.effects?.status.error}`)
+  if (res.$kind !== "Transaction" || !res.Transaction.status.success) {
+    // NOTE: on an aborted (but executed) tx, the response is `{ $kind:
+    // "FailedTransaction", FailedTransaction: {...} }` — the failure
+    // detail lives under `FailedTransaction`, NOT `Transaction` (which is
+    // absent). An earlier version of this helper read `res.Transaction?.
+    // status.error?.message` unconditionally, which is always undefined
+    // in this branch — confirmed live 2026-07-10, it silently printed
+    // "unknown" for every on-chain abort instead of the real reason.
+    const failed =
+      res.$kind === "FailedTransaction" ? res.FailedTransaction : undefined
+    const reason = failed?.status.error?.message ?? "unknown"
+    throw new Error(`${label} failed: ${reason}`)
   }
-  await client.waitForTransaction({ digest: res.digest })
-  const created = (res.objectChanges ?? []).find(
-    (c) =>
-      c.type === "created" && c.objectType.includes("::predict_manager::PredictManager"),
-  ) as { objectId: string } | undefined
-  if (!created) throw new Error("PredictManager not in objectChanges")
-  return normalizeSuiObjectId(created.objectId)
+  const digest = res.Transaction.digest
+  await client.waitForTransaction({ digest })
+  const objectTypes = res.Transaction.objectTypes ?? {}
+  const createdObjectIds = (res.Transaction.effects?.changedObjects ?? [])
+    .filter((c) => c.idOperation === "Created")
+    .map((c) => c.objectId)
+  const events = (res.Transaction.events ?? [])
+    .map((e) => e.json)
+    .filter((j): j is Record<string, unknown> => j != null)
+  return { digest, objectTypes, createdObjectIds, events }
 }
 
-const describeFn = hasAdmin ? describe : describe.skip
+/** Find the single created object id whose Move type contains `typeFragment`
+ *  (e.g. `::duel::Duel<`). Throws if zero or more-than-one match — a
+ *  PTB that creates exactly one such object is expected at every call
+ *  site below. */
+function findCreatedObjectId(
+  result: SignAndWaitResult,
+  typeFragment: string,
+  label: string
+): string {
+  const matches = result.createdObjectIds.filter((id) =>
+    result.objectTypes[id]?.includes(typeFragment)
+  )
+  if (matches.length !== 1) {
+    throw new Error(
+      `${label}: expected exactly 1 created object matching "${typeFragment}", found ${matches.length} ` +
+        `(createdObjectIds=${JSON.stringify(result.createdObjectIds)}, objectTypes=${JSON.stringify(result.objectTypes)})`
+    )
+  }
+  return normalizeSuiObjectId(matches[0])
+}
 
-describeFn("e2e duel against testnet", () => {
-  let client: SuiJsonRpcClient
+// ─── Wrapper resolution — mirrors predict.ts's deriveWrapperFor's
+// devInspect shape (existsBytes / addrBytes via bcs.Address.parse), but
+// reimplemented locally WITHOUT predict.ts's Postgres cache (getSql()
+// throws if DATABASE_URL is unset — this test has no DB dependency
+// otherwise, so importing deriveWrapperFor directly would force a DB dep
+// onto a test that shouldn't need one). ─────────────────────────────────
+
+async function devInspectReturn(
+  client: SuiGrpcClient,
+  sender: string,
+  build: (tx: Transaction) => void,
+  commandIndex = 0
+): Promise<Uint8Array | undefined> {
+  const tx = new Transaction()
+  build(tx)
+  tx.setSender(sender)
+  const res = await client.core.simulateTransaction({
+    transaction: tx,
+    include: { commandResults: true },
+    // `accountBalance` chains a `&Account` reference return (from
+    // `load_account`) into a second command — the default simulate
+    // "checks" mode rejects that intermediate command with
+    // `InvalidPublicFunctionReturnType` (confirmed live 2026-07-10) since
+    // it tries to validate/serialize every command's return type, not
+    // just the last one's. `checksEnabled: false` matches plain devInspect
+    // behavior and is safe here: this helper never executes for real.
+    checksEnabled: false,
+  })
+  return res.commandResults?.[commandIndex]?.returnValues?.[0]?.bcs
+}
+
+async function derivedWrapperExists(
+  client: SuiGrpcClient,
+  owner: string
+): Promise<boolean> {
+  const bytes = await devInspectReturn(client, owner, (tx) => {
+    tx.moveCall({
+      target: `${env.accountPackageId}::account_registry::derived_wrapper_exists`,
+      arguments: [tx.object(env.accountRegistryId), tx.pure.address(owner)],
+    })
+  })
+  if (!bytes) {
+    throw new Error(`derived_wrapper_exists(${owner}): no return value`)
+  }
+  return bcs.bool().parse(bytes)
+}
+
+async function derivedWrapperAddress(
+  client: SuiGrpcClient,
+  owner: string
+): Promise<string> {
+  const bytes = await devInspectReturn(client, owner, (tx) => {
+    tx.moveCall({
+      target: `${env.accountPackageId}::account_registry::derived_wrapper_address`,
+      arguments: [tx.object(env.accountRegistryId), tx.pure.address(owner)],
+    })
+  })
+  if (!bytes) {
+    throw new Error(`derived_wrapper_address(${owner}): no return value`)
+  }
+  return normalizeSuiObjectId(bcs.Address.parse(bytes))
+}
+
+/** Read `kp`'s AccountWrapper's settled dUSDC balance (0 if no wrapper yet). */
+async function accountBalance(
+  client: SuiGrpcClient,
+  owner: string,
+  wrapperId: string
+): Promise<bigint> {
+  const bytes = await devInspectReturn(
+    client,
+    owner,
+    (tx) => {
+      const account = tx.moveCall({
+        target: `${env.accountPackageId}::account::load_account`,
+        arguments: [tx.object(wrapperId)],
+      })
+      tx.moveCall({
+        target: `${env.accountPackageId}::account::balance`,
+        typeArguments: [env.dusdcCoinType],
+        arguments: [
+          account,
+          tx.object(env.accumulatorRootId),
+          tx.object(CLOCK),
+        ],
+      })
+    },
+    1
+  )
+  if (!bytes) throw new Error(`accountBalance(${owner}): no return value`)
+  return BigInt(bcs.u64().parse(bytes))
+}
+
+/**
+ * Ensure `kp`'s AccountWrapper exists (create + share if absent) and holds
+ * at least `minBalance` settled dUSDC — tops up the shortfall only (this
+ * suite reuses the SAME persistent `p0` key across repeated live runs
+ * while iterating, so blindly re-depositing `minBalance` every run burns
+ * real testnet dUSDC that's often already sitting in the wrapper from an
+ * earlier partially-failed run). Returns the wrapper id.
+ */
+async function setupAccount(
+  client: SuiGrpcClient,
+  kp: Ed25519Keypair,
+  minBalance: bigint
+): Promise<string> {
+  const owner = kp.toSuiAddress()
+  const exists = await derivedWrapperExists(client, owner)
+  if (!exists) {
+    const tx = new Transaction()
+    const wrapper = tx.moveCall({
+      target: `${env.accountPackageId}::account_registry::new`,
+      arguments: [tx.object(env.accountRegistryId)],
+    })
+    tx.moveCall({
+      target: `${env.accountPackageId}::account::share`,
+      arguments: [wrapper],
+    })
+    await signAndWait(client, kp, tx, `setupAccount(${owner}) new+share`)
+  }
+  const wrapperId = await derivedWrapperAddress(client, owner)
+
+  const current = exists ? await accountBalance(client, owner, wrapperId) : 0n
+  const shortfall = minBalance - current
+  if (shortfall > 0n) {
+    const depositTx = new Transaction()
+    const auth = depositTx.moveCall({
+      target: `${env.accountPackageId}::account::generate_auth`,
+    })
+    const coin = depositTx.add(
+      coinWithBalance({ balance: shortfall, type: env.dusdcCoinType })
+    )
+    depositTx.moveCall({
+      target: `${env.accountPackageId}::account::deposit_funds`,
+      typeArguments: [env.dusdcCoinType],
+      arguments: [
+        depositTx.object(wrapperId),
+        auth,
+        coin,
+        depositTx.object(env.accumulatorRootId),
+        depositTx.object(CLOCK),
+      ],
+    })
+    await signAndWait(client, kp, depositTx, `setupAccount(${owner}) deposit`)
+  } else {
+    console.log(
+      `setupAccount(${owner}): already has ${current} dUSDC >= ${minBalance}, skipping deposit`
+    )
+  }
+
+  return wrapperId
+}
+
+// ─── Market discovery → deck cards (reuses deckmaster.ts's vetted
+// filter/snap logic rather than reimplementing it). ─────────────────────
+
+interface DeckCard {
+  expiryMarketId: string
+  strike: bigint
+  tickSize: bigint
+}
+
+async function discoverMarkets(n: number): Promise<DeckCard[]> {
+  // NOTE: the default (unpaginated) page size on this indexer is small
+  // enough that it can omit longer-cadence future markets (e.g. the
+  // ~1h/~2h ones) in favor of the dense near-term 1-min-cadence rows —
+  // confirmed live 2026-07-10: no-limit fetch returned only 2 markets
+  // clearing a 5-min headroom, while `?limit=500` reliably surfaces all
+  // ~8 currently-live BTC markets (3 short-cadence + longer-cadence
+  // ones), of which 5 clear the headroom. Bump the page size rather than
+  // loosen the headroom filter itself.
+  const res = await fetch(`${env.predictIndexerUrl}/markets?limit=500`)
+  if (!res.ok) throw new Error(`GET /markets ${res.status}`)
+  const rows = (await res.json()) as MarketRow[]
+  const snapshots = selectMarketRows(rows, {
+    now: Date.now(),
+    minHeadroomMs: MARKET_HEADROOM_MS,
+    maxHorizonMs: env.deckCardMaxHorizonMs,
+    count: n,
+  })
+  if (snapshots.length < n) {
+    throw new Error(
+      `discoverMarkets: only ${snapshots.length} live BTC markets available, need ${n}`
+    )
+  }
+  const spot = await readBtcSpot()
+  return snapshots.map((m) => {
+    const strikeTick = snapToAdmissionTick(
+      spot,
+      m.tickSize,
+      m.admissionTickSize
+    )
+    return {
+      expiryMarketId: m.expiryMarketId,
+      strike: strikeTick * m.tickSize,
+      tickSize: m.tickSize,
+    }
+  })
+}
+
+// ─── Event extraction — reads events straight off the SAME transaction's
+// `signAndWait` result (see its doc comment for why: a GraphQL "last N
+// events, filter by field" poll can return a stale match when the same
+// creator address runs this suite repeatedly). ─────────────────────────────
+
+interface DuelFinalizedJson {
+  duel_id: string
+  winner: string
+  payout_to_p0: string
+  payout_to_p1: string
+}
+
+function extractDuelFinalizedEvent(
+  result: SignAndWaitResult,
+  duelId: string
+): DuelFinalizedJson {
+  const normalizedDuelId = normalizeSuiObjectId(duelId)
+  for (const json of result.events) {
+    const j = json as unknown as DuelFinalizedJson
+    if (
+      typeof j.duel_id === "string" &&
+      normalizeSuiObjectId(j.duel_id) === normalizedDuelId
+    ) {
+      return j
+    }
+  }
+  throw new Error(
+    `extractDuelFinalizedEvent: no DuelFinalized event for duel ${duelId} in this tx's events ` +
+      `(${JSON.stringify(result.events)})`
+  )
+}
+
+// ─── Lifecycle helpers ──────────────────────────────────────────────────
+
+async function createDuel(
+  client: SuiGrpcClient,
+  p0: Ed25519Keypair,
+  packageId: string,
+  hash: Uint8Array,
+  deckSize: number
+): Promise<string> {
+  const tx = new Transaction()
+  const stake = tx.add(
+    coinWithBalance({ balance: STAKE, type: env.dusdcCoinType })
+  )
+  tx.moveCall({
+    target: `${packageId}::duel::create_duel`,
+    typeArguments: [env.dusdcCoinType],
+    arguments: [
+      stake,
+      tx.pure.vector("u8", Array.from(hash)),
+      tx.pure.u64(BigInt(deckSize)),
+    ],
+  })
+  const result = await signAndWait(client, p0, tx, "create_duel")
+  return findCreatedObjectId(result, `${packageId}::duel::Duel<`, "create_duel")
+}
+
+async function joinDuel(
+  client: SuiGrpcClient,
+  p1: Ed25519Keypair,
+  packageId: string,
+  duelId: string
+): Promise<void> {
+  const tx = new Transaction()
+  const stake = tx.add(
+    coinWithBalance({ balance: STAKE, type: env.dusdcCoinType })
+  )
+  tx.moveCall({
+    target: `${packageId}::duel::join_duel`,
+    typeArguments: [env.dusdcCoinType],
+    arguments: [tx.object(duelId), stake, tx.object(CLOCK)],
+  })
+  await signAndWait(client, p1, tx, "join_duel")
+}
+
+async function revealDeck(
+  client: SuiGrpcClient,
+  p0: Ed25519Keypair,
+  packageId: string,
+  duelId: string,
+  cards: DeckCard[]
+): Promise<void> {
+  const tx = new Transaction()
+  const cardArgs = cards.map((c) =>
+    tx.moveCall({
+      target: `${packageId}::duel::new_card`,
+      arguments: [tx.pure.id(c.expiryMarketId), tx.pure.u64(c.strike)],
+    })
+  )
+  tx.moveCall({
+    target: `${packageId}::duel::reveal_deck`,
+    typeArguments: [env.dusdcCoinType],
+    arguments: [
+      tx.object(duelId),
+      tx.makeMoveVec({
+        type: `${packageId}::duel::Card`,
+        elements: cardArgs,
+      }),
+    ],
+  })
+  await signAndWait(client, p0, tx, "reveal_deck")
+}
+
+/**
+ * ONE PTB: account::generate_auth → expiry_market::load_live_pricer →
+ * expiry_market::mint_exact_quantity → flicky::duel::record_swipe, chaining
+ * the mint's u256 order id straight into record_swipe. Mirrors
+ * apps/web/src/lib/deepbook.ts's `buildStakedSwipeTx` verbatim.
+ */
+async function atomicSwipe(
+  client: SuiGrpcClient,
+  kp: Ed25519Keypair,
+  packageId: string,
+  duelId: string,
+  wrapperId: string,
+  card: DeckCard,
+  cardIdx: number,
+  isUp: boolean,
+  qty: bigint
+): Promise<void> {
+  const tx = new Transaction()
+  const { lowerTick, higherTick } = deriveTicks(
+    card.strike,
+    isUp,
+    card.tickSize
+  )
+
+  const auth = tx.moveCall({
+    target: `${env.accountPackageId}::account::generate_auth`,
+  })
+  const pricer = tx.moveCall({
+    target: `${env.deepbookPredictPackageId}::expiry_market::load_live_pricer`,
+    arguments: [
+      tx.object(card.expiryMarketId),
+      tx.object(env.protocolConfigId),
+      tx.object(env.oracleRegistryId),
+      tx.object(env.pythFeedId),
+      tx.object(env.bsSpotFeedId),
+      tx.object(env.bsForwardFeedId),
+      tx.object(env.bsSviFeedId),
+      tx.object(CLOCK),
+    ],
+  })
+  const order = tx.moveCall({
+    target: `${env.deepbookPredictPackageId}::expiry_market::mint_exact_quantity`,
+    arguments: [
+      tx.object(card.expiryMarketId),
+      tx.object(wrapperId),
+      auth,
+      tx.object(env.protocolConfigId),
+      pricer,
+      tx.pure.u64(lowerTick),
+      tx.pure.u64(higherTick),
+      tx.pure.u64(qty),
+      tx.pure.u64(LEVERAGE_1X),
+      tx.pure.u64(U64_MAX),
+      tx.pure.u64(U64_MAX),
+      tx.object(env.accumulatorRootId),
+      tx.object(CLOCK),
+    ],
+  })
+  tx.moveCall({
+    target: `${packageId}::duel::record_swipe`,
+    typeArguments: [env.dusdcCoinType],
+    arguments: [
+      tx.object(duelId),
+      tx.pure.u64(BigInt(cardIdx)),
+      tx.pure.bool(isUp),
+      tx.pure.u64(qty),
+      order,
+      tx.object(CLOCK),
+    ],
+  })
+  await signAndWait(client, kp, tx, `atomicSwipe(card ${cardIdx})`)
+}
+
+async function settleAndFinalize(
+  client: SuiGrpcClient,
+  p0: Ed25519Keypair,
+  packageId: string,
+  duelId: string,
+  price: bigint
+): Promise<SignAndWaitResult> {
+  const tx = new Transaction()
+  tx.moveCall({
+    target: `${packageId}::duel::finalize_test_one_price`,
+    typeArguments: [env.dusdcCoinType],
+    arguments: [tx.object(duelId), tx.pure.u64(price), tx.object(CLOCK)],
+  })
+  return signAndWait(client, p0, tx, "finalize_test_one_price")
+}
+
+// ─── Suite ──────────────────────────────────────────────────────────────
+
+const describeFn = canRun ? describe : describe.skip
+
+describeFn("e2e duel — predict-testnet-6-24 flow", () => {
+  let client: SuiGrpcClient
   let packageId: string
-  let admin: Ed25519Keypair
-  let challenger: Ed25519Keypair
-  let adminAddr: string
-  let challengerAddr: string
-  let oracle: OracleSVI | null = null
+  let p0: Ed25519Keypair
+  let p1: Ed25519Keypair
+  let p0Addr: string
+  let p1Addr: string
+  let p0Wrapper: string
+  let p1Wrapper: string
+  let cards: DeckCard[] = []
+  let hash: Uint8Array
   let duelId: string | null = null
-  let revealCards: Array<{ oracle_id: string; strike: bigint }> = []
 
   beforeAll(async () => {
-    const pkg = loadPackageId()
-    if (!pkg) throw new Error("apps/contracts/deployed.json missing packageId — publish first")
+    const pkg = env.flickyPackageId
+    if (!pkg)
+      throw new Error("env.flickyPackageId missing — publish flicky first")
     packageId = pkg
     client = getSuiClient()
-    const { secretKey } = decodeSuiPrivateKey(adminKey!)
-    admin = Ed25519Keypair.fromSecretKey(secretKey)
-    challenger = new Ed25519Keypair()
-    adminAddr = admin.toSuiAddress()
-    challengerAddr = challenger.toSuiAddress()
-    console.log(`flicky package:  ${packageId}`)
-    console.log(`admin:           ${adminAddr}`)
-    console.log(`challenger:      ${challengerAddr}`)
-  })
+    const { secretKey } = decodeSuiPrivateKey(rawKey!)
+    p0 = Ed25519Keypair.fromSecretKey(secretKey)
+    p1 = Ed25519Keypair.generate()
+    p0Addr = p0.toSuiAddress()
+    p1Addr = p1.toSuiAddress()
+    console.log(`flicky package:   ${packageId}`)
+    console.log(`p0 (creator):     ${p0Addr}`)
+    console.log(`p1 (challenger):  ${p1Addr}`)
+  }, 30_000)
 
-  test(
-    "discovers a settled BTC OracleSVI",
-    async () => {
-      const found = await findSettledBtcOracle(client)
-      if (!found) {
-        console.log("no settled BTC OracleSVI on testnet — skipping rest of suite")
-        return
-      }
-      oracle = found
-      expect(oracle.settlementPrice).not.toBeNull()
-      expect(oracle.forward).toBeGreaterThan(0n)
-      console.log(
-        `oracle ${oracle.id} settled @ $${(Number(oracle.settlementPrice!) / 1e9).toFixed(2)}`,
+  test("funds player 1 with SUI (gas) + dUSDC (stake + account deposit)", async () => {
+    const tx = new Transaction()
+    const [gas] = tx.splitCoins(tx.gas, [tx.pure.u64(P1_FUND_SUI)])
+    const dusdc = tx.add(
+      coinWithBalance({ balance: P1_FUND_DUSDC, type: env.dusdcCoinType })
+    )
+    tx.transferObjects([gas, dusdc], tx.pure.address(p1Addr))
+    await signAndWait(client, p0, tx, "fund p1")
+  }, 60_000)
+
+  test("sets up both players' AccountWrapper + deposits dUSDC premium float", async () => {
+    p0Wrapper = await setupAccount(client, p0, DEPOSIT)
+    p1Wrapper = await setupAccount(client, p1, DEPOSIT)
+    expect(p0Wrapper).toBeTruthy()
+    expect(p1Wrapper).toBeTruthy()
+    console.log(`p0 wrapper: ${p0Wrapper}`)
+    console.log(`p1 wrapper: ${p1Wrapper}`)
+  }, 60_000)
+
+  test("discovers live BTC ExpiryMarkets and builds a committed deck", async () => {
+    cards = await discoverMarkets(DECK_SIZE)
+    expect(cards.length).toBe(DECK_SIZE)
+    hash = deckHash(cards)
+    console.log(
+      `deck: ${cards.map((c) => c.expiryMarketId.slice(0, 10)).join(", ")}`
+    )
+  }, 30_000)
+
+  test("creates duel, challenger joins, creator reveals deck", async () => {
+    duelId = await createDuel(client, p0, packageId, hash, cards.length)
+    expect(duelId).toBeTruthy()
+    await joinDuel(client, p1, packageId, duelId)
+    await revealDeck(client, p0, packageId, duelId, cards)
+    console.log(`duel: ${duelId}`)
+  }, 120_000)
+
+  test("both players atomically mint + record_swipe every card (p0=UP, p1=DOWN)", async () => {
+    if (!duelId) throw new Error("duelId not set — earlier step failed")
+    for (let i = 0; i < cards.length; i++) {
+      await atomicSwipe(
+        client,
+        p0,
+        packageId,
+        duelId,
+        p0Wrapper,
+        cards[i],
+        i,
+        true,
+        SWIPE_QTY
       )
-    },
-    30_000,
-  )
-
-  test(
-    "admin funds challenger",
-    async () => {
-      if (!oracle) return
-      const tx = new Transaction()
-      const [c] = tx.splitCoins(tx.gas, [tx.pure.u64(CHALLENGER_FUND_MIST)])
-      tx.transferObjects([c], tx.pure.address(challengerAddr))
-      const res = await client.signAndExecuteTransaction({
-        transaction: tx,
-        signer: admin,
-        options: { showEffects: true },
-      })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
-    },
-    30_000,
-  )
-
-  test(
-    "admin creates duel referencing the settled oracle",
-    async () => {
-      if (!oracle) return
-      // Strikes anywhere on the grid; they don't affect the tie-flow.
-      const ref = oracle.settlementPrice!
-      const strikes = [70n, 80n, 90n, 100n, 110n].map((p) => (ref * p) / 100n)
-      const cards = strikes.map((strike) => ({ oracle_id: oracle!.id, strike }))
-      const hash = deckHash(cards)
-
-      const tx = new Transaction()
-      const [stake] = tx.splitCoins(tx.gas, [tx.pure.u64(STAKE_MIST)])
-      tx.moveCall({
-        target: `${packageId}::duel::create_duel`,
-        typeArguments: ["0x2::sui::SUI"],
-        arguments: [
-          stake,
-          tx.pure.vector("u8", Array.from(hash)),
-          tx.pure.u64(BigInt(cards.length)),
-        ],
-      })
-      const res = await client.signAndExecuteTransaction({
-        transaction: tx,
-        signer: admin,
-        options: { showObjectChanges: true, showEffects: true },
-      })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
-
-      const created = res.objectChanges?.find(
-        (c) => c.type === "created" && c.objectType.includes("::duel::Duel<"),
+      await atomicSwipe(
+        client,
+        p1,
+        packageId,
+        duelId,
+        p1Wrapper,
+        cards[i],
+        i,
+        false,
+        SWIPE_QTY
       )
-      expect(created?.type).toBe("created")
-      if (created?.type !== "created") throw new Error("no Duel object created")
-      duelId = normalizeSuiObjectId(created.objectId)
-      console.log(`duel: ${duelId}`)
-      // Stash the plaintext for the reveal step below.
-      revealCards = cards
-    },
-    60_000,
-  )
+    }
+  }, 300_000)
 
-  test(
-    "challenger joins + admin reveals deck",
-    async () => {
-      if (!oracle || !duelId || revealCards.length === 0) return
-      // Challenger flips status → ACTIVE.
-      {
-        const tx = new Transaction()
-        const [stake] = tx.splitCoins(tx.gas, [tx.pure.u64(STAKE_MIST)])
-        tx.moveCall({
-          target: `${packageId}::duel::join_duel`,
-          typeArguments: ["0x2::sui::SUI"],
-          arguments: [tx.object(duelId), stake, tx.object(SUI_CLOCK_OBJECT_ID)],
-        })
-        const res = await client.signAndExecuteTransaction({
-          transaction: tx,
-          signer: challenger,
-          options: { showEffects: true },
-        })
-        expect(res.effects?.status.status).toBe("success")
-        await client.waitForTransaction({ digest: res.digest })
-      }
-      // Reveal the deck so settle_card can index `cards`.
-      const tx = new Transaction()
-      const cardArgs = revealCards.map((c) =>
-        tx.moveCall({
-          target: `${packageId}::duel::new_card`,
-          arguments: [tx.object(c.oracle_id), tx.pure.u64(c.strike)],
-        }),
-      )
-      tx.moveCall({
-        target: `${packageId}::duel::reveal_deck`,
-        typeArguments: ["0x2::sui::SUI"],
-        arguments: [
-          tx.object(duelId),
-          tx.makeMoveVec({
-            type: `${packageId}::duel::Card`,
-            elements: cardArgs,
-          }),
-        ],
-      })
-      const res = await client.signAndExecuteTransaction({
-        transaction: tx,
-        signer: admin,
-        options: { showEffects: true },
-      })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
-    },
-    60_000,
-  )
+  test("finalize_test_one_price settles + finalizes; DuelFinalized has a winner", async () => {
+    if (!duelId) throw new Error("duelId not set — earlier step failed")
+    // deck_size=5 is odd and p0=UP/p1=DOWN on every card are complementary
+    // outcomes per card, so whichever price we feed, p0-wins + p1-wins ==
+    // 5 with no possible tie in card count — a strict winner is guaranteed.
+    let price = await readBtcSpot().catch(() => 0n)
+    if (price <= 0n) price = cards[0].strike
+    const result = await settleAndFinalize(client, p0, packageId, duelId, price)
+    const ev = extractDuelFinalizedEvent(result, duelId)
+    expect([p0Addr, p1Addr]).toContain(normalizeSuiAddress(ev.winner))
+    console.log(
+      `winner: ${normalizeSuiAddress(ev.winner) === p0Addr ? "p0" : "p1"}  ` +
+        `payout_to_p0=${ev.payout_to_p0} payout_to_p1=${ev.payout_to_p1}`
+    )
+  }, 60_000)
 
-  // Why no `record_swipe` step:
-  // 1. The contract requires the player to have minted a Predict position
-  //    first (`record_swipe` takes a `&PredictManager` reference and
-  //    verifies `position(key) >= quantity`).
-  // 2. Setting up a real PredictManager + dUSDC funding + mint here would
-  //    more than double the test's footprint. That path is exercised by
-  //    the FE in the playground.
-  // We instead skip ahead to `settle_card × deck_size` against the
-  // already-settled oracle and verify the per-card settle state.
+  // ─── Slow path (real settlement) — SKIPPED scaffold ────────────────────
   //
-  // Why no `finalize` step either: finalize only completes when (a) both
-  // players swiped all `deck_size` cards (covered in Move unit tests with
-  // a mocked-active oracle) or (b) the 10-minute swipe window has elapsed.
-  // Forcing (b) inside a test means real-clock waiting; the Move unit suite
-  // covers the time-expired branches directly.
-
-  test(
-    "settle_card × deck_size succeeds against a settled oracle",
-    async () => {
-      if (!oracle || !duelId) return
-      // One settle_card per card. All cards reference the same settled
-      // oracle here, so we can re-issue the same oracle ref in each call.
-      // Anti-replay reads `position(key)` on the two managers — since
-      // neither player ever minted, position is 0 < swipe.quantity. But
-      // there's also no swipe in the slot, so `score_staked_card` returns
-      // (0, 0) early via the `is_none()` short-circuit. Net: each call
-      // ticks `cards_settled[i] = true` and emits CardSettled with zeros.
-      // settle_card does NOT require `manager.owner() == sender` (only
-      // record_swipe does). With no swipes recorded, the scorer returns
-      // before reading positions, so any owned PredictManager works as
-      // both the p0 and p1 args — we just need real object ids. Create
-      // one for admin if absent (admin's address is stable across runs).
-      const adminManagerId = await ensureManagerObject(client, admin)
-      // Reuse admin's manager for both slots — no swipes ⇒ positions
-      // never read, so the p1 arg's owner is irrelevant here.
-      const challengerManagerId = adminManagerId
-      const tx = new Transaction()
-      for (let i = 0; i < revealCards.length; i++) {
-        tx.moveCall({
-          target: `${packageId}::duel::settle_card`,
-          typeArguments: ["0x2::sui::SUI"],
-          arguments: [
-            tx.object(duelId),
-            tx.object(adminManagerId),
-            tx.object(challengerManagerId),
-            tx.object(oracle.id),
-            tx.pure.u64(BigInt(i)),
-          ],
-        })
-      }
-      const res = await client.signAndExecuteTransaction({
-        transaction: tx,
-        signer: admin,
-        options: { showEffects: true },
-      })
-      expect(res.effects?.status.status).toBe("success")
-      await client.waitForTransaction({ digest: res.digest })
-
-      // Verify on-chain: settled_count == deck_size, every cards_settled[i] true.
-      const after = await client.getObject({
-        id: duelId,
-        options: { showContent: true },
-      })
-      if (after.data?.content?.dataType !== "moveObject") {
-        throw new Error("duel object disappeared after settle")
-      }
-      const fields = after.data.content.fields as {
-        settled_count: string
-        cards_settled: boolean[]
-      }
-      expect(BigInt(fields.settled_count)).toBe(BigInt(revealCards.length))
-      expect(fields.cards_settled.every((b) => b === true)).toBe(true)
-      console.log(
-        `settle_card × ${revealCards.length} OK · digest ${res.digest.slice(0, 10)}…`,
-      )
-    },
-    120_000,
-  )
+  // The fast path above uses the TEST/DEV-ONLY `finalize_test_one_price`
+  // shortcut (free-style scoring, no anti-replay, premium always 0) because
+  // waiting for a real `ExpiryMarket` to actually reach expiry + get
+  // indexed as settled would make this suite minutes-to-hours long and
+  // flaky on CI cadence. The PRODUCTION path — exercised live by
+  // `Keeper.tryClose` in keeper.ts — is:
+  //   1. Poll `GET {predictIndexerUrl}/markets/{expiry_market_id}/state`
+  //      per unique card market until `settlement.settlement_price` is set
+  //      (keeper.ts's `readMarketSettlement`).
+  //   2. For each card: `settle_card<DUSDC>(duel, p0Wrapper, p1Wrapper,
+  //      card_idx, settlementPrice, p0Premium, p1Premium)` — premiums read
+  //      via `readOrderPremium(expiryMarketId, orderId)` (the predict
+  //      indexer's `/markets/{id}/positions/{order_id}/cashflow` endpoint).
+  //   3. `finalize<DUSDC>(duel, clock)`.
+  //   4. `expiry_market::redeem_settled(market, AccountRegistry, wrapper,
+  //      ProtocolConfig, OracleRegistry, PythFeed, order_id, close_quantity,
+  //      root, clock)` per player per card, so each `AccountWrapper`'s
+  //      dUSDC payout actually materializes.
+  // Gate this on picking markets with a near-term (e.g. 1-minute) cadence
+  // and polling `/state` in a loop with a real timeout before wiring it up.
+  test.skip("slow path: settle_card × deckSize + finalize + redeem_settled (real settlement, not wired up — see comment above)", async () => {})
 
   afterAll(async () => {
-    // Return whatever the challenger has left to admin so testnet SUI
-    // doesn't pile up in throwaway keypairs across runs.
-    if (!hasAdmin) return
+    if (!canRun) return
+    // Best-effort: sweep p1's leftover SUI back to p0 so testnet SUI/dUSDC
+    // don't pile up in a throwaway keypair across repeated runs.
     try {
-      const balance = await client.getBalance({ owner: challengerAddr })
-      const total = BigInt(balance.totalBalance)
-      if (total <= 2_000_000n) return
       const tx = new Transaction()
-      tx.setGasBudget(2_000_000n)
-      tx.transferObjects([tx.gas], tx.pure.address(adminAddr))
-      const res = await client.signAndExecuteTransaction({
-        transaction: tx,
-        signer: challenger,
-        options: { showEffects: true },
-      })
-      if (res.effects?.status.status === "success") {
-        await client.waitForTransaction({ digest: res.digest })
-      }
+      tx.setGasBudget(3_000_000n)
+      tx.transferObjects([tx.gas], tx.pure.address(p0Addr))
+      await signAndWait(client, p1, tx, "sweep leftover SUI")
     } catch {
       // best-effort
     }
-  })
+  }, 30_000)
 })

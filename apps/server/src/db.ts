@@ -36,7 +36,7 @@ export function getSql(): SQL {
   if (!env.databaseUrl) {
     throw new Error(
       "DATABASE_URL is not set — point it at the Railway Postgres " +
-        "(set it to the private URL when deployed, the public proxy URL locally)",
+        "(set it to the private URL when deployed, the public proxy URL locally)"
     )
   }
   _sql = new SQL({ url: env.databaseUrl, max: env.dbPoolMax })
@@ -144,21 +144,55 @@ async function ensureSchema(): Promise<void> {
   await sql`
     CREATE TABLE IF NOT EXISTS deck (
       hash_hex   TEXT PRIMARY KEY,   -- lowercased 0x… sha2-256 commitment
-      cards      TEXT   NOT NULL,    -- JSON [{oracle_id, strike: string}]
+      cards      TEXT   NOT NULL,    -- JSON [{expiry_market_id, strike: string}]
       seed_hex   TEXT,
       created_at BIGINT NOT NULL
     )
   `
-  // Owner → PredictManager id cache. The manager is a SHARED object with an
-  // internal `owner` field, so it can't be found via getOwnedObjects —
-  // discovery means an unbounded `PredictManagerCreated` event scan
-  // (predict.ts::findManagerFor). We memoize the resolved id here: a
-  // manager's owner never changes, so a hit is permanent and skips the scan.
+  // Key → cached id. Generic owner-keyed cache table, reused across eras:
+  // the deleted 4-16 `findManagerFor` wrote legacy `PredictManager` ids
+  // here under the bare owner address; the 6-24 `predict.ts::deriveWrapperFor`
+  // now writes/reads `AccountWrapper` ids under a namespaced
+  // `wrapper:v2:${owner}` key (see `WRAPPER_CACHE_PREFIX` in predict.ts) so
+  // a legacy bare-owner row surviving on a REUSED Postgres can never be
+  // read back as a validated 6-24 wrapper. The 6-24 wrapper is
+  // deterministic (derived from AccountRegistry + owner via devInspect), so
+  // a hit is permanent and skips the devInspect round-trip.
   await sql`
     CREATE TABLE IF NOT EXISTS predict_manager (
       owner      TEXT PRIMARY KEY,
       manager_id TEXT   NOT NULL,
       cached_at  BIGINT NOT NULL
+    )
+  `
+  // Mirror of `deepbook_predict::order_events::OrderMinted`, keyed by the
+  // expiry-local `order_id` (per the predict indexer's API.md: "always
+  // treat (expiry_market_id, order_id) as the key" — order ids are NOT
+  // globally unique). Populated by the indexer's event tracker; read by
+  // computeCardOutcomes for a live PnL preview ahead of settle_card. The
+  // keeper's own settle-time premium reads stay HTTP-based against the
+  // predict indexer (see keeper.ts::readOrderPremium) — this table is an
+  // additional, redundant mirror, not (yet) the keeper's source of truth.
+  await sql`
+    CREATE TABLE IF NOT EXISTS order_premiums (
+      expiry_market_id TEXT   NOT NULL,
+      order_id         TEXT   NOT NULL,
+      net_premium      TEXT   NOT NULL,
+      updated_at       BIGINT NOT NULL,
+      PRIMARY KEY (expiry_market_id, order_id)
+    )
+  `
+  // Mirror of `deepbook_predict::config_events::MarketSettled`, keyed by
+  // `expiry_market_id`. Populated by the indexer's event tracker; read by
+  // the indexer's own `fetchDuel` in place of the old on-chain `OracleSVI`
+  // read (6-24 has no such struct — settlement now only surfaces via this
+  // event / the predict indexer's `/markets/{id}/state`).
+  await sql`
+    CREATE TABLE IF NOT EXISTS market_settlements (
+      expiry_market_id TEXT   PRIMARY KEY,
+      settlement_price TEXT   NOT NULL,
+      settled_at_ms    BIGINT NOT NULL,
+      updated_at       BIGINT NOT NULL
     )
   `
   log.info(`schema ready on ${redactUrl(env.databaseUrl ?? "")}`)
@@ -209,7 +243,7 @@ export async function loadCursor(trackerId: string): Promise<string | null> {
 
 export async function saveCursor(
   trackerId: string,
-  cursor: string,
+  cursor: string
 ): Promise<void> {
   await ready()
   const sql = getSql()
@@ -256,15 +290,18 @@ export interface CardOutcome {
   /** `settlementPrice > strike` — UP side won this card. */
   upWon: boolean
   /**
-   * Per-player real PnL for this card: `pnl = (won ? quantity : 0) - premium`.
-   * Signed decimal string (may start with '-'). null when the player
-   * didn't swipe this card.
+   * Per-player real PnL for this card: `pnl = (won ? quantity : 0) - premium`,
+   * where premium is looked up from the `order_premiums` mirror by the
+   * swipe's `orderId` (best-effort preview — 0 if the mirror hasn't caught
+   * up to the `OrderMinted` event yet; authoritative premium is keeper-fed
+   * into `settle_card` at settle time, not derived here). Signed decimal
+   * string (may start with '-'). null when the player didn't swipe this card.
    */
   p0Pnl: string | null
   p1Pnl: string | null
   /** Snapshot of each player's swipe (or null if they didn't swipe). */
-  p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-  p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+  p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+  p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
 }
 
 /** Which side won a finished duel: creator (p0), challenger (p1), or a tie. */
@@ -296,21 +333,23 @@ export interface DuelRow {
   cardOutcomes: CardOutcome[]
   swipes: PendingSwipe[]
   /**
-   * Per-card metadata (oracle_id + strike) so a UI rendering this row
-   * can subscribe to oracle ticks for mark-to-market PnL between
+   * Per-card metadata (expiry_market_id + strike) so a UI rendering this
+   * row can subscribe to market ticks for mark-to-market PnL between
    * settlements. Empty until the indexer's first refreshDuel pass.
    */
-  cards: Array<{ oracle_id: string; strike: string }>
+  cards: Array<{ expiry_market_id: string; strike: string }>
   lastUpdatedMs: number
 }
 
 export interface PendingSwipe {
   cardIdx: number
-  p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-  p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+  p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+  p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
 }
 
-export async function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): Promise<void> {
+export async function upsertDuel(
+  d: Omit<DuelRow, "lastUpdatedMs">
+): Promise<void> {
   await ready()
   const sql = getSql()
   try {
@@ -357,7 +396,7 @@ export async function upsertDuel(d: Omit<DuelRow, "lastUpdatedMs">): Promise<voi
  */
 export async function setDuelWinner(
   duelId: string,
-  winner: DuelWinner,
+  winner: DuelWinner
 ): Promise<void> {
   await ready()
   const sql = getSql()
@@ -377,7 +416,7 @@ export async function setDuelWinner(
  */
 export async function mergeCardOutcome(
   duelId: string,
-  outcome: CardOutcome,
+  outcome: CardOutcome
 ): Promise<void> {
   await ready()
   const sql = getSql()
@@ -485,7 +524,7 @@ export async function getDuel(id: string): Promise<DuelRow | null> {
 export async function listRecentDuels(
   limit: number,
   status?: DuelRow["status"],
-  player?: string,
+  player?: string
 ): Promise<DuelRow[]> {
   await ready()
   const sql = getSql()
@@ -501,7 +540,9 @@ export async function listRecentDuels(
   }
   if (player) {
     params.push(player, player)
-    where.push(`(creator = $${params.length - 1} OR challenger = $${params.length})`)
+    where.push(
+      `(creator = $${params.length - 1} OR challenger = $${params.length})`
+    )
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")} ` : ""
   params.push(limit)
@@ -530,7 +571,7 @@ export interface ChatMessage {
 
 export async function insertChatMessage(
   fromAddress: string,
-  text: string,
+  text: string
 ): Promise<ChatMessage> {
   await ready()
   const sql = getSql()
@@ -543,7 +584,9 @@ export async function insertChatMessage(
   return { id: Number(rows[0]?.id ?? 0), fromAddress, text, timestampMs: now }
 }
 
-export async function recentChatMessages(limit: number): Promise<ChatMessage[]> {
+export async function recentChatMessages(
+  limit: number
+): Promise<ChatMessage[]> {
   await ready()
   const sql = getSql()
   const rows = (await sql`
@@ -691,7 +734,7 @@ export async function clearPlayerRatings(): Promise<number> {
 // (strike) (de)serialization.
 
 export interface DeckStoreRow {
-  /** JSON of [{ oracle_id, strike: string }]. */
+  /** JSON of [{ expiry_market_id, strike: string }]. */
   cardsJson: string
   seedHex: string | null
 }
@@ -699,7 +742,7 @@ export interface DeckStoreRow {
 export async function upsertDeck(
   hashHex: string,
   cardsJson: string,
-  seedHex: string | null,
+  seedHex: string | null
 ): Promise<void> {
   await ready()
   const sql = getSql()
@@ -740,8 +783,9 @@ export async function countDecks(): Promise<number> {
 // ─── PredictManager cache ───────────────────────────────────────────────────
 
 /**
- * Resolved manager id for `owner`, or null if we've never cached one.
- * A cache hit lets `findManagerFor` skip the on-chain event scan entirely.
+ * Resolved AccountWrapper (6-24) / manager id for `owner`, or null if
+ * we've never cached one. A cache hit lets `deriveWrapperFor` skip the
+ * devInspect round-trip entirely.
  */
 export async function getCachedManager(owner: string): Promise<string | null> {
   await ready()
@@ -763,7 +807,7 @@ export async function getCachedManager(owner: string): Promise<string | null> {
  */
 export async function cacheManager(
   owner: string,
-  managerId: string,
+  managerId: string
 ): Promise<void> {
   await ready()
   const sql = getSql()
@@ -777,5 +821,110 @@ export async function cacheManager(
     `
   } catch (e) {
     log.error(`cacheManager(${owner}): ${describeError(e)}`)
+  }
+}
+
+// ─── OrderMinted / MarketSettled mirrors ───────────────────────────────────
+//
+// Populated by DuelIndexer's `OrderMinted` / `MarketSettled` event trackers
+// (see indexer.ts). `order_id` is expiry-local (not globally unique — see
+// the predict indexer's API.md), so `order_premiums` is keyed by the pair
+// `(expiry_market_id, order_id)`, matching keeper.ts::readOrderPremium's
+// two-arg shape. Both `save*` functions are best-effort mirrors: a write
+// failure is logged, not thrown, so one bad event doesn't stall the
+// indexer's poll loop.
+
+export async function saveOrderPremium(
+  expiryMarketId: string,
+  orderId: string,
+  netPremium: string
+): Promise<void> {
+  await ready()
+  const sql = getSql()
+  try {
+    await sql`
+      INSERT INTO order_premiums (expiry_market_id, order_id, net_premium, updated_at)
+      VALUES (${expiryMarketId}, ${orderId}, ${netPremium}, ${Date.now()})
+      ON CONFLICT (expiry_market_id, order_id) DO UPDATE SET
+        net_premium = EXCLUDED.net_premium,
+        updated_at  = EXCLUDED.updated_at
+    `
+  } catch (e) {
+    log.error(
+      `saveOrderPremium(${expiryMarketId}, ${orderId}): ${describeError(e)}`
+    )
+  }
+}
+
+/** `net_premium` (decimal string) for `(expiryMarketId, orderId)`, or null if not indexed yet. */
+export async function getOrderPremium(
+  expiryMarketId: string,
+  orderId: string
+): Promise<string | null> {
+  await ready()
+  const sql = getSql()
+  try {
+    const rows = (await sql`
+      SELECT net_premium FROM order_premiums
+      WHERE expiry_market_id = ${expiryMarketId} AND order_id = ${orderId}
+    `) as Array<{ net_premium: string }>
+    return rows[0]?.net_premium ?? null
+  } catch (e) {
+    log.error(
+      `getOrderPremium(${expiryMarketId}, ${orderId}): ${describeError(e)}`
+    )
+    return null
+  }
+}
+
+export async function saveMarketSettlement(
+  expiryMarketId: string,
+  settlementPrice: string,
+  settledAtMs: number
+): Promise<void> {
+  await ready()
+  const sql = getSql()
+  try {
+    await sql`
+      INSERT INTO market_settlements (expiry_market_id, settlement_price, settled_at_ms, updated_at)
+      VALUES (${expiryMarketId}, ${settlementPrice}, ${settledAtMs}, ${Date.now()})
+      ON CONFLICT (expiry_market_id) DO UPDATE SET
+        settlement_price = EXCLUDED.settlement_price,
+        settled_at_ms    = EXCLUDED.settled_at_ms,
+        updated_at       = EXCLUDED.updated_at
+    `
+  } catch (e) {
+    log.error(`saveMarketSettlement(${expiryMarketId}): ${describeError(e)}`)
+  }
+}
+
+export interface MarketSettlementRow {
+  settlementPrice: string
+  settledAtMs: number
+}
+
+/** Settlement state for `expiryMarketId`, or null if not settled/indexed yet. */
+export async function getMarketSettlement(
+  expiryMarketId: string
+): Promise<MarketSettlementRow | null> {
+  await ready()
+  const sql = getSql()
+  try {
+    const rows = (await sql`
+      SELECT settlement_price, settled_at_ms FROM market_settlements
+      WHERE expiry_market_id = ${expiryMarketId}
+    `) as Array<{
+      settlement_price: string
+      settled_at_ms: number | string | bigint
+    }>
+    const row = rows[0]
+    if (!row) return null
+    return {
+      settlementPrice: row.settlement_price,
+      settledAtMs: Number(row.settled_at_ms),
+    }
+  } catch (e) {
+    log.error(`getMarketSettlement(${expiryMarketId}): ${describeError(e)}`)
+    return null
   }
 }

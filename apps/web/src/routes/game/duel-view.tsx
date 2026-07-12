@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
-import { markCardPnl } from "@/lib/pnl"
+import { fmtPnlPct, markCardPnl, type SwipeLite } from "@/lib/pnl"
 import { PixelButton } from "@/components/pixel-button"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
@@ -11,7 +11,7 @@ import type { CSSProperties } from "react"
 import {
   DEMO_DUEL_ID,
   DEMO_OPP_ADDRESS,
-  DEMO_PREMIUM,
+  DEMO_ORDER_ID,
   DEMO_QUANTITY,
   DEMO_STRIKE,
   useDemoChart,
@@ -43,24 +43,37 @@ interface DuelLite {
     upWon: boolean
     p0Pnl: string | null
     p1Pnl: string | null
-    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
   }>
   swipes: Array<{
     cardIdx: number
-    p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
   }>
-  cards: Array<{ oracle_id: string; strike: string; expiryMs?: number }>
+  cards: Array<{ expiry_market_id: string; strike: string; expiryMs?: number }>
 }
 
 interface Tick {
   spot: string
-  forward: string
   expiryMs?: number
-  /** Oracle has settled on-chain — final outcome is known even before
+  /** Market has settled on-chain — final outcome is known even before
    *  the indexer records it into the duel's `cardOutcomes`. */
   settled?: boolean
+}
+
+/**
+ * Narrows a wire swipe (which carries `orderId`) down to the `SwipeLite`
+ * shape `pnl.ts`'s helpers need. 6-24 dropped per-swipe `premium` from the
+ * wire (only `orderId` remains — the real premium needs a server-side
+ * lookup that isn't wired in yet), and `SwipeLite` no longer has a
+ * `premium` field: `markCardPnl` now projects binary PnL from
+ * spot-vs-strike + `quantity` alone.
+ */
+function toSwipeLite(
+  swipe: { isUp: boolean; quantity: string; orderId: string } | null
+): SwipeLite | null {
+  return swipe ? { isUp: swipe.isUp, quantity: swipe.quantity } : null
 }
 
 const POLL_INTERVAL_MS = 5_000
@@ -69,7 +82,7 @@ function buildDemoDuelDetail(address: string, startedAtMs: number): DuelLite {
   const swipe = (isUp: boolean) => ({
     isUp,
     quantity: DEMO_QUANTITY,
-    premium: DEMO_PREMIUM,
+    orderId: DEMO_ORDER_ID,
   })
   return {
     id: DEMO_DUEL_ID,
@@ -118,7 +131,7 @@ function buildDemoDuelDetail(address: string, startedAtMs: number): DuelLite {
     // duel-start, so the demo's card 2 has ~30 s remaining and the
     // pending tail cards settle progressively.
     cards: Array.from({ length: 5 }, (_, i) => ({
-      oracle_id: `demo-oracle-${i}`,
+      expiry_market_id: `demo-oracle-${i}`,
       strike: DEMO_STRIKE,
       expiryMs: startedAtMs + (i + 1) * 30_000,
     })),
@@ -214,34 +227,33 @@ export default function DuelView() {
   // Demo synthetic oracle-tick stream.
   useDemoOracleTicks(demo, setTicks)
 
-  // Oracle ticks for mark-to-market on pending cards.
-  const oracleIds = useMemo(
+  // Market ticks for mark-to-market on pending cards.
+  const marketIds = useMemo(
     () =>
       duel && duel.status === "ACTIVE"
-        ? duel.cards.map((c) => c.oracle_id)
+        ? duel.cards.map((c) => c.expiry_market_id)
         : [],
     [duel]
   )
-  const oracleKey = oracleIds.join(",")
+  const oracleKey = marketIds.join(",")
   useEffect(() => {
-    if (oracleIds.length === 0 || demo || !wsOpen) return
-    send({ type: "oracle_subscribe", oracleIds })
+    if (marketIds.length === 0 || demo || !wsOpen) return
+    send({ type: "oracle_subscribe", marketIds })
     const off = onMessage((msg) => {
       if (msg.type !== "oracle_tick") return
-      if (!oracleIds.includes(msg.oracleId)) return
+      if (!marketIds.includes(msg.expiryMarketId)) return
       setTicks((prev) => ({
         ...prev,
-        [msg.oracleId]: {
+        [msg.expiryMarketId]: {
           spot: msg.spot,
-          forward: msg.forward,
           expiryMs: Number(msg.expiry),
-          settled: msg.settled,
+          settled: msg.settlementPrice != null,
         },
       }))
     })
     return () => {
       off()
-      send({ type: "oracle_unsubscribe", oracleIds })
+      send({ type: "oracle_unsubscribe", marketIds })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [oracleKey, onMessage, send, demo, wsOpen])
@@ -270,7 +282,7 @@ export default function DuelView() {
   // `settledCount` lags. Count oracles the tick stream reports as settled
   // and show whichever is further along — keeps "N/5 settled" honest.
   const onChainSettled = duel.cards.reduce(
-    (n, c) => n + (ticks[c.oracle_id]?.settled ? 1 : 0),
+    (n, c) => n + (ticks[c.expiry_market_id]?.settled ? 1 : 0),
     0
   )
   const settledCount = Math.max(duel.settledCount, onChainSettled)
@@ -338,6 +350,7 @@ export default function DuelView() {
             myIsP0={Boolean(myIsP0)}
             youAddress={address ?? ""}
             oppAddress={opponent}
+            showRangeControls
           />
         </div>
         <div className={chartView === "btc" ? "" : "hidden"}>
@@ -345,7 +358,12 @@ export default function DuelView() {
         </div>
       </div>
 
-      <CardList duel={duel} myIsP0={Boolean(myIsP0)} ticks={ticks} nowMs={nowMs} />
+      <CardList
+        duel={duel}
+        myIsP0={Boolean(myIsP0)}
+        ticks={ticks}
+        nowMs={nowMs}
+      />
 
       {!isParticipant && (
         <div className="rounded bg-amber-900/30 px-3 py-2 text-sm text-amber-200/85">
@@ -409,9 +427,7 @@ function ChartToggleButton({
       onClick={onClick}
       aria-pressed={active}
       className={`cursor-pointer rounded px-2.5 py-1 transition-colors ${
-        active
-          ? "bg-[#4094fb] text-white"
-          : "text-white/55 hover:text-white/85"
+        active ? "bg-[#4094fb] text-white" : "text-white/55 hover:text-white/85"
       }`}
     >
       {label}
@@ -536,7 +552,7 @@ function CardList({
         type="button"
         aria-label="scroll left"
         onClick={() => scrollByDir(-1)}
-        className="pixel-tile absolute top-1/2 left-0 hidden -translate-y-1/2 cursor-pointer items-center justify-center bg-black/55 px-2 py-3 text-white opacity-0 transition-opacity hover:bg-black/70 group-hover/cards:opacity-100 [@media(hover:hover)]:flex"
+        className="pixel-tile absolute top-1/2 left-0 hidden -translate-y-1/2 cursor-pointer items-center justify-center bg-black/55 px-2 py-3 text-white opacity-0 transition-opacity group-hover/cards:opacity-100 hover:bg-black/70 [@media(hover:hover)]:flex"
       >
         ◀
       </button>
@@ -544,7 +560,7 @@ function CardList({
         type="button"
         aria-label="scroll right"
         onClick={() => scrollByDir(1)}
-        className="pixel-tile absolute top-1/2 right-0 hidden -translate-y-1/2 cursor-pointer items-center justify-center bg-black/55 px-2 py-3 text-white opacity-0 transition-opacity hover:bg-black/70 group-hover/cards:opacity-100 [@media(hover:hover)]:flex"
+        className="pixel-tile absolute top-1/2 right-0 hidden -translate-y-1/2 cursor-pointer items-center justify-center bg-black/55 px-2 py-3 text-white opacity-0 transition-opacity group-hover/cards:opacity-100 hover:bg-black/70 [@media(hover:hover)]:flex"
       >
         ▶
       </button>
@@ -595,17 +611,17 @@ function CardTile({
       ? swipeRow.p0Swipe
       : swipeRow.p1Swipe
     : null
-  const tick = card ? ticks[card.oracle_id] : undefined
+  const tick = card ? ticks[card.expiry_market_id] : undefined
   const myPnl: bigint | null =
     outcome && (myIsP0 ? outcome.p0Pnl : outcome.p1Pnl) !== null
       ? BigInt(myIsP0 ? outcome.p0Pnl! : outcome.p1Pnl!)
       : card && mySwipe
         ? markCardPnl(
-            mySwipe,
+            toSwipeLite(mySwipe),
             card.strike,
-            tick?.forward,
+            tick?.spot,
             tick?.expiryMs,
-            nowMs,
+            nowMs
           )
         : null
 
@@ -676,19 +692,19 @@ function CardTile({
 }
 
 /**
- * Per-card PnL as a signed % of the swipe's premium (the player's
- * stake on that single card). Falls back to "—" if no swipe was made.
+ * Per-card PnL as a signed % of the swipe's quantity (the player's stake
+ * on that single card). Falls back to "—" if no swipe was made. 6-24
+ * swipes carry `orderId` instead of `premium` (the real premium needs a
+ * server-side lookup not yet wired into `room_state`/`swipes`; see
+ * protocol.ts), so this is relative to `quantity` rather than a true cost
+ * basis — see `fmtPnlPct` / `liveCardPnl` in pnl.ts.
  */
 function signedPercent(
   micro: bigint,
-  swipe: { premium: string } | null
+  swipe: { isUp: boolean; quantity: string; orderId: string } | null
 ): string {
   if (!swipe) return "—"
-  const premium = BigInt(swipe.premium)
-  if (premium === 0n) return "—"
-  const pct = Math.round((Number(micro) / Number(premium)) * 100)
-  const sign = pct < 0 ? "-" : pct > 0 ? "+" : ""
-  return `${sign}${Math.abs(pct)}%`
+  return fmtPnlPct(micro, BigInt(swipe.quantity))
 }
 
 /**

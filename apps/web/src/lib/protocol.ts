@@ -36,8 +36,8 @@ export type ClientMsg =
   | { type: "room_unsubscribe"; duelId: string }
   | { type: "chat_send"; text: string }
   | { type: "chat_react"; duelId: string; emoji: string }
-  | { type: "oracle_subscribe"; oracleIds: string[] }
-  | { type: "oracle_unsubscribe"; oracleIds: string[] }
+  | { type: "oracle_subscribe"; marketIds: string[] }
+  | { type: "oracle_unsubscribe"; marketIds: string[] }
   | { type: "ping" }
 
 // ─── Server → Client ────────────────────────────────────────────────────────
@@ -55,7 +55,9 @@ export type ServerMsg =
        * sha2_256 hash of the 5-card deck the server pre-generated for
        * this match. The plaintext stays server-side until reveal_deck
        * lands on chain — the creator commits THIS hash in `create_duel`,
-       * the keeper reveals later. "0x"-prefixed hex string.
+       * the keeper reveals later. "0x"-prefixed hex string. Empty only
+       * if deck generation degraded gracefully (shouldn't happen in
+       * practice).
        */
       deckHash: string
     }
@@ -77,11 +79,11 @@ export type ServerMsg =
       cardCount: number
       /**
        * Revealed cards — empty until `DeckRevealed` lands. Each entry
-       * carries the DeepBook `OracleSVI` id and the u64 strike (decimal
+       * carries the 6-24 `ExpiryMarket` id and the u64 strike (decimal
        * string). UI uses these to render the swipe deck and look up
-       * per-card oracle ticks.
+       * per-card market ticks.
        */
-      cards: Array<{ oracle_id: string; strike: string }>
+      cards: Array<{ expiry_market_id: string; strike: string }>
       settledCount: number
       /**
        * Real-PnL cumulative fields per the new contract. Winner is
@@ -106,19 +108,20 @@ export type ServerMsg =
         /** Signed decimal real PnL = (won ? quantity : 0) - premium. Null if no swipe. */
         p0Pnl: string | null
         p1Pnl: string | null
-        p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-        p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+        p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+        p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
       }>
       /**
        * Per-card swipes captured from chain — both settled and pending.
-       * The UI uses this to render running PnL (premium paid so far)
-       * and to rehydrate `swipeResults` after F5 without losing the
-       * "what have I swiped" memory.
+       * The UI uses this to render running PnL (premium paid so far,
+       * looked up server-side by `orderId`) and to rehydrate
+       * `swipeResults` after F5 without losing the "what have I swiped"
+       * memory.
        */
       swipes: Array<{
         cardIdx: number
-        p0Swipe: { isUp: boolean; quantity: string; premium: string } | null
-        p1Swipe: { isUp: boolean; quantity: string; premium: string } | null
+        p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+        p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
       }>
     }
   | { type: "room_settled"; duelId: string; winner: string; payoutTo: string }
@@ -132,12 +135,17 @@ export type ServerMsg =
   | { type: "peer_forfeit"; duelId: string; address: string }
   | {
       type: "practice_session"
-      cards: Array<{ oracle_id: string; strike: string; expiry: string }>
+      cards: Array<{ expiry_market_id: string; strike: string; expiry: string }>
       botSwipes: boolean[]
     }
   | {
       type: "chat_history"
-      messages: Array<{ id: number; from: string; text: string; timestampMs: number }>
+      messages: Array<{
+        id: number
+        from: string
+        text: string
+        timestampMs: number
+      }>
     }
   | {
       type: "chat_message"
@@ -154,18 +162,17 @@ export type ServerMsg =
       timestampMs: number
     }
   | {
-      type: "oracle_tick"
-      oracleId: string
-      spot: string
-      forward: string
-      expiry: string
-      settled: boolean
       /**
-       * SVI parameters used by the on-chain `pricing::p_up` quoter.
-       * Optional — older OracleSVI snapshots may not surface them.
-       * Five-tuple in 1e9 fixed point: (a, b, rho, m, sigma).
+       * 6-24: streams `ExpiryMarket` state instead of the pre-6-24
+       * `OracleSVI` object (which no longer exists). `settlementPrice` is
+       * `null` until the predict indexer's `MarketSettled` mirror has a
+       * row for this market.
        */
-      svi?: { a: string; b: string; rho: string; m: string; sigma: string }
+      type: "oracle_tick"
+      expiryMarketId: string
+      spot: string
+      expiry: string
+      settlementPrice: string | null
       timestampMs: number
     }
   | {
