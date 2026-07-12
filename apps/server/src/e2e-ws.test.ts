@@ -3,7 +3,7 @@
  * real handler stack and drives clients through the e2e flow:
  *   hello → chat_history → chat_send broadcast →
  *   queue_join (balance gate rejects, no chain set up) →
- *   practice_start rejected (no oracles, since we point at non-existent network) →
+ *   practice_start rejected (practice_failed, spot fetch unreachable) →
  *   room_subscribe + chat_react (player-only filter via mirror).
  *
  * No network: indexer + keeper + match-clock + oracle-stream are all
@@ -37,6 +37,19 @@ import { websocketHandler } from "./ws/handlers"
 import { newSocketState } from "./ws/matchmaking"
 import { closeDb, upsertDuel } from "./db"
 import { HAS_TEST_DB, resetTables } from "./test-db"
+import { env } from "./env"
+
+// `practice_start` calls out to the real propbook indexer for BTC spot.
+// This harness must never depend on that being reachable (or unreachable —
+// live testnet state varies), so point it at an address nothing listens
+// on: readBtcSpot() then rejects deterministically in every environment.
+// A direct mutation (rather than a `process.env.*` assignment like the
+// block above) is required here because static imports execute before
+// this module's own top-level statements — by the time `./deckmaster`
+// (and transitively `./env`) finish evaluating, `process.env.PORT = "0"`
+// etc. above have not run yet, so they don't actually reach `env.ts`.
+;(env as { propbookIndexerUrl: string }).propbookIndexerUrl =
+  "http://127.0.0.1:1"
 
 let server: ReturnType<typeof Bun.serve> | null = null
 let baseUrl = ""
@@ -234,6 +247,19 @@ describe.skipIf(!HAS_TEST_DB)("WS end-to-end", () => {
     })
     expect(err.code).toBe("practice_no_queue")
     expect(err.message).toContain("practice_start")
+    c.close()
+  })
+
+  test("practice_start fails gracefully with practice_failed (no network)", async () => {
+    const c = new WSClient(baseUrl)
+    await c.open()
+    c.send({ type: "hello", address: "0xpracticeuser2" })
+    await c.waitFor({ type: "hello" })
+    c.send({ type: "practice_start" })
+    const err = await c.waitFor<{ type: string; code: string }>({
+      type: "error",
+    })
+    expect(err.code).toBe("practice_failed")
     c.close()
   })
 
