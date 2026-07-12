@@ -224,7 +224,7 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         {phase.kind === "needs_manager" && (
           <NeedsManagerStep
             walletDusdc={walletDusdc}
-            target={requiredManagerBalance(stake)}
+            stake={stake}
             onCreate={async () => {
               if (!account) return
               try {
@@ -360,6 +360,73 @@ function OneTimeNote() {
   )
 }
 
+function FundingRow({
+  accent,
+  label,
+  sub,
+  amount,
+}: {
+  accent: string
+  label: string
+  sub: string
+  amount: bigint
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start gap-2">
+        <span
+          className="mt-1 size-2 shrink-0 [image-rendering:pixelated]"
+          style={{ backgroundColor: accent }}
+        />
+        <div>
+          <p className="text-sm text-white/80">{label}</p>
+          <p className="text-[11px] text-white/45">{sub}</p>
+        </div>
+      </div>
+      <span className="shrink-0 text-sm text-white/80">{fmtDusdc(amount)}</span>
+    </div>
+  )
+}
+
+/**
+ * Explains what one deposit into the manager actually buys — the stake (the
+ * bet) and the swipe budget (5 Predict positions) — so the "deposit N dUSDC"
+ * ask isn't an unexplained number. Every figure derives from
+ * `requiredManagerBalance(stake)`, so it can't drift from the real gate.
+ */
+function FundingBreakdown({ stake }: { stake: bigint }) {
+  return (
+    <div className="space-y-2 rounded bg-white/5 px-3 py-2.5">
+      <p className="text-[10px] tracking-wider text-white/45 uppercase">
+        what your deposit covers
+      </p>
+      <FundingRow
+        accent="#e08a2b"
+        label="Your stake"
+        sub="your bet — won back doubled"
+        amount={stake}
+      />
+      <FundingRow
+        accent="#4094fb"
+        label="Swipe budget"
+        sub="one Predict position per card, up to 5"
+        amount={MAX_PREMIUM_BUDGET}
+      />
+      <div className="flex items-center justify-between border-t border-white/10 pt-2">
+        <span className="text-sm tracking-wider text-white/70 uppercase">
+          This duel needs
+        </span>
+        <span className="text-base text-white">
+          {fmtDusdc(requiredManagerBalance(stake))}
+        </span>
+      </div>
+      <p className="text-[10px] tracking-wider text-white/40 uppercase">
+        gas sponsored — you never need SUI
+      </p>
+    </div>
+  )
+}
+
 function NeedsWalletStep({
   needed,
   current,
@@ -407,11 +474,11 @@ function NeedsWalletStep({
 
 function NeedsManagerStep({
   walletDusdc,
-  target,
+  stake,
   onCreate,
 }: {
   walletDusdc: bigint
-  target: bigint
+  stake: bigint
   onCreate: () => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
@@ -419,10 +486,10 @@ function NeedsManagerStep({
     <div className="space-y-3">
       <WalletToManagerFlow />
       <p className="text-base text-white/80">
-        You need a manager to swipe. We&rsquo;ll create one, then deposit{" "}
-        {fmtDusdc(target)} from your wallet — enough for this duel&rsquo;s stake
-        and swipe premiums, which both draw from the manager.
+        You need a manager to swipe. We&rsquo;ll create one and fund it from
+        your wallet:
       </p>
+      <FundingBreakdown stake={stake} />
       <p className="text-sm text-white/55">
         Wallet balance: {fmtDusdc(walletDusdc)}
       </p>
@@ -461,11 +528,10 @@ function NeedsDepositStep({
   return (
     <div className="space-y-3">
       <WalletToManagerFlow />
-      <p className="text-base text-white/80">
-        Your manager has {fmtDusdc(current)}. Depositing {fmtDusdc(needed)}{" "}
-        brings it to {fmtDusdc(target)} — enough for this duel&rsquo;s{" "}
-        {fmtDusdc(stake)} stake plus its swipe premiums, which both draw from
-        the manager.
+      <FundingBreakdown stake={stake} />
+      <p className="text-sm text-white/55">
+        Your manager has {fmtDusdc(current)} &mdash; deposit {fmtDusdc(needed)}{" "}
+        more to be ready.
       </p>
       <OneTimeNote />
       <PixelButton
