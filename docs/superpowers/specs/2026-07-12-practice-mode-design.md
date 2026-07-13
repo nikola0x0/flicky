@@ -135,7 +135,8 @@ by:
   1–3s delay.
 - Lockup: anchored at `lockupStartMs = Date.now()` when the 5th swipe lands;
   card *i* settles at `lockupStartMs + expiryOffsetMs[i]` using the latest
-  `spot_tick`: `upWon = spot >= strike` (same convention as `pnl.ts`).
+  `spot_tick`: `upWon = spot > strike` (same convention as the contract and
+  `pnl.ts` — an exact tie goes to DOWN).
 - Result: per-card PnL via the existing `pnl.ts` binary projection; match
   winner = higher total PnL (mirrors on-chain `finalize` semantics of
   payout + premium comparison). Score recap also shows the `1/p × speed`
@@ -171,7 +172,9 @@ they are.
 - **Spot fetch hiccup during lockup**: server's `lastBtcSpot` cache keeps
   ticks flowing with the last good value; the client settles against the
   latest received tick.
-- **Spot exactly at strike at expiry**: `upWon = spot >= strike`.
+- **Spot exactly at strike at expiry**: `upWon = spot > strike` — an exact
+  tie goes to DOWN, matching the contract's `actual_up = settlement > strike`
+  and `pnl.ts`.
 - **No spot tick received yet at a card's expiry moment**: hold the flip
   until the next tick arrives (settle on first tick at/after expiry).
 
