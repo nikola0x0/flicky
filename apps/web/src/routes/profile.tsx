@@ -5,6 +5,7 @@ import { setPendingSwipe } from "@/lib/nav-transition"
 import { DeviceFrame } from "@/components/device-frame"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 
+import { AvatarPickerModal } from "@/components/avatar-picker-modal"
 import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"
 import { WithdrawModal } from "@/components/withdraw-modal"
@@ -44,6 +45,7 @@ export default function Profile() {
   const managerBalance = managerInfo?.balance ?? 0
   const [depositOpen, setDepositOpen] = useState(false)
   const [withdrawOpen, setWithdrawOpen] = useState(false)
+  const [avatarOpen, setAvatarOpen] = useState(false)
   const [copied, setCopied] = useState(false)
 
   const handleCopyAddress = async () => {
@@ -87,6 +89,7 @@ export default function Profile() {
               <button
                 type="button"
                 aria-label="change avatar"
+                onClick={() => setAvatarOpen(true)}
                 className="absolute -right-1 -bottom-1 grid size-8 place-items-center rounded-full bg-black text-white shadow-[0_0_0_2px_#1b2548]"
               >
                 <img
@@ -216,6 +219,11 @@ export default function Profile() {
         open={withdrawOpen}
         address={address}
         onClose={() => setWithdrawOpen(false)}
+      />
+      <AvatarPickerModal
+        open={avatarOpen}
+        address={address}
+        onClose={() => setAvatarOpen(false)}
       />
     </>
   )
