@@ -4,6 +4,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { fmtPnlPct, markCardPnl, type SwipeLite } from "@/lib/pnl"
+import { playSfx } from "@/lib/sound"
 import { PixelButton } from "@/components/pixel-button"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
@@ -179,6 +180,54 @@ export default function DuelView() {
     }
     return fetchedDuel
   }, [demo, address, fetchedDuel, demoStartedAtMs])
+
+  // ── card-settle sfx ──────────────────────────────────────────────
+  // Per-card "pending | win | loss" from the participant's perspective —
+  // the same rule CardTile renders (loss only when PnL < 0), so sound
+  // and badge always agree. Spectators/signed-out viewers get silence.
+  const settleStates = useMemo<Array<"pending" | "win" | "loss">>(() => {
+    if (!duel) return []
+    const p0 = Boolean(address && duel.creator === address)
+    const p1 = Boolean(address && duel.challenger === address)
+    if (!p0 && !p1) return []
+    return duel.cards.map((card, i) => {
+      const outcome = duel.cardOutcomes.find((o) => o.cardIdx === i)
+      const tick = ticks[card.expiry_market_id]
+      if (!outcome && tick?.settled !== true) return "pending"
+      const raw = outcome ? (p0 ? outcome.p0Pnl : outcome.p1Pnl) : null
+      let pnl: bigint | null = raw != null ? BigInt(raw) : null
+      if (pnl === null) {
+        const row = duel.swipes.find((s) => s.cardIdx === i)
+        const swipe = (p0 ? row?.p0Swipe : row?.p1Swipe) ?? null
+        pnl = swipe
+          ? markCardPnl(
+              toSwipeLite(swipe),
+              card.strike,
+              tick?.spot,
+              tick?.expiryMs,
+              nowMs
+            )
+          : null
+      }
+      return pnl === null ? "pending" : pnl < 0n ? "loss" : "win"
+    })
+  }, [duel, ticks, address, nowMs])
+
+  // Sound only on a pending→settled transition observed while watching —
+  // never a burst of sounds for already-settled cards on first load.
+  const prevSettleStates = useRef<Array<"pending" | "win" | "loss"> | null>(
+    null
+  )
+  useEffect(() => {
+    const prev = prevSettleStates.current
+    prevSettleStates.current = settleStates
+    if (!prev || prev.length !== settleStates.length) return
+    settleStates.forEach((state, i) => {
+      if (prev[i] === "pending" && state !== "pending") {
+        playSfx(state === "win" ? "card-win" : "card-loss")
+      }
+    })
+  }, [settleStates])
 
   // Initial fetch + polling (mirror of MyMatchTile's pattern — keeps
   // the view honest if the WS room subscription misses an update).
