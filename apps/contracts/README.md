@@ -56,6 +56,20 @@ Source of truth: [`deployed.json`](./deployed.json).
 
 > **2026-05-29 republish notes.** Struct layout on `Duel<T>` changed (added `cards_settled`, `card_settlement_prices`, `settled_count`; removed legacy `decide_time_ms` / `p{0,1}_score`); finalize was split into `settle_card × N` + `finalize`. Previous package at `0x436cc562ca716a88afe17214065a31d48653d146217fa73a303220ae8330bd7e` is orphaned — duels created there can no longer be finalized through the current keeper / FE.
 
+### Season prizes (our package)
+
+Standalone escrow for the Season 0 leaderboard payout — published separately from the Flicky duel package, with its own `AdminCap` and upgrade cadence. See [`season/README.md`](./season/README.md) for the ops flow.
+
+| Item | ID | Role |
+|---|---|---|
+| **Package ID** | `0x11c92f8fec8f75c2b0649cbfe45a844df4a34a51457d42ed1aac46b370a75990` | `season::prize_pool` — publish 2026-07-13 |
+| **AdminCap** | `0x7bcfe7ad000649f4dcc658aa56ec12d1984b294d61886aac75e516d35cdd6f04` | Gates `create_pool` / `distribute` / `withdraw_remainder`. Held by deployer |
+| **UpgradeCap** | `0x971d568fe1f0ddbb0133934d2325568bf72acd9f560a28fe10a329ae2781eb68` | Authorizes upgrades. Held by deployer |
+| **PrizePool** (`season-0`) | `0xd3b8c7fb0a129f16e193187cc3ee1067d600bceea5d7f01d6b1ebda61edf4d1a` | Shared escrow object. Currently **empty** — fund via `deposit` |
+| **Deployer** | `0x9c08a74cca711f45a176765e9db499f01def450fa90320a4c23934b2082aa882` | The publisher account (holds the caps) |
+
+Source of truth: [`season/deployed.json`](./season/deployed.json). `SEASON_PACKAGE_ID` + `SEASON_POOL_ID` are wired into `apps/server/.env` and surfaced by `GET /season`.
+
 ### DeepBook Predict (external dependency)
 
 | Item | ID | Notes |
