@@ -207,6 +207,9 @@ export function usePracticeSession({
     const kind = phase.kind
     if (kind !== "STARTING" && kind !== "SWIPING" && kind !== "LOCKUP") return
     clearTimers()
+    // `wsOpen` is the socket layer's external signal; transitioning the
+    // phase machine when it drops IS this effect's synchronization job.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPhase({
       kind: "ERROR",
       message:
