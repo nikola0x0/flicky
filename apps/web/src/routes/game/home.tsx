@@ -21,9 +21,8 @@ export default function GameHome() {
             "linear-gradient(180deg, #151837 0%, rgba(21,24,55,0) 18%, rgba(27,37,72,0) 70%, #1b2548 100%), url(/assets/home/home-bg.png)",
         }}
       />
-      <h1 className="text-4xl tracking-[0.2em] uppercase">home</h1>
       {/* Season 0 promo — tap through to the leaderboard/prizes. */}
-      <Link to="/game/rank" className="block w-full">
+      <Link to="/game/rank" className="mt-2 block w-full">
         <SeasonBanner />
       </Link>
       {address && <PlayerHeroCard address={address} />}

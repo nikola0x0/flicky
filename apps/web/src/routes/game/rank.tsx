@@ -98,7 +98,7 @@ export default function GameRank() {
   const remaining = season ? Date.parse(season.endsAt) - now : 0
 
   return (
-    <div className="relative isolate flex h-full flex-col gap-3 overflow-y-auto px-4 py-4 font-pixel text-white [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div className="relative isolate flex h-full flex-col gap-2 overflow-y-auto px-4 py-4 font-pixel text-white [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {/* Season 0 promo banner (same as home). */}
       <SeasonBanner />
       <header className="flex flex-col items-center">
@@ -117,10 +117,10 @@ export default function GameRank() {
             src="/banners/rank-header.png"
             alt=""
             aria-hidden
-            className="h-56 w-auto max-w-none [image-rendering:pixelated]"
+            className="h-32 w-auto max-w-none [image-rendering:pixelated]"
           />
         </div>
-        <h1 className="-mt-4 text-4xl tracking-[0.2em] uppercase">
+        <h1 className="-mt-3 text-4xl tracking-[0.2em] uppercase">
           leaderboard
         </h1>
         {season && remaining > 0 && (
