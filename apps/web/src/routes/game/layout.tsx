@@ -22,13 +22,12 @@ import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"
 import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
+import { MuteButton } from "@/components/mute-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
-import {
-  useDusdcBalance,
-  useManagerBalance,
-} from "@/hooks/use-wallet-balances"
+import { useDusdcBalance, useManagerBalance } from "@/hooks/use-wallet-balances"
 import { clearPendingSwipe, peekPendingSwipe } from "@/lib/nav-transition"
+import { installAudioUnlock, startBgm, stopBgm } from "@/lib/sound"
 import { DeviceFrame } from "@/components/device-frame"
 
 const SIGN_IN_BRAND_STYLE = {
@@ -77,6 +76,18 @@ export default function GameLayout() {
   const outletContext: GameOutletContext = {
     openLogin: () => setLoginOpen(true),
   }
+
+  // Audio lives with the game shell: first gesture unlocks the
+  // AudioContext (browser autoplay policy), music loops while any
+  // /game/* route is mounted, and both stop when the shell unmounts.
+  useEffect(() => {
+    const uninstall = installAudioUnlock()
+    startBgm()
+    return () => {
+      uninstall()
+      stopBgm()
+    }
+  }, [])
 
   return (
     <>
@@ -141,7 +152,7 @@ function SignedOutPrompt({ onSignIn }: { onSignIn: () => void }) {
             alt=""
             aria-hidden
             onError={() => setArtFailed(true)}
-            className="-mb-10 w-72 max-w-[88%] [image-rendering:pixelated] drop-shadow-[0_8px_0_rgba(0,0,0,0.35)]"
+            className="-mb-10 w-72 max-w-[88%] drop-shadow-[0_8px_0_rgba(0,0,0,0.35)] [image-rendering:pixelated]"
           />
         )}
         <p className="text-3xl tracking-[0.15em] text-white uppercase">
@@ -271,7 +282,12 @@ function FrameHeader({
           </span>
         </PixelButton>
       )}
-      {!isShop && account && <MenuButton />}
+      {!isShop && (
+        <div className="flex items-center gap-2">
+          <MuteButton />
+          {account && <MenuButton />}
+        </div>
+      )}
     </header>
   )
 }
