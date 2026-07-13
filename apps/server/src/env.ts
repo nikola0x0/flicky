@@ -35,14 +35,15 @@ export interface PrizeTier {
   amount: number
 }
 
-// Season 0 default split: 1st 200 / 2nd 100 / 3rd 50 / 4th–10th 25 each.
-// Pool total is DERIVED from this (sum over tiers) so the headline number and
-// the per-rank breakdown can never drift: 200 + 100 + 50 + 25×7 = 525.
+// Season 0 default split: 1st 4 / 2nd 2 / 3rd 1 / 4th–9th 0.5 each (rank 10
+// wins nothing). Pool total is DERIVED from this (sum over tiers) so the
+// headline number and the per-rank breakdown can never drift:
+// 4 + 2 + 1 + 0.5×6 = 10 SUI exactly.
 const DEFAULT_PRIZE_SPLIT: PrizeTier[] = [
-  { rankStart: 1, rankEnd: 1, amount: 200 },
-  { rankStart: 2, rankEnd: 2, amount: 100 },
-  { rankStart: 3, rankEnd: 3, amount: 50 },
-  { rankStart: 4, rankEnd: 10, amount: 25 },
+  { rankStart: 1, rankEnd: 1, amount: 4 },
+  { rankStart: 2, rankEnd: 2, amount: 2 },
+  { rankStart: 3, rankEnd: 3, amount: 1 },
+  { rankStart: 4, rankEnd: 9, amount: 0.5 },
 ]
 
 /**
@@ -233,8 +234,8 @@ export const env = {
   // season end, no escrow contract). Every field is env-override-able so the
   // pool/split/end-date can change without a redeploy. The pool total is
   // derived from `seasonPrizeSplit` (see season.ts), never a separate number.
-  seasonId: process.env.SEASON_ID ?? "season-0",
-  seasonName: process.env.SEASON_NAME ?? "Season 0",
+  seasonId: process.env.SEASON_ID ?? "season-1",
+  seasonName: process.env.SEASON_NAME ?? "Season 1",
   // ISO instant the season ends; the web renders a live countdown to it.
   seasonEndsAt: process.env.SEASON_ENDS_AT ?? "2026-07-31T23:59:59Z",
   seasonPrizeCurrency: process.env.SEASON_PRIZE_CURRENCY ?? "SUI",
