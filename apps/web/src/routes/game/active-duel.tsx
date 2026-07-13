@@ -1240,12 +1240,14 @@ function SettlingHandoff({ duelId }: { duelId: string }) {
       <div className="flex w-full max-w-xs flex-col gap-2">
         <Link
           to={`/game/duel/${duelId}`}
+          onClick={() => playSfx("click")}
           className="pixel-tile no-hover bg-emerald-600 px-4 py-3 font-pixel text-sm uppercase"
         >
           watch result
         </Link>
         <Link
           to="/game/home"
+          onClick={() => playSfx("click")}
           className="pixel-tile no-hover bg-[#1b2548] px-4 py-3 font-pixel text-sm uppercase"
         >
           back to home

@@ -27,7 +27,7 @@ import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { useDusdcBalance, useManagerBalance } from "@/hooks/use-wallet-balances"
 import { clearPendingSwipe, peekPendingSwipe } from "@/lib/nav-transition"
-import { installAudioUnlock, startBgm, stopBgm } from "@/lib/sound"
+import { installAudioUnlock, playSfx, startBgm, stopBgm } from "@/lib/sound"
 import { DeviceFrame } from "@/components/device-frame"
 
 const SIGN_IN_BRAND_STYLE = {
@@ -309,6 +309,7 @@ function HeaderBalances({
         to="/profile"
         aria-label="open profile"
         state={{ from: location.pathname }}
+        onClick={() => playSfx("click")}
         className="transition-opacity hover:opacity-85"
       >
         <PlayerAvatar address={address} size={56} />
@@ -368,6 +369,7 @@ function NavTab({
     <NavLink
       to={to}
       aria-label={label}
+      onClick={() => playSfx("click")}
       className={({ isActive }) =>
         `relative flex flex-1 items-center justify-center px-1 py-2 transition-opacity ${
           isActive ? "opacity-100" : "opacity-55 hover:opacity-85"
@@ -417,6 +419,7 @@ function FeaturedNavTab({
     <NavLink
       to={to}
       aria-label={label}
+      onClick={() => playSfx("click")}
       className="relative flex flex-1 items-center justify-center"
     >
       {({ isActive }) => (
