@@ -1,8 +1,10 @@
 # Sound sources
 
 All SFX are CC0 (public domain) — no attribution required; recorded for
-provenance. `bgm.mp3` is user-supplied — see its own note below, license
-not yet confirmed CC0.
+provenance. `bgm.mp3` is Uppbeat-licensed (free tier), which requires
+visible attribution — see its own note below. The required credit is
+rendered in-app in `apps/web/src/components/menu-modal.tsx`; do not
+remove it without replacing the track or upgrading the license.
 
 | File | Original source file | Pack |
 |---|---|---|
@@ -16,7 +18,7 @@ not yet confirmed CC0.
 | match-found.mp3 | `twoTone1.ogg` | Kenney — Digital Audio (kenney.nl/assets/digital-audio, CC0) |
 | duel-win.mp3 | `jingles_NES00.ogg` (8-Bit jingles) | Kenney — Music Jingles (kenney.nl/assets/music-jingles, CC0) |
 | duel-lose.mp3 | `jingles_NES02.ogg` (8-Bit jingles) | Kenney — Music Jingles (kenney.nl/assets/music-jingles, CC0) |
-| bgm.mp3 | `Boogie Pecan Pie 41135.mp3` | User-supplied — source/license TBD, see note |
+| bgm.mp3 | "Boogie" by Pecan Pie (Uppbeat, free tier) | Uppbeat — uppbeat.io/t/pecan-pie/boogie |
 
 Notes:
 - `duel-win.mp3` / `duel-lose.mp3`: the Kenney Music Jingles pack ships
@@ -30,12 +32,20 @@ Notes:
   "lose" — reads as a deflating "womp"). This is an unlistened judgment
   call worth a human audio review/swap later, same as `bgm.mp3` below.
 - `bgm.mp3`: replaced the auto-picked Junkala placeholder with a track the
-  user chose directly — "Boogie Pecan Pie" (source file
+  user chose directly — "Boogie" by Pecan Pie, downloaded from Uppbeat
+  under the free-tier Creator license (source file
   `Boogie Pecan Pie 41135.mp3`, ~135s, re-encoded the same way as every
   other asset: `ffmpeg -vn -codec:a libmp3lame -qscale:a 4`, dropping the
-  embedded cover-art video stream from the original). Source/license not
-  yet confirmed CC0 — flag before treating this repo's audio set as fully
-  CC0-clean.
+  embedded cover-art video stream from the original). NOT CC0 — Uppbeat's
+  free tier requires a visible, per-download attribution credit:
+
+  > Music from #Uppbeat (free for Creators!):
+  > https://uppbeat.io/t/pecan-pie/boogie
+  > License code: 7JEHN7VMRUTPZCDU
+
+  This credit is rendered in-app (menu modal) to satisfy that requirement.
+  If `bgm.mp3` is ever swapped again, either move the credit to match the
+  new track's license or remove it if the replacement is CC0.
 
 Converted to mp3 with ffmpeg (libmp3lame, -qscale:a 4). Original files
 were `.ogg` (Kenney packs) and `.wav` (Junkala pack).
