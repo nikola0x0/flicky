@@ -122,8 +122,9 @@ async function tick(): Promise<void> {
     log.warn(`btc spot: ${e instanceof Error ? e.message : String(e)}`)
   }
   const spot = lastBtcSpot ?? "0"
-  // Market-less spot tick for practice sessions.
-  if (spotSubscribers.size > 0) {
+  // Market-less spot tick for practice sessions. Skip while the spot cache
+  // has never populated — a "0" tick would poison client-side settlement.
+  if (spotSubscribers.size > 0 && lastBtcSpot !== null) {
     const wire = JSON.stringify({ type: "spot_tick", spot, timestampMs: now })
     for (const ws of spotSubscribers) {
       try {

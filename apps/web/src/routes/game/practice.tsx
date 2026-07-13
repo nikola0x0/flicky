@@ -34,6 +34,7 @@ export default function GamePractice() {
     address: account?.address,
     send,
     onMessage,
+    wsOpen,
   })
   const { phase } = practice
 

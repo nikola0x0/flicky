@@ -36,6 +36,10 @@ const SETTLE_GRACE_MS = 6_000
 /** Pause after the last card flips before the result screen. */
 const RESULT_DELAY_MS = 1_400
 const START_TIMEOUT_MS = 10_000
+/** Slack added on top of the settlement grace period before the LOCKUP
+ *  hard-timeout fires — covers the settlement interval's own 250ms tick lag
+ *  so it doesn't race a legitimate last-second settle. */
+const LOCKUP_STALL_BUFFER_MS = 2_000
 
 export interface PracticeCard {
   strike: string
@@ -82,10 +86,12 @@ export function usePracticeSession({
   address,
   send,
   onMessage,
+  wsOpen,
 }: {
   address: string | undefined
   send: (msg: ClientMsg) => void
   onMessage: (h: (msg: ServerMsg) => void) => Unsubscribe
+  wsOpen: boolean
 }) {
   const [phase, setPhase] = useState<PracticePhase>({ kind: "INTRO" })
   const [session, setSession] = useState<Session | null>(null)
@@ -117,6 +123,13 @@ export function usePracticeSession({
   useEffect(() => {
     lastTickRef.current = lastTick
   }, [lastTick])
+  // Read by the LOCKUP hard-timeout below, which schedules once on entering
+  // LOCKUP and must see the latest settlement count without resetting its
+  // timer on every settle.
+  const outcomesRef = useRef(outcomes)
+  useEffect(() => {
+    outcomesRef.current = outcomes
+  }, [outcomes])
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const cardShownAtRef = useRef(0)
   // Duplicate-delivery latch for the WS intake. Because `phaseRef` is
@@ -182,6 +195,25 @@ export function usePracticeSession({
     return () => clearTimeout(t)
   }, [phase])
 
+  // WS drop mid-session: the socket auto-reconnects (useFlickySocket), but
+  // the server drops us from `spotSubscribers` on close and we never
+  // re-send `spot_subscribe`, so a reconnect mid-match would silently
+  // freeze the stream and cards would settle against stale spot. Spec: show
+  // an error with a restart button — the session is ephemeral, no resume.
+  // Guarded to STARTING/SWIPING/LOCKUP so it never fires from INTRO (not
+  // connected yet) or RESULT/ERROR (already terminal).
+  useEffect(() => {
+    if (wsOpen) return
+    const kind = phase.kind
+    if (kind !== "STARTING" && kind !== "SWIPING" && kind !== "LOCKUP") return
+    clearTimers()
+    setPhase({
+      kind: "ERROR",
+      message:
+        "connection lost — the practice session can't continue. retry to deal a fresh match",
+    })
+  }, [wsOpen, phase, clearTimers])
+
   // WS intake: the deck, the spot stream, and practice errors.
   useEffect(() => {
     return onMessage((msg: ServerMsg) => {
@@ -203,6 +235,9 @@ export function usePracticeSession({
         cardShownAtRef.current = Date.now()
         setPhase({ kind: "SWIPING", cardIdx: 0 })
       } else if (msg.type === "spot_tick") {
+        // Defense in depth: a zero/negative spot (cold server cache) must
+        // never enter settlement — keep the last good tick instead.
+        if (BigInt(msg.spot) <= 0n) return
         // Clock-skew-proof: compare card due-times against our own receipt
         // time, not the server's timestampMs.
         setLastTick({ spot: msg.spot, receivedAtMs: Date.now() })
@@ -294,6 +329,31 @@ export function usePracticeSession({
     return () => clearInterval(iv)
   }, [phase, session])
 
+  // LOCKUP hard timeout: if `spot_tick` never lands even once, the
+  // settlement loop above early-returns on every 250ms poll forever and
+  // LOCKUP wedges with no path to RESULT or ERROR. One-shot timer past the
+  // point every card should have settled (last expiry + grace + buffer);
+  // if outcomes are still short, bail to an error. A normal completion
+  // moves `phase` off LOCKUP before this fires, which tears it down via
+  // the cleanup below.
+  useEffect(() => {
+    if (phase.kind !== "LOCKUP" || !session) return
+    const { lockupEndMs } = phase
+    const cardCount = session.cards.length
+    const delayMs =
+      lockupEndMs - Date.now() + SETTLE_GRACE_MS + LOCKUP_STALL_BUFFER_MS
+    const t = setTimeout(() => {
+      if (outcomesRef.current.length < cardCount) {
+        clearTimers()
+        setPhase({
+          kind: "ERROR",
+          message: "price feed stalled — retry to deal a fresh match",
+        })
+      }
+    }, delayMs)
+    return () => clearTimeout(t)
+  }, [phase, session, clearTimers])
+
   // All cards settled → brief beat for the last flip, then the result.
   useEffect(() => {
     if (phase.kind !== "LOCKUP" || !session) return
@@ -374,11 +434,20 @@ export function usePracticeSession({
   const ticks = useMemo(() => {
     if (!session || !lastTick) return {}
     const lockupStartMs = phase.kind === "LOCKUP" ? phase.lockupStartMs : null
-    const out: Record<string, { spot: string; expiry: string }> = {}
+    const out: Record<
+      string,
+      { spot: string; expiry: string; expiryMs: number }
+    > = {}
     session.cards.forEach((c, i) => {
       const expiryMs =
         (lockupStartMs ?? lastTick.receivedAtMs) + c.expiryOffsetMs
-      out[`practice-${i}`] = { spot: lastTick.spot, expiry: String(expiryMs) }
+      out[`practice-${i}`] = {
+        spot: lastTick.spot,
+        expiry: String(expiryMs),
+        // StreamingPnlChart's ChartTick wants a numeric expiryMs for the
+        // smooth time-decay mark; SwipeScreen reads the string `expiry`.
+        expiryMs,
+      }
     })
     return out
   }, [session, lastTick, phase])
