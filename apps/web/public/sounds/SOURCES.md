@@ -19,11 +19,15 @@ provenance.
 
 Notes:
 - `duel-win.mp3` / `duel-lose.mp3`: the Kenney Music Jingles pack ships
-  generic numbered stingers (no `Jingle_Win_*` / `Jingle_Lose_*` names),
-  so picks were made from the "8-Bit jingles" folder by ear/character —
-  `jingles_NES00` is the longest, most sustained NES-style fanfare in the
-  set (good "win" read); `jingles_NES02` has a sharp attack that decays
-  fast to silence (good "lose"/deflating read).
+  generic numbered stingers (no `Jingle_Win_*` / `Jingle_Lose_*` names).
+  No audio playback tool was available, so picks were not made by ear:
+  spectrogram analysis was inconclusive, and the actual pick came from
+  an `ffmpeg volumedetect` loudness-envelope comparison (first-third vs
+  last-third loudness) across the "8-Bit jingles" folder. `jingles_NES00`
+  stays flat/sustained end-to-end (mapped to "win" — reads as a fuller
+  fanfare); `jingles_NES02` decays sharply toward silence (mapped to
+  "lose" — reads as a deflating "womp"). This is an unlistened judgment
+  call worth a human audio review/swap later, same as `bgm.mp3` below.
 - `bgm.mp3`: the OpenGameArt "5 Chiptunes (Action)" page currently serves
   a zip whose contents are labelled "[Retro Game Music Pack]" by the same
   author (Juhani Junkala) — same CC0 grant, confirmed by the pack's
