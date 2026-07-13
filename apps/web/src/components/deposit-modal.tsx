@@ -21,6 +21,7 @@ import {
   waitForCreatedWrapper,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
+import { useModalSfx } from "@/lib/sound"
 import { PixelButton } from "@/components/pixel-button"
 
 const BLUE_BRAND_STYLE = {
@@ -78,6 +79,7 @@ export interface DepositModalProps {
  * success state when the chosen token's balance grows.
  */
 export function DepositModal({ open, address, onClose }: DepositModalProps) {
+  useModalSfx(open)
   const invalidateBalances = useInvalidateWalletBalances()
   const { data: suiBalance = 0 } = useSuiBalance()
   const { data: dusdcBalance = 0 } = useDusdcBalance()

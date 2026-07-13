@@ -3,6 +3,7 @@ import { createPortal } from "react-dom"
 import { useDAppKit } from "@mysten/dapp-kit-react"
 
 import { PixelButton } from "@/components/pixel-button"
+import { useModalSfx } from "@/lib/sound"
 
 /**
  * Burger-menu popup. Currently just hosts the logout action — wire
@@ -18,6 +19,7 @@ export interface MenuModalProps {
 }
 
 export function MenuModal({ open, onClose }: MenuModalProps) {
+  useModalSfx(open)
   const dAppKit = useDAppKit()
 
   const handleLogout = () => {
