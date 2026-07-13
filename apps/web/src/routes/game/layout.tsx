@@ -22,7 +22,6 @@ import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"
 import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
-import { MuteButton } from "@/components/mute-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { useDusdcBalance, useManagerBalance } from "@/hooks/use-wallet-balances"
@@ -282,12 +281,7 @@ function FrameHeader({
           </span>
         </PixelButton>
       )}
-      {!isShop && (
-        <div className="flex items-center gap-2">
-          <MuteButton />
-          {account && <MenuButton />}
-        </div>
-      )}
+      {!isShop && account && <MenuButton />}
     </header>
   )
 }

@@ -3,12 +3,18 @@ import { createPortal } from "react-dom"
 import { useDAppKit } from "@mysten/dapp-kit-react"
 
 import { PixelButton } from "@/components/pixel-button"
-import { useModalSfx } from "@/lib/sound"
+import {
+  setBgmVolume,
+  setSfxVolume,
+  useBgmVolume,
+  useModalSfx,
+  useSfxVolume,
+} from "@/lib/sound"
 
 /**
- * Burger-menu popup. Currently just hosts the logout action — wire
- * additional menu items into the button column below as the game
- * grows (inventory, referrals, how-to-play, language, etc.).
+ * Burger-menu popup. Hosts the sound settings (sfx/music volume) and the
+ * logout action — wire additional menu items into the button column below
+ * as the game grows (inventory, referrals, how-to-play, language, etc.).
  *
  * Portal-mounted so it dims the mobile frame AND the outer checker
  * background, identical pattern to <LoginModal>.
@@ -21,6 +27,8 @@ export interface MenuModalProps {
 export function MenuModal({ open, onClose }: MenuModalProps) {
   useModalSfx(open)
   const dAppKit = useDAppKit()
+  const sfxVolume = useSfxVolume()
+  const bgmVolume = useBgmVolume()
 
   const handleLogout = () => {
     void dAppKit.disconnectWallet()
@@ -69,7 +77,22 @@ export function MenuModal({ open, onClose }: MenuModalProps) {
           </h2>
         </header>
 
-        <div className="flex flex-col gap-3 px-6 pb-6">
+        <div className="flex flex-col gap-4 px-6 pb-6">
+          <div className="flex flex-col gap-3 rounded-2xl bg-black/25 p-3">
+            <VolumeSlider
+              label="sfx"
+              icon="/icons/sound.png"
+              value={sfxVolume}
+              onChange={setSfxVolume}
+            />
+            <VolumeSlider
+              label="music"
+              icon="/icons/music.png"
+              value={bgmVolume}
+              onChange={setBgmVolume}
+            />
+          </div>
+
           <PixelButton onClick={handleLogout} className="h-12">
             <span className="flex w-full items-center justify-center gap-2 text-2xl">
               <img
@@ -85,5 +108,46 @@ export function MenuModal({ open, onClose }: MenuModalProps) {
       </div>
     </div>,
     document.body
+  )
+}
+
+/** 0-1 volume, rendered as a chunky pixel-styled range input. */
+function VolumeSlider({
+  label,
+  icon,
+  value,
+  onChange,
+}: {
+  label: string
+  icon: string
+  value: number
+  onChange: (v: number) => void
+}) {
+  const percent = Math.round(value * 100)
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-2 text-sm tracking-[0.18em] text-white/70 uppercase">
+          <img
+            src={icon}
+            alt=""
+            aria-hidden
+            className="size-4 [image-rendering:pixelated]"
+          />
+          {label}
+        </span>
+        <span className="text-xs text-white/45 tabular-nums">{percent}%</span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        step={5}
+        value={percent}
+        onChange={(e) => onChange(Number(e.target.value) / 100)}
+        aria-label={`${label} volume`}
+        className="h-2 w-full cursor-pointer appearance-none rounded-none bg-white/15 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:rounded-none [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-[#4094fb] [&::-moz-range-thumb]:shadow-[0_0_0_2px_#0b1228] [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-none [&::-webkit-slider-thumb]:bg-[#4094fb] [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_#0b1228]"
+      />
+    </div>
   )
 }

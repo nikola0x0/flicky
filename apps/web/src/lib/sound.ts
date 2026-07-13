@@ -9,6 +9,10 @@
  * starts the music if it was requested. Audio is enhancement-only:
  * every load/play error is swallowed — a missing file must never break
  * the game (hence the manifest test in sound.test.ts).
+ *
+ * Volume is two independent, persisted 0-1 sliders (sfx, music) rather
+ * than a single mute flag — dragging either to 0 is equivalent to
+ * muting that channel; there's no separate master-mute state.
  */
 import { useEffect, useRef, useSyncExternalStore } from "react"
 
@@ -39,11 +43,15 @@ export const SFX_FILES: Record<SfxName, string> = {
 
 export const BGM_FILE = "/sounds/bgm.mp3"
 
-const MUTE_KEY = "flicky.audio.muted"
-const SFX_VOLUME = 0.6
-const BGM_VOLUME = 0.3
+const SFX_VOLUME_KEY = "flicky.audio.sfxVolume"
+const BGM_VOLUME_KEY = "flicky.audio.bgmVolume"
+// Sliders are a multiplier (0-1) on top of these tuned mix levels, not raw
+// gain — so "100%" means the game's designed balance, not full amplitude.
+const SFX_VOLUME_BASE = 0.6
+const BGM_VOLUME_BASE = 0.3
 
-let muted = readMuted()
+let sfxVolume = readVolume(SFX_VOLUME_KEY)
+let bgmVolume = readVolume(BGM_VOLUME_KEY)
 let unlocked = false
 let ctx: AudioContext | null = null
 let sfxGain: GainNode | null = null
@@ -62,11 +70,16 @@ function subscribe(cb: () => void): () => void {
   }
 }
 
-function readMuted(): boolean {
+function clamp01(v: number): number {
+  return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1
+}
+
+function readVolume(key: string): number {
   try {
-    return globalThis.localStorage?.getItem(MUTE_KEY) === "1"
+    const raw = globalThis.localStorage?.getItem(key)
+    return raw === null || raw === undefined ? 1 : clamp01(Number(raw))
   } catch {
-    return false
+    return 1
   }
 }
 
@@ -98,7 +111,7 @@ function unlock(): void {
     if (typeof AudioContext !== "undefined") {
       ctx = new AudioContext()
       sfxGain = ctx.createGain()
-      sfxGain.gain.value = SFX_VOLUME
+      sfxGain.gain.value = SFX_VOLUME_BASE * sfxVolume
       sfxGain.connect(ctx.destination)
       void ctx.resume().catch(() => {})
       for (const name of Object.keys(SFX_FILES) as SfxName[]) {
@@ -122,9 +135,9 @@ async function loadBuffer(name: SfxName): Promise<void> {
   }
 }
 
-/** Fire-and-forget. No-op when muted, locked, or not yet loaded. */
+/** Fire-and-forget. No-op when silenced, locked, or not yet loaded. */
 export function playSfx(name: SfxName): void {
-  if (muted || !unlocked || !ctx || !sfxGain) return
+  if (sfxVolume === 0 || !unlocked || !ctx || !sfxGain) return
   const buffer = buffers.get(name)
   if (!buffer) return
   try {
@@ -139,13 +152,13 @@ export function playSfx(name: SfxName): void {
 
 // ─── BGM ─────────────────────────────────────────────────────────────────────
 
-/** Request the music loop. Idempotent; respects mute + unlock state. */
+/** Request the music loop. Idempotent; respects volume + unlock state. */
 export function startBgm(): void {
   bgmWanted = true
   if (!bgmEl && typeof Audio !== "undefined") {
     bgmEl = new Audio(BGM_FILE)
     bgmEl.loop = true
-    bgmEl.volume = BGM_VOLUME
+    bgmEl.volume = BGM_VOLUME_BASE * bgmVolume
   }
   syncBgm()
 }
@@ -155,11 +168,11 @@ export function stopBgm(): void {
   syncBgm()
 }
 
-/** Single reconciler: play exactly when wanted+unlocked+unmuted+visible. */
+/** Single reconciler: play exactly when wanted+unlocked+audible+visible. */
 function syncBgm(): void {
   if (!bgmEl) return
   const hidden = typeof document !== "undefined" && document.hidden
-  if (bgmWanted && unlocked && !muted && !hidden) {
+  if (bgmWanted && unlocked && bgmVolume > 0 && !hidden) {
     void bgmEl.play().catch(() => {})
   } else {
     bgmEl.pause()
@@ -170,26 +183,49 @@ if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", syncBgm)
 }
 
-// ─── Mute (persisted) ────────────────────────────────────────────────────────
+// ─── Volume (persisted, independent sfx/music channels) ─────────────────────
 
-export function getMuted(): boolean {
-  return muted
+export function getSfxVolume(): number {
+  return sfxVolume
 }
 
-export function toggleMuted(): void {
-  muted = !muted
+/** 0-1. Applies live to already-loaded SFX; persisted across sessions. */
+export function setSfxVolume(v: number): void {
+  sfxVolume = clamp01(v)
   try {
-    globalThis.localStorage?.setItem(MUTE_KEY, muted ? "1" : "0")
+    globalThis.localStorage?.setItem(SFX_VOLUME_KEY, String(sfxVolume))
   } catch {
-    /* storage unavailable — mute still applies for this session */
+    /* storage unavailable — volume still applies for this session */
   }
+  if (sfxGain) sfxGain.gain.value = SFX_VOLUME_BASE * sfxVolume
+  emit()
+}
+
+/** Reactive sfx volume (0-1) for the settings slider. */
+export function useSfxVolume(): number {
+  return useSyncExternalStore(subscribe, getSfxVolume, () => 1)
+}
+
+export function getBgmVolume(): number {
+  return bgmVolume
+}
+
+/** 0-1. Applies live to the playing track; persisted across sessions. */
+export function setBgmVolume(v: number): void {
+  bgmVolume = clamp01(v)
+  try {
+    globalThis.localStorage?.setItem(BGM_VOLUME_KEY, String(bgmVolume))
+  } catch {
+    /* storage unavailable — volume still applies for this session */
+  }
+  if (bgmEl) bgmEl.volume = BGM_VOLUME_BASE * bgmVolume
   syncBgm()
   emit()
 }
 
-/** Reactive mute state for the header toggle. */
-export function useMuted(): boolean {
-  return useSyncExternalStore(subscribe, getMuted, () => false)
+/** Reactive music volume (0-1) for the settings slider. */
+export function useBgmVolume(): number {
+  return useSyncExternalStore(subscribe, getBgmVolume, () => 1)
 }
 
 // ─── Modal open/close chirps ─────────────────────────────────────────────────
