@@ -18,7 +18,9 @@ import {
 import {
   buildCreateAccountTx,
   buildDepositDusdcTx,
+  fetchAccountState,
   waitForCreatedWrapper,
+  waitForManagerBalance,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import { useModalSfx } from "@/lib/sound"
@@ -484,9 +486,13 @@ function ManagerDepositTab({
     setError(null)
     setSuccess(null)
     try {
-      // 1. Resolve a wrapper id — create the AccountWrapper if missing.
-      //    The new wrapper starts at 0 dUSDC; we then deposit in step 2.
+      // 1. Resolve wrapper id + current micro balance fresh (not from the
+      //    possibly-stale, float-rounded react-query cache) — the post-
+      //    deposit poll below needs an exact pre-deposit baseline.
+      //    Creates the AccountWrapper if missing; a new wrapper starts at
+      //    0 dUSDC, so we then deposit in step 2.
       let wrapperId = managerId
+      let baseBalance = BigInt(Math.round(managerBalance * 1e6))
       if (!wrapperId) {
         const createTx = buildCreateAccountTx()
         const res = (await sign.mutateAsync({ transaction: createTx })) as {
@@ -496,12 +502,27 @@ function ManagerDepositTab({
         // is deterministic but needs the tx to land before the server can
         // resolve it.
         wrapperId = await waitForCreatedWrapper(client, res.digest, address)
+        baseBalance = 0n
+      } else {
+        baseBalance = (await fetchAccountState(address)).balance
       }
       // 2. Build + sign the deposit. `buildDepositDusdcTx` sources the
       //    dUSDC coin from the player's owned coins via `coinWithBalance`.
       const microAmount = BigInt(Math.floor(parsed * 1e6))
       const depositTx = buildDepositDusdcTx(wrapperId, microAmount)
-      await sign.mutateAsync({ transaction: depositTx })
+      const depositRes = (await sign.mutateAsync({
+        transaction: depositTx,
+      })) as { digest: string }
+      // Don't refetch the instant signing resolves — wait for finality AND
+      // for the server's own balance read to catch up, or callers that
+      // gate on this balance (e.g. queueing) can still see the pre-deposit
+      // amount.
+      await waitForManagerBalance(
+        client,
+        depositRes.digest,
+        address,
+        baseBalance + microAmount
+      )
       setSuccess(parsed)
       setAmount("0")
       void refetchManager()

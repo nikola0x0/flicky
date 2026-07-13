@@ -15,6 +15,7 @@ import {
   fmtDusdc,
   getWalletDusdcBalance,
   waitForCreatedWrapper,
+  waitForManagerBalance,
 } from "@/lib/deepbook"
 import { DepositModal } from "@/components/deposit-modal"
 import { PixelButton } from "@/components/pixel-button"
@@ -265,8 +266,20 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
               const needed = requiredManagerBalance(stake) - phase.current
               try {
                 const tx = buildDepositDusdcTx(phase.managerId, needed)
-                await sign.mutateAsync({ transaction: tx })
-                setPhase({ kind: "ready", managerId: phase.managerId })
+                const res = (await sign.mutateAsync({
+                  transaction: tx,
+                })) as { digest: string }
+                // Don't trust local arithmetic the instant signing resolves —
+                // wait for the deposit to finalize AND for the server's own
+                // balance read to catch up before advancing, or the
+                // `queue_join` gate can still see the pre-deposit balance.
+                await waitForManagerBalance(
+                  client,
+                  res.digest,
+                  account.address,
+                  requiredManagerBalance(stake)
+                )
+                await recheck()
               } catch (e) {
                 setPhase({
                   kind: "error",
