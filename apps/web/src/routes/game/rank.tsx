@@ -5,6 +5,7 @@ import { CONFIG } from "@/lib/config"
 import { prefetchAvatarIcons } from "@/lib/avatar-store"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { PixelButton } from "@/components/pixel-button"
+import { SeasonBanner } from "@/components/season-banner"
 import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
 import { fetchSeason, prizeForRank, type Season } from "@/lib/season"
 import { fmtCountdown } from "@/lib/countdown"
@@ -98,6 +99,8 @@ export default function GameRank() {
 
   return (
     <div className="relative isolate flex h-full flex-col gap-3 overflow-y-auto px-4 py-4 font-pixel text-white [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      {/* Season 0 promo banner (same as home). */}
+      <SeasonBanner />
       <header className="flex flex-col items-center">
         {/* Trophy-podium banner. The radial glow behind it gives the art
             an arcade "spotlight" without needing a baked-in background. */}

@@ -1,6 +1,8 @@
+import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { MyMatchTile } from "@/components/my-match-tile"
 import { PlayerHeroCard } from "@/components/player-hero-card"
+import { SeasonBanner } from "@/components/season-banner"
 
 export default function GameHome() {
   const account = useCurrentAccount()
@@ -20,6 +22,10 @@ export default function GameHome() {
         }}
       />
       <h1 className="text-4xl tracking-[0.2em] uppercase">home</h1>
+      {/* Season 0 promo — tap through to the leaderboard/prizes. */}
+      <Link to="/game/rank" className="block w-full">
+        <SeasonBanner />
+      </Link>
       {address && <PlayerHeroCard address={address} />}
       <MyMatchTile />
     </div>

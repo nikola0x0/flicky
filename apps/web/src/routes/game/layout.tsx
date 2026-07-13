@@ -24,7 +24,6 @@ import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
-import { SeasonBanner } from "@/components/season-banner"
 import { useDusdcBalance, useManagerBalance } from "@/hooks/use-wallet-balances"
 import { clearPendingSwipe, peekPendingSwipe } from "@/lib/nav-transition"
 import { DeviceFrame } from "@/components/device-frame"
@@ -79,10 +78,6 @@ export default function GameLayout() {
   return (
     <>
       <DeviceFrame className={isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}>
-        {/* Season promo — an absolute top overlay on every game route except
-            the active-duel screen (where it'd clutter the swipe surface).
-            Dismissible; floats over the header rather than displacing it. */}
-        {!isPlay && <SeasonBanner />}
         {isPlay && (
           <div
             aria-hidden
