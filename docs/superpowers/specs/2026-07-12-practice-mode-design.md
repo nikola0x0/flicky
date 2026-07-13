@@ -75,7 +75,7 @@ Replace the DeepBook-market path (`findDeckMarkets` + `filterMintableMarkets`
     cards: Array<{
       strike: string        // 1e9-fixed, same scale as oracle spot
       expiryOffsetMs: number // relative to lockup start (client anchors it)
-      pUp: string            // design probability that UP wins, e.g. "0.62"
+      pUp: number            // design probability that UP wins, e.g. 0.62
     }>,
     botSwipes: boolean[],
   }
@@ -151,8 +151,11 @@ PvP and practice share them, changing no PvP behavior:
 - Drag-to-swipe card (the visual card + drag mechanics from `PhaseSwiping`)
   → takes `onCommit(isUp: boolean)`; PvP keeps its PTB signing + balance
   preflight in `active-duel.tsx`, practice records locally.
-- `ChartModal` / `ChartChip`, `CardLedger`, and the Victory/Defeat visuals
-  from `PhaseComplete`.
+- `ChartModal` / `ChartChip` and `CardLedger` from `PhaseComplete`.
+
+  (Shipped: the practice result panel — `ResultView` in `practice.tsx` —
+  mirrors `PhaseComplete`'s Victory/Defeat layout by hand rather than
+  sharing an extracted component; it's practice-local.)
 
 The signing path, room subscription, and phase machine of PvP stay where
 they are.
