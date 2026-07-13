@@ -75,7 +75,7 @@ export function AvatarPickerModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="pixel-frame relative flex max-h-[80vh] w-full max-w-sm flex-col rounded-3xl bg-[#1b2548] font-pixel text-white"
+        className="pixel-frame relative flex max-h-[80dvh] w-full max-w-sm flex-col rounded-3xl bg-[#1b2548] font-pixel text-white"
       >
         <button
           type="button"
@@ -87,66 +87,73 @@ export function AvatarPickerModal({
         </button>
 
         <header className="shrink-0 px-6 pt-8 pb-4 text-center">
-          <h2 id="avatar-title" className="text-3xl tracking-[0.16em] uppercase">
+          <h2
+            id="avatar-title"
+            className="text-3xl tracking-[0.16em] uppercase"
+          >
             choose icon
           </h2>
         </header>
 
-        {/* Scroll body: scrollbar hidden (game convention) with a bottom
-            fade that clears once you reach the end. */}
-        <div className="relative min-h-0 flex-1">
-          <div
-            ref={scrollRef}
-            onScroll={measure}
-            className="grid h-full grid-cols-5 gap-2.5 overflow-y-auto px-6 pt-1 pb-6 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        {/* Scroll body: the flex item IS the scroll container (min-h-0 +
+            flex-1 + overflow). Don't size an inner div with h-full — the
+            frame's height is auto capped by max-h, which flexbox treats as
+            indefinite, so percentage heights collapse to content height
+            and the grid overflows the frame instead of scrolling. */}
+        <div
+          ref={scrollRef}
+          onScroll={measure}
+          className="grid min-h-0 flex-1 grid-cols-5 gap-2.5 overflow-y-auto px-6 pt-1 pb-6 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {/* Gradient-only / remove-icon tile */}
+          <button
+            type="button"
+            aria-label="gradient only (remove icon)"
+            onClick={() => choose(null)}
+            className={`${tileBase} ${current === null ? tileSelected : tileIdle}`}
           >
-            {/* Gradient-only / remove-icon tile */}
-            <button
-              type="button"
-              aria-label="gradient only (remove icon)"
-              onClick={() => choose(null)}
-              className={`${tileBase} ${current === null ? tileSelected : tileIdle}`}
-            >
-              <span className="relative size-full">
-                <span
-                  aria-hidden
-                  className="pixel-avatar absolute inset-0"
-                  style={{ background: gradient }}
-                />
-                <span className="absolute inset-0 grid place-items-center">
-                  <img
-                    src="/icons/delete.png"
-                    alt=""
-                    aria-hidden
-                    className="w-1/2 [image-rendering:pixelated] [filter:drop-shadow(0_1px_1px_rgba(0,0,0,0.7))]"
-                  />
-                </span>
-              </span>
-            </button>
-
-            {AVATAR_ICONS.map((icon) => (
-              <button
-                key={icon.id}
-                type="button"
-                aria-label={icon.id}
-                onClick={() => choose(icon.id)}
-                className={`${tileBase} ${current === icon.id ? tileSelected : tileIdle}`}
-              >
+            <span className="relative size-full">
+              <span
+                aria-hidden
+                className="pixel-avatar absolute inset-0"
+                style={{ background: gradient }}
+              />
+              <span className="absolute inset-0 grid place-items-center">
                 <img
-                  src={iconSrc(icon.id)}
+                  src="/icons/delete.png"
                   alt=""
-                  className="size-full [image-rendering:pixelated]"
+                  aria-hidden
+                  className="w-1/2 [filter:drop-shadow(0_1px_1px_rgba(0,0,0,0.7))] [image-rendering:pixelated]"
                 />
-              </button>
-            ))}
-          </div>
-          <div
-            aria-hidden
-            className={`pointer-events-none absolute inset-x-0 bottom-0 h-10 rounded-b-3xl bg-gradient-to-t from-[#1b2548] to-transparent transition-opacity duration-200 ${
-              hasMore ? "opacity-100" : "opacity-0"
-            }`}
-          />
+              </span>
+            </span>
+          </button>
+
+          {AVATAR_ICONS.map((icon) => (
+            <button
+              key={icon.id}
+              type="button"
+              aria-label={icon.id}
+              onClick={() => choose(icon.id)}
+              className={`${tileBase} ${current === icon.id ? tileSelected : tileIdle}`}
+            >
+              <img
+                src={iconSrc(icon.id)}
+                alt=""
+                className="size-full [image-rendering:pixelated]"
+              />
+            </button>
+          ))}
         </div>
+
+        {/* "more below" fade, pinned to the frame bottom so it stays put
+            while the grid scrolls underneath it. */}
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute inset-x-0 bottom-0 h-10 rounded-b-3xl bg-gradient-to-t from-[#1b2548] to-transparent transition-opacity duration-200 ${
+            hasMore ? "opacity-100" : "opacity-0"
+          }`}
+        />
       </div>
     </div>,
     document.body
