@@ -9,7 +9,7 @@ export function SeasonBanner({ className = "" }: { className?: string }) {
     <img
       src="/banners/session-banner.png"
       alt="season 0"
-      className={`block aspect-video w-full object-cover [image-rendering:pixelated] ${className}`}
+      className={`block aspect-[3/1] w-full object-cover [image-rendering:pixelated] ${className}`}
     />
   )
 }
