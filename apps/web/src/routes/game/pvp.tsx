@@ -188,18 +188,24 @@ function StandbyView({
 
       <div className="flex flex-col gap-2">
         <div className="flex items-stretch gap-2">
-          <StakeSelector value={stake} onChange={setStake} />
+          <div id="stake-selector">
+            <StakeSelector value={stake} onChange={setStake} />
+          </div>
+          <div id="queue-match-btn" className="flex-1">
+            <MatchButton
+              className="flex-1"
+              label={<span className="text-2xl">queue match</span>}
+              onClick={onQueueMatch}
+            />
+          </div>
+        </div>
+        <div id="game-mode-btn">
           <MatchButton
-            className="flex-1"
-            label={<span className="text-2xl">queue match</span>}
-            onClick={onQueueMatch}
+            label={<span className="text-2xl">game mode</span>}
+            style={MODE_BRAND_STYLE}
+            onClick={onOpenMode}
           />
         </div>
-        <MatchButton
-          label={<span className="text-2xl">game mode</span>}
-          style={MODE_BRAND_STYLE}
-          onClick={onOpenMode}
-        />
       </div>
 
       <p className="text-center text-xs tracking-[0.18em] text-white/45 uppercase">

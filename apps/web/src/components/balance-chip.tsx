@@ -18,14 +18,16 @@ export function BalanceChip({
   amount,
   onClick,
   label,
+  id,
 }: {
   icon: string
   amount: string
   onClick: () => void
   label?: string
+  id?: string
 }) {
   return (
-    <div className="flex items-center">
+    <div id={id} className="flex items-center">
       <div className="relative flex h-8 items-center rounded-lg bg-[#1f1812] pr-5 pl-8 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_-1px_0_rgba(0,0,0,0.4)]">
         <img
           src={icon}
