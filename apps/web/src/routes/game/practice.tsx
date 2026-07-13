@@ -277,18 +277,37 @@ function LockupView({
                   : "bg-[#0e1530]"
               }`}
             >
-              <p className="font-pixel text-[10px] text-white/45 uppercase">
+              <p className="font-pixel text-[11px] text-white/60 uppercase tabular-nums">
                 {fmtUsd(c.strike)}
               </p>
-              <p className="font-pixel text-sm text-white">
-                {my ? (my.isUp ? "↑" : "↓") : "—"}
-                <span className="px-0.5 text-white/30">·</span>
-                <span className="text-white/60">
+              {/* your pick (bright) · bot's pick (dimmed) — green up, red down */}
+              <p className="font-pixel text-xl leading-tight">
+                <span
+                  className={
+                    my
+                      ? my.isUp
+                        ? "text-emerald-300"
+                        : "text-rose-300"
+                      : "text-white/40"
+                  }
+                >
+                  {my ? (my.isUp ? "↑" : "↓") : "—"}
+                </span>
+                <span className="px-1 text-sm text-white/30">·</span>
+                <span
+                  className={
+                    bot
+                      ? bot.isUp
+                        ? "text-emerald-300/50"
+                        : "text-rose-300/50"
+                      : "text-white/40"
+                  }
+                >
                   {bot ? (bot.isUp ? "↑" : "↓") : "…"}
                 </span>
               </p>
               <p
-                className={`font-pixel text-[10px] uppercase tabular-nums ${
+                className={`font-pixel text-sm uppercase tabular-nums ${
                   outcome
                     ? hit
                       ? "text-emerald-300"
@@ -296,11 +315,20 @@ function LockupView({
                     : "text-cyan-300"
                 }`}
               >
-                {outcome
-                  ? hit
-                    ? "hit"
-                    : "miss"
-                  : `${Math.max(0, Math.ceil((dueMs - nowMs) / 1000))}s`}
+                {outcome ? (
+                  hit ? (
+                    "hit"
+                  ) : (
+                    "miss"
+                  )
+                ) : (
+                  <>
+                    {Math.max(0, Math.ceil((dueMs - nowMs) / 1000))}
+                    <span className="pl-0.5 text-[10px] text-cyan-300/60">
+                      s
+                    </span>
+                  </>
+                )}
               </p>
             </div>
           )
@@ -338,6 +366,18 @@ function ResultView({
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto">
       <div className="rounded border-2 border-black/55 bg-[#1b2548] p-4 text-center">
+        {!result.tied && (
+          <img
+            src={
+              result.youWon
+                ? "/icons/icon-victory.png"
+                : "/icons/icon-defeat.png"
+            }
+            alt={result.youWon ? "Victory" : "Defeat"}
+            className="mx-auto mb-3 h-24 w-24 object-contain [image-rendering:pixelated]"
+            aria-hidden
+          />
+        )}
         <h3 className="text-2xl tracking-[0.2em] uppercase">
           {result.tied ? "Tie" : result.youWon ? "Victory" : "Defeat"}
         </h3>
