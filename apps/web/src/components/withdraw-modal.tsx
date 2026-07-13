@@ -17,6 +17,7 @@ import {
   SUI_COIN_TYPE,
   SUI_DECIMALS,
 } from "@/lib/swap"
+import { useModalSfx } from "@/lib/sound"
 import { PixelButton } from "@/components/pixel-button"
 
 const BLUE_BRAND_STYLE = {
@@ -43,6 +44,7 @@ type Tab = "MANAGER" | "SEND"
  * Both go through the sponsor service via useFlickySign.
  */
 export function WithdrawModal({ open, address, onClose }: WithdrawModalProps) {
+  useModalSfx(open)
   const [tab, setTab] = useState<Tab>("MANAGER")
 
   // Reset to the default tab whenever the modal opens.

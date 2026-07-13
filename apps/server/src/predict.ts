@@ -246,17 +246,30 @@ export async function checkQueueBalanceGate(
     return { ok: false, reason: "rpc_failed" }
   }
   if (!wrapper) return { ok: false, reason: "no_manager" }
-  let balance: bigint
-  try {
-    balance = await readAccountBalance(client, owner, wrapper)
-  } catch (e) {
-    log.warn(
-      `checkQueueBalanceGate(${owner}): balance read failed: ${e instanceof Error ? e.message : String(e)}`
-    )
-    return { ok: false, reason: "rpc_failed", wrapper }
+
+  // A single devInspect balance read can land on a lagging replica behind
+  // the load-balanced gRPC endpoint that hasn't yet caught up to a deposit
+  // the player just made (the web's own `waitForManagerBalance` absorbs
+  // this same lag client-side before advancing past the deposit step) —
+  // retry a few times before rejecting, mirroring the oracle preflight
+  // check right below this gate in ws/handlers.ts, which retries a
+  // momentary market dip for the same reason.
+  const BALANCE_READ_ATTEMPTS = 3
+  const BALANCE_READ_RETRY_MS = 750
+  let balance = 0n
+  for (let attempt = 1; attempt <= BALANCE_READ_ATTEMPTS; attempt++) {
+    try {
+      balance = await readAccountBalance(client, owner, wrapper)
+    } catch (e) {
+      log.warn(
+        `checkQueueBalanceGate(${owner}): balance read failed: ${e instanceof Error ? e.message : String(e)}`
+      )
+      return { ok: false, reason: "rpc_failed", wrapper }
+    }
+    if (balance >= required) return { ok: true, wrapper, balance }
+    if (attempt < BALANCE_READ_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, BALANCE_READ_RETRY_MS))
+    }
   }
-  if (balance < required) {
-    return { ok: false, reason: "insufficient_balance", wrapper, balance }
-  }
-  return { ok: true, wrapper, balance }
+  return { ok: false, reason: "insufficient_balance", wrapper, balance }
 }

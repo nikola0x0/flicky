@@ -1,6 +1,7 @@
 import { useEffect, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
 import { useNavigate } from "react-router"
+import { useModalSfx } from "@/lib/sound"
 
 type ModeInfo = {
   id: string
@@ -30,6 +31,7 @@ export interface ModeModalProps {
 }
 
 export function ModeModal({ open, onClose }: ModeModalProps) {
+  useModalSfx(open)
   const navigate = useNavigate()
 
   useEffect(() => {

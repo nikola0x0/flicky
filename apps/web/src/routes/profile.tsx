@@ -117,9 +117,7 @@ export default function Profile() {
                 onClick={() => void handleCopyAddress()}
                 aria-label="copy address"
                 className={`inline-flex items-center gap-2 text-lg transition-colors duration-200 ${
-                  copied
-                    ? "text-emerald-300"
-                    : "text-white/70 hover:text-white"
+                  copied ? "text-emerald-300" : "text-white/70 hover:text-white"
                 }`}
               >
                 <span className="tabular-nums">{short}</span>
@@ -207,6 +205,21 @@ export default function Profile() {
               no 1v1 history yet
             </div>
           </section>
+
+          {/* Required by the Uppbeat free-tier license for bgm.mp3 — see
+              apps/web/public/sounds/SOURCES.md. Keep visible somewhere. */}
+          <p className="mt-10 text-center text-[10px] leading-relaxed tracking-[0.05em] text-white/25">
+            Music from{" "}
+            <a
+              href="https://uppbeat.io/t/pecan-pie/boogie"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              #Uppbeat
+            </a>{" "}
+            (free for Creators!) — License code: 7JEHN7VMRUTPZCDU
+          </p>
         </main>
       </DeviceFrame>
 

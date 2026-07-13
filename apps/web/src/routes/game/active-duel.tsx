@@ -32,6 +32,7 @@ import {
 } from "@/lib/pnl"
 import { SWIPE_WINDOW_MS, swipeWindowRemainingMs } from "@/lib/swipe-window"
 import { SWIPE_QUANTITY } from "@/lib/funding"
+import { playSfx } from "@/lib/sound"
 import { WsErrorBanner } from "@/components/ws-error-banner"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
@@ -648,6 +649,7 @@ function PhaseSwiping({
 
   const doSwipe = async (isUp: boolean) => {
     if (isWindowExpired) return
+    playSfx(isUp ? "swipe-up" : "swipe-down")
     if (!tickSize) {
       setError("market tick size not loaded yet — try again in a moment")
       return
@@ -1238,12 +1240,14 @@ function SettlingHandoff({ duelId }: { duelId: string }) {
       <div className="flex w-full max-w-xs flex-col gap-2">
         <Link
           to={`/game/duel/${duelId}`}
+          onClick={() => playSfx("click")}
           className="pixel-tile no-hover bg-emerald-600 px-4 py-3 font-pixel text-sm uppercase"
         >
           watch result
         </Link>
         <Link
           to="/game/home"
+          onClick={() => playSfx("click")}
           className="pixel-tile no-hover bg-[#1b2548] px-4 py-3 font-pixel text-sm uppercase"
         >
           back to home

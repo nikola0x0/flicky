@@ -11,6 +11,7 @@ import { WsErrorBanner } from "@/components/ws-error-banner"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { ActiveDuel } from "./active-duel"
 import { STAKE_TIERS, type Tier } from "@/lib/protocol"
+import { playSfx } from "@/lib/sound"
 
 const STAKES = [1, 3, 5, 10] as const
 type Stake = (typeof STAKES)[number]
@@ -63,12 +64,14 @@ export default function GamePvp() {
     return onMessage((msg) => {
       if (msg.type === "queue_status") setQueueSize(msg.size)
       else if (msg.type === "queue_left") setQueueSize(null)
-      else if (msg.type === "match_found")
+      else if (msg.type === "match_found") {
+        playSfx("match-found")
         setMatched({
           role: msg.role,
           opponent: msg.opponent,
           deckHash: msg.deckHash,
         })
+      }
     })
   }, [onMessage])
 
@@ -117,9 +120,7 @@ export default function GamePvp() {
       />
     )
   } else if (queueSize !== null) {
-    content = (
-      <QueueScreen tier={tier} stake={stake} onCancel={onQueueMatch} />
-    )
+    content = <QueueScreen tier={tier} stake={stake} onCancel={onQueueMatch} />
   } else {
     content = (
       <StandbyView
@@ -211,7 +212,7 @@ function StandbyView({
 function StakeSelector({
   value,
   onChange,
-  disabled
+  disabled,
 }: {
   value: Stake
   onChange: (s: Stake) => void
@@ -327,7 +328,7 @@ function QueueScreen({
         <img
           src="/banners/searching.png"
           alt="searching for opponent"
-          className="block aspect-video w-full object-cover [image-rendering:pixelated] [mask-image:linear-gradient(to_bottom,transparent_0%,black_8%,black_78%,transparent_100%)]"
+          className="block aspect-video w-full [mask-image:linear-gradient(to_bottom,transparent_0%,black_8%,black_78%,transparent_100%)] object-cover [image-rendering:pixelated]"
         />
         <span
           aria-hidden
@@ -336,7 +337,7 @@ function QueueScreen({
         <AnimatedDots className="absolute bottom-3 left-1/2 -translate-x-1/2 text-3xl tracking-[0.3em] text-white drop-shadow-[0_2px_0_rgba(0,0,0,0.6)]" />
       </div>
 
-      <header className="flex flex-col items-center gap-1 -mt-2">
+      <header className="-mt-2 flex flex-col items-center gap-1">
         <p className="text-xs tracking-[0.18em] text-white/55 uppercase">
           finding a duelist for you
         </p>
