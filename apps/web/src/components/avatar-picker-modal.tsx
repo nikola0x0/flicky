@@ -3,6 +3,7 @@ import { createPortal } from "react-dom"
 import { AVATAR_ICONS, iconSrc } from "@/lib/avatar-icons"
 import { addressToGradient } from "@/lib/avatar-gradient"
 import { getAvatarIcon, setAvatarIcon } from "@/lib/avatar-store"
+import { useModalSfx } from "@/lib/sound"
 
 /**
  * Grid picker for the 44 food avatar icons. Opened from the profile
@@ -20,6 +21,7 @@ export function AvatarPickerModal({
   address: string
   onClose: () => void
 }) {
+  useModalSfx(open)
   const scrollRef = useRef<HTMLDivElement>(null)
   // Whether there's more content below the fold — drives the bottom fade.
   const [hasMore, setHasMore] = useState(false)

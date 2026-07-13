@@ -6,6 +6,7 @@ import { prefetchAvatarIcons } from "@/lib/avatar-store"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { PixelButton } from "@/components/pixel-button"
 import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
+import { playSfx } from "@/lib/sound"
 import type { CSSProperties } from "react"
 
 const BLUE_BRAND_STYLE = {
@@ -47,7 +48,7 @@ export default function GameRank() {
     const tick = async () => {
       try {
         const res = await fetch(
-          `${CONFIG.serverHttpUrl}/leaderboard?limit=${FETCH_LIMIT}`,
+          `${CONFIG.serverHttpUrl}/leaderboard?limit=${FETCH_LIMIT}`
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { players: RankEntry[] }
@@ -72,7 +73,7 @@ export default function GameRank() {
   const myRank = useMemo(() => {
     if (!players || !me) return null
     const i = players.findIndex(
-      (p) => p.address.toLowerCase() === me.toLowerCase(),
+      (p) => p.address.toLowerCase() === me.toLowerCase()
     )
     return i === -1 ? null : i + 1
   }, [players, me])
@@ -98,7 +99,9 @@ export default function GameRank() {
             className="h-56 w-auto max-w-none [image-rendering:pixelated]"
           />
         </div>
-        <h1 className="-mt-4 text-4xl tracking-[0.2em] uppercase">leaderboard</h1>
+        <h1 className="-mt-4 text-4xl tracking-[0.2em] uppercase">
+          leaderboard
+        </h1>
         {myRank !== null && (
           <p className="mt-1 text-base tracking-[0.18em] text-white/55 uppercase">
             you're ranked #{myRank}
@@ -127,9 +130,7 @@ export default function GameRank() {
 
       {players !== null && players.length > 0 && myRank === null && (
         <p className="px-1 pt-1 text-center text-sm tracking-[0.18em] text-white/45 uppercase">
-          {me
-            ? "finish a duel to enter the ranks"
-            : "sign in to see your rank"}
+          {me ? "finish a duel to enter the ranks" : "sign in to see your rank"}
         </p>
       )}
 
@@ -158,9 +159,7 @@ function RankRow({
   return (
     <li
       className={`flex items-center gap-3 rounded px-3 py-2.5 backdrop-blur-sm ${
-        isMe
-          ? "bg-[#4094fb]/20 ring-1 ring-[#7eb6ff]/50"
-          : "bg-black/30"
+        isMe ? "bg-[#4094fb]/20 ring-1 ring-[#7eb6ff]/50" : "bg-black/30"
       }`}
     >
       <RankMedal position={position} />
@@ -225,6 +224,7 @@ function Empty() {
       </p>
       <Link
         to="/game/pvp"
+        onClick={() => playSfx("click")}
         className="mt-1 rounded border border-white/30 bg-white/5 px-3 py-1 text-sm tracking-wider uppercase hover:bg-white/10"
       >
         find a duel

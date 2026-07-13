@@ -195,6 +195,31 @@ export async function waitForCreatedWrapper(
   throw new Error("account created but wrapper id not resolved yet — try again")
 }
 
+/**
+ * Wait for a `buildDepositDusdcTx` transaction to finalize, then poll
+ * `fetchAccountState` until the AccountWrapper balance reflects it. A
+ * finalized tx digest doesn't guarantee `GET /manager`'s balance read
+ * (server-side devInspect, a separate gRPC round-trip) sees the deposit
+ * yet — same propagation-lag gap `waitForCreatedWrapper` absorbs for
+ * wrapper creation. Without this, callers that flip straight to "ready"
+ * on tx-signing success race the server's `queue_join` balance gate and
+ * get a spurious `insufficient_balance` right after a real deposit.
+ */
+export async function waitForManagerBalance(
+  client: SuiClient,
+  digest: string,
+  owner: string,
+  target: bigint
+): Promise<bigint> {
+  await client.core.waitForTransaction({ digest, include: { effects: true } })
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const { balance } = await fetchAccountState(owner)
+    if (balance >= target) return balance
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  throw new Error("deposit landed but balance not reflected yet — try again")
+}
+
 // === Tick derivation + market metadata ===
 
 /** Positive-infinity sentinel tick: `(1 << 30) - 1`. Open upper bound. */

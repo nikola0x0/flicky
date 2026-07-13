@@ -5,6 +5,7 @@ import { CONFIG } from "@/lib/config"
 import { fmtPnlPct } from "@/lib/pnl"
 import { playerDuelResult } from "@/lib/duel-result"
 import { PixelButton } from "@/components/pixel-button"
+import { playSfx } from "@/lib/sound"
 import type { CSSProperties } from "react"
 
 const BLUE_BRAND_STYLE = {
@@ -84,7 +85,8 @@ export default function GameHistory() {
     const rank = (s: DuelRow["status"]) =>
       s === "ACTIVE" ? 0 : s === "PENDING" ? 1 : 2
     return [...duels].sort(
-      (a, b) => rank(a.status) - rank(b.status) || b.lastUpdatedMs - a.lastUpdatedMs
+      (a, b) =>
+        rank(a.status) - rank(b.status) || b.lastUpdatedMs - a.lastUpdatedMs
     )
   }, [duels])
 
@@ -93,7 +95,7 @@ export default function GameHistory() {
       <header className="flex items-center justify-between">
         <h1 className="text-4xl tracking-[0.2em] uppercase">history</h1>
         {sorted && sorted.length > 0 && (
-          <span className="rounded bg-black/30 px-3 py-1 text-sm tracking-[0.18em] text-white/55 uppercase backdrop-blur-sm tabular-nums">
+          <span className="rounded bg-black/30 px-3 py-1 text-sm tracking-[0.18em] text-white/55 uppercase tabular-nums backdrop-blur-sm">
             {sorted.length}
           </span>
         )}
@@ -144,13 +146,16 @@ function MatchRow({ duel, address }: { duel: DuelRow; address: string }) {
     <li>
       <Link
         to={`/game/duel/${duel.id}`}
+        onClick={() => playSfx("click")}
         className="flex items-center justify-between gap-3 rounded bg-black/30 px-3 py-2.5 backdrop-blur-sm transition-colors hover:bg-black/45"
       >
         <div className="flex min-w-0 items-center gap-3">
           <ResultChip kind={result} />
           <div className="flex min-w-0 flex-col">
             <span className="truncate text-base tracking-wider uppercase">
-              {hasOpponent ? `vs ${shortAddr(opponent)}` : "waiting for opponent"}
+              {hasOpponent
+                ? `vs ${shortAddr(opponent)}`
+                : "waiting for opponent"}
             </span>
             <span className="text-xs tracking-[0.18em] text-white/45 uppercase tabular-nums">
               {relativeTime(duel.lastUpdatedMs || duel.startedAtMs)}
@@ -238,6 +243,7 @@ function Empty({ body, cta }: { body: string; cta?: boolean }) {
       {cta && (
         <Link
           to="/game/pvp"
+          onClick={() => playSfx("click")}
           className="mt-1 rounded border border-white/30 bg-white/5 px-3 py-1 text-sm tracking-wider uppercase hover:bg-white/10"
         >
           find a duel

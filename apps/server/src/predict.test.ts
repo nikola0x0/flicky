@@ -22,6 +22,8 @@ const boolBytes = (v: boolean) => bcs.bool().serialize(v).toBytes()
 const addrBytes = (addr: string) => bcs.Address.serialize(addr).toBytes()
 
 const WRAPPER = "0x" + "42".repeat(32)
+const ALICE = "0x" + "a1".repeat(32)
+const BOB = "0x" + "b0".repeat(32)
 
 /**
  * Fake gRPC client whose `core.simulateTransaction` returns one scripted
@@ -29,6 +31,12 @@ const WRAPPER = "0x" + "42".repeat(32)
  * `derived_wrapper_exists` then (if reached) `derived_wrapper_address`.
  * `undefined` entries throw (RPC error mid-call); over-reading past the
  * scripted queue also throws.
+ *
+ * The scripted value is duplicated at commandResults[0] AND [1]: callers
+ * that read commandIndex 0 (deriveWrapperFor's exists/address calls) and
+ * callers that read commandIndex 1 (readAccountBalance's chained
+ * load_account -> balance PTB) both see it regardless of which single
+ * command they're actually simulating here.
  */
 function clientFromReturns(
   returns: Array<Uint8Array | "throw">
@@ -41,11 +49,14 @@ function clientFromReturns(
           throw new Error("over-read past scripted devInspect calls")
         const next = returns[i++]
         if (next === "throw") throw new Error("RPC unavailable")
-        return { commandResults: [{ returnValues: [{ bcs: next }] }] }
+        const result = { returnValues: [{ bcs: next }] }
+        return { commandResults: [result, result] }
       },
     },
   } as unknown as SuiGrpcClient
 }
+
+const u64Bytes = (v: bigint) => bcs.u64().serialize(v).toBytes()
 
 describe.skipIf(!HAS_TEST_DB)("deriveWrapperFor return contract", () => {
   beforeEach(async () => {
@@ -118,6 +129,60 @@ describe.skipIf(!HAS_TEST_DB)("deriveWrapperFor return contract", () => {
     const resolved = await predict.deriveWrapperFor(c, "0xlegacy")
     expect(resolved).toBe(WRAPPER)
     expect(resolved).not.toBe(legacyManagerId)
+  })
+})
+
+/**
+ * checkQueueBalanceGate's balance read is a devInspect against a
+ * load-balanced gRPC endpoint — a single call can land on a replica that
+ * hasn't yet caught up to a deposit the player just made client-side (see
+ * `waitForManagerBalance` in web's deepbook.ts, which absorbs the same lag
+ * on the client). The gate must retry a lagging "insufficient" read before
+ * rejecting, the way the oracle preflight in ws/handlers.ts already retries
+ * a momentary market dip — otherwise a real just-completed deposit produces
+ * a spurious `insufficient_balance` error immediately after success.
+ */
+describe.skipIf(!HAS_TEST_DB)("checkQueueBalanceGate balance-read retry", () => {
+  beforeEach(async () => {
+    await resetTables()
+  })
+
+  afterAll(async () => {
+    await db.closeDb()
+  })
+
+  test("absorbs one stale-replica read and succeeds once balance catches up", async () => {
+    const required = 16_000_000n
+    // exists, address (wrapper resolution) — then two balance reads: the
+    // first still reflects the pre-deposit balance, the second (post-retry)
+    // reflects the deposit having landed.
+    const c = clientFromReturns([
+      boolBytes(true),
+      addrBytes(WRAPPER),
+      u64Bytes(1_000_000n),
+      u64Bytes(20_000_000n),
+    ])
+    const gate = await predict.checkQueueBalanceGate(c, ALICE, required)
+    expect(gate.ok).toBe(true)
+    if (gate.ok) expect(gate.balance).toBe(20_000_000n)
+  })
+
+  test("still reports insufficient_balance once retries are exhausted", async () => {
+    const required = 16_000_000n
+    const c = clientFromReturns([
+      boolBytes(true),
+      addrBytes(WRAPPER),
+      u64Bytes(1_000_000n),
+      u64Bytes(1_000_000n),
+      u64Bytes(1_000_000n),
+    ])
+    const gate = await predict.checkQueueBalanceGate(c, BOB, required)
+    expect(gate.ok).toBe(false)
+    if (!gate.ok && gate.reason === "insufficient_balance") {
+      expect(gate.balance).toBe(1_000_000n)
+    } else {
+      throw new Error(`expected insufficient_balance, got ${JSON.stringify(gate)}`)
+    }
   })
 })
 

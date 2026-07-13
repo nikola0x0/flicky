@@ -3,6 +3,7 @@ import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
+import { playSfx } from "@/lib/sound"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import {
   DEMO_DUEL_ID,
@@ -220,6 +221,7 @@ export function MyMatchTile() {
             </span>
             <Link
               to="/game/history"
+              onClick={() => playSfx("click")}
               className="rounded border border-white/25 bg-white/5 px-2 py-1 text-xs tracking-[0.18em] text-white/70 uppercase hover:bg-white/10"
             >
               see all →
@@ -241,6 +243,7 @@ export function MyMatchTile() {
           </p>
           <Link
             to="/game/pvp"
+            onClick={() => playSfx("click")}
             className="mt-2 rounded border border-white/30 bg-white/5 px-3 py-1 text-sm tracking-wider uppercase hover:bg-white/10"
           >
             find a duel
@@ -268,6 +271,7 @@ export function MyMatchTile() {
           <StatusBadge live={isLive} />
           <Link
             to="/game/history"
+            onClick={() => playSfx("click")}
             className="rounded border border-white/25 bg-white/5 px-2 py-1 text-xs tracking-[0.18em] text-white/70 uppercase hover:bg-white/10"
           >
             see all →
@@ -296,6 +300,7 @@ export function MyMatchTile() {
         </div>
         <Link
           to={`/game/duel/${pick.id}${demo ? "?demoChart=1" : ""}`}
+          onClick={() => playSfx("click")}
           className="rounded border border-white/30 bg-white/5 px-3 py-1 text-sm tracking-wider uppercase hover:bg-white/10"
         >
           {isLive ? "open" : "play again"}
