@@ -14,7 +14,7 @@ export async function resetTables(): Promise<void> {
   await ready()
   await getSql()`
     TRUNCATE event_cursor, duel, chat_message, player_rating, deck,
-             predict_manager
+             predict_manager, player_profile
     RESTART IDENTITY
   `
 }

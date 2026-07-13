@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
+import { prefetchAvatarIcons } from "@/lib/avatar-store"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { PixelButton } from "@/components/pixel-button"
 import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
@@ -67,7 +68,11 @@ export default function GameRank() {
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { players: RankEntry[] }
-        if (!cancelled) setPlayers(body.players)
+        if (!cancelled) {
+          setPlayers(body.players)
+          // Warm the avatar cache so the rows paint with icons, not a flash.
+          prefetchAvatarIcons(body.players.map((p) => p.address))
+        }
       } catch {
         // Silent — next poll retries.
       } finally {

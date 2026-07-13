@@ -25,6 +25,7 @@ import { CORS_HEADERS, corsPreflight, json } from "./lib/http"
 import { getSuiClient, decodeKeypair } from "./lib/sui"
 import { handleDeckmasterRequest, knownHashCount } from "./deckmaster"
 import { handleDocsRequest } from "./docs"
+import { handleAvatarRequest } from "./avatar-api"
 import { handleDuelsRequest } from "./duels-api"
 import { handleLeaderboardRequest } from "./leaderboard-api"
 import { handleManagerRequest } from "./manager-api"
@@ -137,6 +138,9 @@ const server = Bun.serve({
     const season = handleSeasonRequest(req, url)
     if (season) return season
 
+    const avatar = await handleAvatarRequest(req, url)
+    if (avatar) return avatar
+
     const manager = await handleManagerRequest(req, url)
     if (manager) return manager
 
@@ -161,6 +165,8 @@ log.info(`  GET  /duels/recent`)
 log.info(`  GET  /duels/{id}`)
 log.info(`  GET  /leaderboard`)
 log.info(`  GET  /season`)
+log.info(`  GET  /avatars?addresses=0x..,0x..`)
+log.info(`  POST /avatar`)
 log.info(`  GET  /manager?owner=0x...`)
 log.info(`  GET  /openapi.json`)
 log.info(`  GET  /docs (Scalar UI)`)
