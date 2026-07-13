@@ -3,8 +3,8 @@
 All SFX are CC0 (public domain) — no attribution required; recorded for
 provenance. `bgm.mp3` is Uppbeat-licensed (free tier), which requires
 visible attribution — see its own note below. The required credit is
-rendered in-app in `apps/web/src/components/menu-modal.tsx`; do not
-remove it without replacing the track or upgrading the license.
+rendered in-app at the bottom of `apps/web/src/routes/profile.tsx`; do
+not remove it without replacing the track or upgrading the license.
 
 | File | Original source file | Pack |
 |---|---|---|
@@ -43,9 +43,10 @@ Notes:
   > https://uppbeat.io/t/pecan-pie/boogie
   > License code: 7JEHN7VMRUTPZCDU
 
-  This credit is rendered in-app (menu modal) to satisfy that requirement.
-  If `bgm.mp3` is ever swapped again, either move the credit to match the
-  new track's license or remove it if the replacement is CC0.
+  This credit is rendered in-app (bottom of the profile screen) to
+  satisfy that requirement. If `bgm.mp3` is ever swapped again, either
+  move the credit to match the new track's license or remove it if the
+  replacement is CC0.
 
 Converted to mp3 with ffmpeg (libmp3lame, -qscale:a 4). Original files
 were `.ogg` (Kenney packs) and `.wav` (Junkala pack).

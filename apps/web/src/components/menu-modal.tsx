@@ -81,21 +81,6 @@ export function MenuModal({ open, onClose }: MenuModalProps) {
               logout
             </span>
           </PixelButton>
-
-          {/* Required by the Uppbeat free-tier license for bgm.mp3 — see
-              apps/web/public/sounds/SOURCES.md. Keep visible. */}
-          <p className="text-center text-[10px] leading-relaxed tracking-[0.05em] text-white/35">
-            Music from{" "}
-            <a
-              href="https://uppbeat.io/t/pecan-pie/boogie"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline"
-            >
-              #Uppbeat
-            </a>{" "}
-            (free for Creators!) — License code: 7JEHN7VMRUTPZCDU
-          </p>
         </div>
       </div>
     </div>,
