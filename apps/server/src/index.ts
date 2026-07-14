@@ -27,8 +27,12 @@ import { handleDeckmasterRequest, knownHashCount } from "./deckmaster"
 import { handleDocsRequest } from "./docs"
 import { handleAvatarRequest } from "./avatar-api"
 import { handleDuelsRequest } from "./duels-api"
-import { handleLeaderboardRequest } from "./leaderboard-api"
+import {
+  handleLeaderboardRequest,
+  handleMyRankRequest,
+} from "./leaderboard-api"
 import { handleManagerRequest } from "./manager-api"
+import { handleSeasonRequest } from "./season"
 import { handleOracleRequest } from "./oracle"
 import { handleSponsorRequest } from "./sponsor"
 import { websocketHandler } from "./ws/handlers"
@@ -134,6 +138,12 @@ const server = Bun.serve({
     const leaderboard = await handleLeaderboardRequest(req, url)
     if (leaderboard) return leaderboard
 
+    const myRank = await handleMyRankRequest(req, url)
+    if (myRank) return myRank
+
+    const season = handleSeasonRequest(req, url)
+    if (season) return season
+
     const avatar = await handleAvatarRequest(req, url)
     if (avatar) return avatar
 
@@ -160,6 +170,8 @@ log.info(`  GET  /oracle/{id}`)
 log.info(`  GET  /duels/recent`)
 log.info(`  GET  /duels/{id}`)
 log.info(`  GET  /leaderboard`)
+log.info(`  GET  /leaderboard/me?address=0x...`)
+log.info(`  GET  /season`)
 log.info(`  GET  /avatars?addresses=0x..,0x..`)
 log.info(`  POST /avatar`)
 log.info(`  GET  /manager?owner=0x...`)

@@ -50,7 +50,7 @@ const NAV_TABS = [
     featured: true,
   },
   { to: "/game/shop", label: "shop", icon: "/icons/coins.png" },
-  { to: "/game/inventory", label: "inv", icon: "/icons/inventory.png" },
+  { to: "/game/inventory", label: "chat", icon: "/icons/message.png" },
 ] as const
 
 const BEVEL_GRADIENT =

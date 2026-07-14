@@ -1,0 +1,12 @@
+{
+  "network": "testnet",
+  "package": "season",
+  "packageId": "0x11c92f8fec8f75c2b0649cbfe45a844df4a34a51457d42ed1aac46b370a75990",
+  "adminCap": "0x7bcfe7ad000649f4dcc658aa56ec12d1984b294d61886aac75e516d35cdd6f04",
+  "upgradeCap": "0x971d568fe1f0ddbb0133934d2325568bf72acd9f560a28fe10a329ae2781eb68",
+  "publisher": "0x9c08a74cca711f45a176765e9db499f01def450fa90320a4c23934b2082aa882",
+  "publishTxDigest": "HpirFDji9C9XtypuvDnfBkDUNnKNhtfydT6JG7C1fMRT",
+  "poolId": "0xd3b8c7fb0a129f16e193187cc3ee1067d600bceea5d7f01d6b1ebda61edf4d1a",
+  "notes": "season::prize_pool. AdminCap owned by publisher. Create a pool with create_pool, fund via deposit, pay via distribute at season end (see README).",
+  "createPoolTxDigest": "HBEv3SVAsqAhHEUAYzidp5hCFPCyXhHHhk22zpEtoAmb"
+}
