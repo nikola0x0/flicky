@@ -4,7 +4,6 @@ import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
 import { prefetchAvatarIcons } from "@/lib/avatar-store"
 import { PlayerAvatar } from "@/components/player-avatar"
-import { PixelButton } from "@/components/pixel-button"
 import { SeasonBanner } from "@/components/season-banner"
 import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
 import {
@@ -17,12 +16,6 @@ import {
 import { fmtCountdown } from "@/lib/countdown"
 import { useNow } from "@/lib/use-now"
 import { playSfx } from "@/lib/sound"
-import type { CSSProperties } from "react"
-
-const BLUE_BRAND_STYLE = {
-  "--btn-bg": "#4094fb",
-  "--btn-highlight": "#7eb6ff",
-} as CSSProperties
 
 /** Wire shape from GET /leaderboard (top players by MMR rating). */
 interface RankEntry {
@@ -180,14 +173,6 @@ export default function GameRank() {
           {me ? "finish a duel to enter the ranks" : "sign in to see your rank"}
         </p>
       )}
-
-      <footer className="mt-auto pt-2">
-        <Link to="/game/home" className="block">
-          <PixelButton style={BLUE_BRAND_STYLE} className="h-12 w-full text-lg">
-            back to home
-          </PixelButton>
-        </Link>
-      </footer>
     </div>
   )
 }
