@@ -11,6 +11,7 @@ import {
   isTerminalSettleError,
   parseDuelFromObject,
   parseSwipe,
+  readyCardIndices,
   resolveCardPremiums,
 } from "./keeper"
 
@@ -191,6 +192,19 @@ describe("parseDuelFromObject", () => {
     const d = parseDuelFromObject("not-a-Duel-type", FRESH_DUEL_FIELDS)!
     expect(d.stakeCoinType).toBe("0x2::sui::SUI")
   })
+
+  test("cards_settled defaults to all-false when absent (backward compat)", () => {
+    const d = parseDuelFromObject(undefined, FRESH_DUEL_FIELDS)!
+    expect(d.cardsSettled).toEqual([false, false])
+  })
+
+  test("cards_settled is read through when present", () => {
+    const d = parseDuelFromObject(undefined, {
+      ...FRESH_DUEL_FIELDS,
+      cards_settled: [true, false],
+    })!
+    expect(d.cardsSettled).toEqual([true, false])
+  })
 })
 
 describe("settle PTB shape (6-24 model)", () => {
@@ -316,5 +330,71 @@ describe("resolveCardPremiums (symmetric fallback)", () => {
         { value: 0n, resolved: false }
       )
     ).toEqual({ p0Premium: 0n, p1Premium: 0n })
+  })
+})
+
+describe("readyCardIndices (per-card incremental settlement)", () => {
+  const cards = [
+    { expiryMarketId: "0xshort1" },
+    { expiryMarketId: "0xshort2" },
+    { expiryMarketId: "0xlong" }, // e.g. a multi-hour straggler market
+  ]
+
+  test("a settled market with an unsettled card → that card is ready", () => {
+    const settlementByMarket = new Map([["0xshort1", 63_000_000_000_000n]])
+    expect(
+      readyCardIndices(cards, [false, false, false], settlementByMarket)
+    ).toEqual([0])
+  })
+
+  test("mixed deck: short markets settle, one long straggler doesn't block them", () => {
+    // This is the exact scenario the fix targets: cards 0 and 1 finished
+    // minutes ago, card 2's market won't expire for hours.
+    const settlementByMarket = new Map([
+      ["0xshort1", 63_000_000_000_000n],
+      ["0xshort2", 63_100_000_000_000n],
+    ])
+    expect(
+      readyCardIndices(cards, [false, false, false], settlementByMarket)
+    ).toEqual([0, 1])
+  })
+
+  test("already-settled cards are excluded even if the market has a price", () => {
+    const settlementByMarket = new Map([
+      ["0xshort1", 63_000_000_000_000n],
+      ["0xshort2", 63_100_000_000_000n],
+    ])
+    // Card 0 already settled on-chain in an earlier pass.
+    expect(
+      readyCardIndices(cards, [true, false, false], settlementByMarket)
+    ).toEqual([1])
+  })
+
+  test("no eligible markets → empty", () => {
+    expect(readyCardIndices(cards, [false, false, false], new Map())).toEqual(
+      []
+    )
+  })
+
+  test("all cards already settled → empty, even with prices available", () => {
+    const settlementByMarket = new Map([
+      ["0xshort1", 63_000_000_000_000n],
+      ["0xshort2", 63_100_000_000_000n],
+      ["0xlong", 63_200_000_000_000n],
+    ])
+    expect(
+      readyCardIndices(cards, [true, true, true], settlementByMarket)
+    ).toEqual([])
+  })
+
+  test("two cards sharing one market both become ready together", () => {
+    const sharedCards = [
+      { expiryMarketId: "0xshared" },
+      { expiryMarketId: "0xshared" },
+    ]
+    const settlementByMarket = new Map([["0xshared", 63_000_000_000_000n]])
+    expect(
+      readyCardIndices(sharedCards, [false, false], settlementByMarket)
+    ).toEqual([0, 1])
   })
 })

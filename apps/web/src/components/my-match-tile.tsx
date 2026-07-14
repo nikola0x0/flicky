@@ -35,8 +35,18 @@ interface DuelLite {
   }>
   swipes: Array<{
     cardIdx: number
-    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p0Swipe: {
+      isUp: boolean
+      quantity: string
+      orderId: string
+      premium?: string
+    } | null
+    p1Swipe: {
+      isUp: boolean
+      quantity: string
+      orderId: string
+      premium?: string
+    } | null
   }>
   cards: Array<{ expiry_market_id: string; strike: string }>
 }

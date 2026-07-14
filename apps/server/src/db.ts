@@ -354,8 +354,8 @@ export interface DuelRow {
 
 export interface PendingSwipe {
   cardIdx: number
-  p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
-  p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+  p0Swipe: { isUp: boolean; quantity: string; orderId: string; premium?: string } | null
+  p1Swipe: { isUp: boolean; quantity: string; orderId: string; premium?: string } | null
 }
 
 export async function upsertDuel(

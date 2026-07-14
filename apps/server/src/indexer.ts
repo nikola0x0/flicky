@@ -117,8 +117,22 @@ interface DuelLite {
 
 interface PendingSwipe {
   cardIdx: number
-  p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
-  p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+  p0Swipe: PendingSwipeSide | null
+  p1Swipe: PendingSwipeSide | null
+}
+
+/**
+ * `premium` (base-10 `net_premium`, from the same `order_premiums` mirror
+ * `computePnl` reads) lets the UI sum a running "premium paid so far" per
+ * side across ALL swipes — settled or not — for a live percentage-PnL
+ * display. Optional: absent for free-tier swipes (`orderId === "0"`, never
+ * minted) and for any order the mirror hasn't caught up to yet.
+ */
+interface PendingSwipeSide {
+  isUp: boolean
+  quantity: string
+  orderId: string
+  premium?: string
 }
 
 interface CardRaw {
@@ -388,6 +402,20 @@ async function fetchDuel(
     expiryMarketSettlements,
     orderPremiums,
   })
+  // Attach real premium to every swipe (settled or not) so the UI can sum
+  // a running "premium paid so far" per side for a live percentage-PnL
+  // display — `cardOutcomes.p{0,1}Pnl` already nets premium out for
+  // settled cards, but that's a derived total, not the raw per-swipe
+  // figure this needs.
+  for (const s of swipes) {
+    const expiryMarketId = cardsLite[s.cardIdx]?.expiry_market_id
+    if (!expiryMarketId) continue
+    for (const swipe of [s.p0Swipe, s.p1Swipe]) {
+      if (!swipe || swipe.orderId === "0") continue
+      const premium = orderPremiums.get(`${expiryMarketId}:${swipe.orderId}`)
+      if (premium !== undefined) swipe.premium = premium
+    }
+  }
   // Restart / post-compaction fallback: if we got nothing fresh and the
   // duel is already COMPLETE, preserve mirror's outcomes.
   if (cardOutcomes.length === 0 && status === "COMPLETE") {

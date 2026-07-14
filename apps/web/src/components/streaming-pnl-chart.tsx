@@ -35,8 +35,18 @@ export interface ChartDuel {
   cards: Array<{ expiry_market_id: string; strike: string }>
   swipes: Array<{
     cardIdx: number
-    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p0Swipe: {
+      isUp: boolean
+      quantity: string
+      orderId: string
+      premium?: string
+    } | null
+    p1Swipe: {
+      isUp: boolean
+      quantity: string
+      orderId: string
+      premium?: string
+    } | null
   }>
   cardOutcomes: Array<{
     cardIdx: number
@@ -107,13 +117,18 @@ export function StreamingPnlChart({
   )
 }
 
-// 6-24: the swipe wire no longer carries `premium` — only `orderId` (the
-// server "looks up premium server-side by orderId", per protocol.ts, but
-// no such lookup is wired into room_state/swipes yet). Until that lands,
-// there's no per-card premium to sum here; ChartCanvas already falls back
-// to a flat "$" y-axis scale when premium is 0.
-function totalPremium(_duel: ChartDuel, _side: "p0" | "p1"): bigint {
-  return 0n
+// Sum of real per-swipe `net_premium` across every card (settled or not)
+// for one side — the denominator for the "you"/"opp" percentage badge.
+// `premium` is absent for free-tier swipes (never minted) or an order the
+// server's mirror hasn't caught up to yet; those just don't contribute.
+// ChartCanvas already falls back to a flat "$" y-axis scale when this is 0.
+function totalPremium(duel: ChartDuel, side: "p0" | "p1"): bigint {
+  let total = 0n
+  for (const s of duel.swipes) {
+    const swipe = side === "p0" ? s.p0Swipe : s.p1Swipe
+    if (swipe?.premium) total += BigInt(swipe.premium)
+  }
+  return total
 }
 
 /**

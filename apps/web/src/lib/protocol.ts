@@ -122,8 +122,18 @@ export type ServerMsg =
        */
       swipes: Array<{
         cardIdx: number
-        p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
-        p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+        p0Swipe: {
+          isUp: boolean
+          quantity: string
+          orderId: string
+          premium?: string
+        } | null
+        p1Swipe: {
+          isUp: boolean
+          quantity: string
+          orderId: string
+          premium?: string
+        } | null
       }>
     }
   | { type: "room_settled"; duelId: string; winner: string; payoutTo: string }

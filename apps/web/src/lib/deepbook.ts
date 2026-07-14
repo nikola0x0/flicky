@@ -444,5 +444,6 @@ export function buildWithdrawDusdcTx(
 // === Helpers ===
 
 export function fmtDusdc(microUnits: bigint): string {
-  return `${(Number(microUnits) / 1e6).toFixed(4)} dUSDC`
+  const trimmed = (Number(microUnits) / 1e6).toFixed(4).replace(/\.?0+$/, "")
+  return `${trimmed} dUSDC`
 }
