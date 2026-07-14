@@ -56,6 +56,24 @@ export function SpotlightOverlay() {
   const location = useLocation()
 
   /**
+   * A misclick on the backdrop (or the Skip button) shouldn't silently
+   * torch the tour forever — confirm first. Only the confirm dialog's own
+   * "Skip" button actually calls `skip()`, which permanently marks the
+   * tour as seen.
+   */
+  const [confirmingSkip, setConfirmingSkip] = useState(false)
+
+  // Reset any pending confirmation if the step changes underneath it (e.g.
+  // the "target not found" auto-advance in onboarding-context.tsx firing
+  // while the dialog happens to be open). Adjusted during render rather
+  // than an effect, per React's reset-on-change pattern.
+  const [confirmStepIndex, setConfirmStepIndex] = useState(stepIndex)
+  if (confirmStepIndex !== stepIndex) {
+    setConfirmStepIndex(stepIndex)
+    setConfirmingSkip(false)
+  }
+
+  /**
    * Track whether the page is "settling" after a route transition.
    * During this period, we hide the overlay to avoid showing it at
    * stale/mid-animation coordinates.
@@ -188,7 +206,7 @@ export function SpotlightOverlay() {
       <div
         className="spotlight-backdrop"
         style={{ clipPath: cutoutPolygon(rect) }}
-        onClick={skip}
+        onClick={() => setConfirmingSkip(true)}
       />
 
       {/* Glow ring around the target */}
@@ -227,7 +245,11 @@ export function SpotlightOverlay() {
 
         {/* Actions */}
         <div className="spotlight-actions">
-          <button type="button" onClick={skip} className="spotlight-btn skip">
+          <button
+            type="button"
+            onClick={() => setConfirmingSkip(true)}
+            className="spotlight-btn skip"
+          >
             Skip
           </button>
           <button type="button" onClick={next} className="spotlight-btn next">
@@ -235,6 +257,37 @@ export function SpotlightOverlay() {
           </button>
         </div>
       </div>
+
+      {/* Skip confirmation — clicking outside the box cancels, not skips */}
+      {confirmingSkip && (
+        <div
+          className="spotlight-confirm-backdrop"
+          onClick={() => setConfirmingSkip(false)}
+        >
+          <div
+            className="spotlight-confirm"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="spotlight-confirm-text">Skip the tutorial?</p>
+            <div className="spotlight-actions">
+              <button
+                type="button"
+                onClick={() => setConfirmingSkip(false)}
+                className="spotlight-btn skip"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={skip}
+                className="spotlight-btn next"
+              >
+                Skip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
