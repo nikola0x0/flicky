@@ -15,12 +15,12 @@ publish/upgrade cadence and admin key, decoupled from game-logic upgrades.
 Published from the deploy wallet `0x9c08a74c…` (`SUI_DEPLOYER_PRIVATE_KEY`);
 canonical record in `deployed.json`.
 
-| | |
-|---|---|
-| packageId | `0x11c92f8fec8f75c2b0649cbfe45a844df4a34a51457d42ed1aac46b370a75990` |
-| AdminCap | `0x7bcfe7ad000649f4dcc658aa56ec12d1984b294d61886aac75e516d35cdd6f04` (owned by the deployer) |
-| UpgradeCap | `0x971d568fe1f0ddbb0133934d2325568bf72acd9f560a28fe10a329ae2781eb68` |
-| PrizePool | `0xd3b8c7fb0a129f16e193187cc3ee1067d600bceea5d7f01d6b1ebda61edf4d1a` (shared, `season-0`) |
+|            |                                                                                              |
+| ---------- | -------------------------------------------------------------------------------------------- |
+| packageId  | `0x11c92f8fec8f75c2b0649cbfe45a844df4a34a51457d42ed1aac46b370a75990`                         |
+| AdminCap   | `0x7bcfe7ad000649f4dcc658aa56ec12d1984b294d61886aac75e516d35cdd6f04` (owned by the deployer) |
+| UpgradeCap | `0x971d568fe1f0ddbb0133934d2325568bf72acd9f560a28fe10a329ae2781eb68`                         |
+| PrizePool  | `0xd3b8c7fb0a129f16e193187cc3ee1067d600bceea5d7f01d6b1ebda61edf4d1a` (shared, `season-0`)    |
 
 `SEASON_PACKAGE_ID` + `SEASON_POOL_ID` are set in `apps/server/.env` (and on
 Railway), surfaced by `GET /season`. The pool exists but is **empty** — funding
@@ -45,6 +45,13 @@ sui move test        # 4 tests: payout, lock, both guards, recovery
 ```
 
 ## Deploy & operate (season end)
+
+> Prefer the wrapper scripts for funding + payout — they read the live
+> leaderboard, dry-run by default, and write a receipt:
+> `bun --filter server season:deposit <amount>` and
+> `bun --filter server season:distribute [--execute]`. Full flow, eligibility,
+> and receipts are documented in [`docs/season-prizes.md`](../../../docs/season-prizes.md).
+> The raw `sui client` calls below are the equivalent primitives.
 
 Deployment is a **manual, deliberate step** (it custodies real SUI).
 

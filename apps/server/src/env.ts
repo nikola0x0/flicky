@@ -240,8 +240,12 @@ export const env = {
   seasonEndsAt: process.env.SEASON_ENDS_AT ?? "2026-07-31T23:59:59Z",
   seasonPrizeCurrency: process.env.SEASON_PRIZE_CURRENCY ?? "SUI",
   seasonPrizeSplit: loadSeasonPrizeSplit(),
-  // Min completed STAKED duels for prize eligibility (cheap sybil guard).
-  seasonMinStakedDuels: Number(process.env.SEASON_MIN_STAKED_DUELS ?? 10),
+  // Min completed STAKED duels a player needs to be prize-ELIGIBLE (a cheap
+  // sybil / free-duel-farming guard — prizes are real SUI, so a winner must
+  // have staked real dUSDC at least once). This does NOT gate leaderboard
+  // ENTRY: any player with ≥1 completed duel of any tier is ranked. Set to 0
+  // to drop the gate entirely (every ranked player becomes prize-eligible).
+  seasonMinStakedDuels: Number(process.env.SEASON_MIN_STAKED_DUELS ?? 1),
   seasonEligibilityNote:
     process.env.SEASON_ELIGIBILITY_NOTE ?? "Final prizes at team discretion.",
   // On-chain prize escrow (season::prize_pool, apps/contracts/season). Set
@@ -250,6 +254,10 @@ export const env = {
   // on-chain". Not read by any hot path — the escrow is admin-operated.
   seasonPackageId: process.env.SEASON_PACKAGE_ID,
   seasonPoolId: process.env.SEASON_POOL_ID,
+  // AdminCap object id for the prize pool — required only by the admin payout
+  // scripts (season:deposit is permissionless; season:distribute /
+  // withdraw_remainder need it). Held by the SPONSOR_SECRET_KEY address.
+  seasonAdminCapId: process.env.SEASON_ADMIN_CAP_ID,
 
   // Keeper (background settle/redeem/finalize).
   keeperSecretKey: process.env.KEEPER_SECRET_KEY ?? process.env.BOT_SECRET_KEY,

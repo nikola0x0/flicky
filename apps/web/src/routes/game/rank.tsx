@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
@@ -7,7 +7,13 @@ import { PlayerAvatar } from "@/components/player-avatar"
 import { PixelButton } from "@/components/pixel-button"
 import { SeasonBanner } from "@/components/season-banner"
 import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
-import { fetchSeason, prizeForRank, type Season } from "@/lib/season"
+import {
+  fetchSeason,
+  fetchMyRank,
+  prizeForRank,
+  type Season,
+  type MyRank,
+} from "@/lib/season"
 import { fmtCountdown } from "@/lib/countdown"
 import { useNow } from "@/lib/use-now"
 import { playSfx } from "@/lib/sound"
@@ -48,6 +54,7 @@ export default function GameRank() {
   const me = account?.address
   const [players, setPlayers] = useState<RankEntry[] | null>(null)
   const [season, setSeason] = useState<Season | null>(null)
+  const [myRankInfo, setMyRankInfo] = useState<MyRank | null>(null)
   const now = useNow(1000)
 
   useEffect(() => {
@@ -88,13 +95,25 @@ export default function GameRank() {
     }
   }, [])
 
-  const myRank = useMemo(() => {
-    if (!players || !me) return null
-    const i = players.findIndex(
-      (p) => p.address.toLowerCase() === me.toLowerCase()
-    )
-    return i === -1 ? null : i + 1
-  }, [players, me])
+  // My own rank card — fetched by address so it's accurate even when I sit
+  // outside the fetched top-N. When signed out the card is hidden by the
+  // render gate below, so no explicit clear is needed here.
+  useEffect(() => {
+    if (!me) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      const info = await fetchMyRank(me)
+      if (cancelled) return
+      setMyRankInfo(info)
+      timer = setTimeout(tick, POLL_MS)
+    }
+    void tick()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [me])
 
   const remaining = season ? Date.parse(season.endsAt) - now : 0
 
@@ -130,12 +149,9 @@ export default function GameRank() {
             {fmtCountdown(remaining)}
           </p>
         )}
-        {myRank !== null && (
-          <p className="mt-1 text-base tracking-[0.18em] text-white/55 uppercase">
-            you're ranked #{myRank}
-          </p>
-        )}
       </header>
+
+      {me && myRankInfo && <MyRankCard info={myRankInfo} season={season} />}
 
       {season && <PrizePanel season={season} />}
 
@@ -159,7 +175,7 @@ export default function GameRank() {
         </ul>
       )}
 
-      {players !== null && players.length > 0 && myRank === null && (
+      {players !== null && players.length > 0 && !myRankInfo && (
         <p className="px-1 pt-1 text-center text-sm tracking-[0.18em] text-white/45 uppercase">
           {me ? "finish a duel to enter the ranks" : "sign in to see your rank"}
         </p>
@@ -219,6 +235,43 @@ function PrizePanel({ season }: { season: Season }) {
       <p className="border-t border-white/10 pt-2 text-[10px] leading-relaxed tracking-wider text-white/40 uppercase">
         eligible: {minStakedDuels}+ staked duels · {eligibilityNote}
       </p>
+    </div>
+  )
+}
+
+/**
+ * The connected player's own standing, pinned above the board so they never
+ * have to scroll to find themselves — accurate even when they sit outside the
+ * fetched top-N (fed by `GET /leaderboard/me`). Shows the prize + eligibility
+ * chip when their rank is in the money.
+ */
+function MyRankCard({ info, season }: { info: MyRank; season: Season | null }) {
+  const prize = season ? prizeForRank(season.prizeSplit, info.rank) : null
+  return (
+    <div className="flex items-center gap-3 rounded bg-[#4094fb]/20 px-3 py-2.5 ring-1 ring-[#7eb6ff]/50 backdrop-blur-sm">
+      <span className="pixel-tile grid size-9 shrink-0 place-items-center bg-[#7eb6ff]/25 text-base text-white tabular-nums">
+        {info.rank}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="text-sm tracking-[0.18em] text-[#bcd8ff] uppercase">
+          your rank
+        </span>
+        {prize !== null && season && (
+          <PrizeChip
+            prize={prize}
+            currency={season.prizePool.currency}
+            eligible={info.eligible}
+            stakedDuels={info.stakedDuels}
+            minStaked={season.minStakedDuels}
+          />
+        )}
+      </div>
+      <div className="flex shrink-0 flex-col items-end">
+        <span className="text-2xl text-white tabular-nums">{info.rating}</span>
+        <span className="text-sm tracking-[0.12em] text-white/45 uppercase tabular-nums">
+          {info.wins}W {info.losses}L {info.ties}T
+        </span>
+      </div>
     </div>
   )
 }

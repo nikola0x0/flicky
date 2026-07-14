@@ -722,6 +722,37 @@ export async function leaderboard(limit: number): Promise<PlayerRating[]> {
   return rows.map(rowToRating)
 }
 
+export interface PlayerRankInfo extends PlayerRating {
+  /** 1-based leaderboard position. */
+  rank: number
+}
+
+/**
+ * A single player's 1-based leaderboard position plus their rating row, or
+ * null if they aren't ranked yet (no completed duel). Rank = 1 + the count of
+ * ranked players (games_played > 0) with a strictly higher rating, so equal
+ * ratings share a rank (standard competition ranking). This lets the rank
+ * screen show "YOUR RANK #N" even when the player is outside the fetched
+ * top-N slice, without pulling the whole board.
+ */
+export async function playerRank(
+  address: string
+): Promise<PlayerRankInfo | null> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    SELECT pr.address, pr.rating, pr.games_played, pr.wins, pr.losses, pr.ties,
+           pr.last_updated_ms,
+           (SELECT COUNT(*)::int FROM player_rating o
+              WHERE o.games_played > 0 AND o.rating > pr.rating) + 1 AS rank
+    FROM player_rating pr
+    WHERE pr.address = ${address} AND pr.games_played > 0
+  `) as Array<PlayerRatingRaw & { rank: number }>
+  const r = rows[0]
+  if (!r) return null
+  return { ...rowToRating(r), rank: r.rank }
+}
+
 /**
  * Completed STAKED-duel count per player address, for Season 0 prize
  * eligibility (≥N staked duels). A duel is staked iff its `stake_coin_type`

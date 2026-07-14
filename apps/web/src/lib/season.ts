@@ -34,6 +34,37 @@ export async function fetchSeason(): Promise<Season | null> {
   }
 }
 
+/** A player's own rank card from `GET /leaderboard/me` (works outside top-N). */
+export interface MyRank {
+  rank: number
+  rating: number
+  wins: number
+  losses: number
+  ties: number
+  stakedDuels: number
+  eligible: boolean
+}
+
+/**
+ * Fetch a player's own leaderboard position, or `null` if they aren't ranked
+ * yet (no completed duel) or the server is unreachable. Lets the rank screen
+ * show "YOUR RANK #N" even when the player sits outside the fetched top-N.
+ */
+export async function fetchMyRank(address: string): Promise<MyRank | null> {
+  try {
+    const res = await fetch(
+      `${CONFIG.serverHttpUrl}/leaderboard/me?address=${address}`
+    )
+    if (!res.ok) return null
+    const body = (await res.json()) as
+      | { ranked: false }
+      | ({ ranked: true } & MyRank)
+    return body.ranked ? body : null
+  } catch {
+    return null
+  }
+}
+
 /** The prize amount for a 1-based leaderboard position, or `null` if that rank wins nothing. */
 export function prizeForRank(
   split: PrizeTier[],
