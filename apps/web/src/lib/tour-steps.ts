@@ -63,7 +63,13 @@ export const TOURS: Record<TourId, TourStep[]> = {
     },
     {
       targetId: "nav-shop",
-      description: "Shop: buy dUSDC to fund your duels",
+      description: "Swap: trade testnet SUI for dUSDC to fund your duels",
+      placement: "top",
+      route: "/game/home",
+    },
+    {
+      targetId: "nav-chat",
+      description: "Chat: talk with other players in the lobby",
       placement: "top",
       route: "/game/home",
     },
