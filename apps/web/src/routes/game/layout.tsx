@@ -18,6 +18,12 @@ export interface GameOutletContext {
 // unified <SignedOutPrompt>.
 const PUBLIC_ROUTES = new Set<string>(["/game/shop", "/game/rank"])
 
+// Shared duel links must open for signed-out recipients — every
+// /game/duel/<id> view is public (read-only for non-participants).
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_ROUTES.has(pathname) || pathname.startsWith("/game/duel/")
+}
+
 import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"
 import { LoginModal } from "@/components/login-modal"
@@ -60,7 +66,7 @@ export default function GameLayout() {
   const [depositOpen, setDepositOpen] = useState(false)
   const account = useCurrentAccount()
   const location = useLocation()
-  const isPublicRoute = PUBLIC_ROUTES.has(location.pathname)
+  const isPublicRoute = isPublicPath(location.pathname)
   const showOutlet = Boolean(account) || isPublicRoute
   // Route-specific chrome (shop's tall top-decor header, pvp's checker
   // background) only kicks in when the routed page is actually

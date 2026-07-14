@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useParams } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
@@ -8,6 +8,8 @@ import { playSfx } from "@/lib/sound"
 import { PixelButton } from "@/components/pixel-button"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
+import { DuelResultModal } from "@/components/duel-result-modal"
+import { summarizeDuelResult } from "@/lib/duel-result"
 import type { CSSProperties } from "react"
 import {
   DEMO_DUEL_ID,
@@ -32,6 +34,7 @@ interface DuelLite {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
+  winner?: "p0" | "p1" | "tie" | null
   startedAtMs: number
   p0Payout: string
   p0Premium: string
@@ -229,6 +232,39 @@ export default function DuelView() {
     })
   }, [settleStates])
 
+  // ── result modal ─────────────────────────────────────────────────
+  const myIsP0 = Boolean(address && duel?.creator === address)
+  const isParticipant =
+    myIsP0 || Boolean(address && duel?.challenger === address)
+  const summary = useMemo(
+    () => (duel && isParticipant ? summarizeDuelResult(duel, myIsP0) : null),
+    [duel, isParticipant, myIsP0]
+  )
+  const [resultOpen, setResultOpen] = useState(false)
+  // Stable identity across the 1 Hz `nowMs` re-render — DuelResultModal's
+  // fanfare/escape/scroll-lock effect depends on `onClose`, so an inline
+  // arrow here would re-fire that effect (and replay the sfx) every
+  // second while the modal is open.
+  const closeResult = useCallback(() => setResultOpen(false), [])
+  // Auto-open exactly once per duel per browser: the seen-key guard
+  // means a refresh or revisit never re-pops it (the "share result"
+  // button below reopens on demand). Demo mode never completes.
+  useEffect(() => {
+    if (demo || !duel || duel.status !== "COMPLETE" || !isParticipant) return
+    const key = `flicky.result-seen.${duel.id}`
+    try {
+      if (globalThis.localStorage?.getItem(key)) return
+      globalThis.localStorage?.setItem(key, "1")
+    } catch {
+      /* storage unavailable — may re-pop next visit; harmless */
+    }
+    // Gated by the localStorage read above — this only fires once per
+    // duel per browser, not on every render, so it's a legitimate
+    // external-system sync rather than derivable render state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setResultOpen(true)
+  }, [demo, duel, isParticipant])
+
   // Initial fetch + polling (mirror of MyMatchTile's pattern — keeps
   // the view honest if the WS room subscription misses an update).
   // Skipped in demo mode (mock seeded below).
@@ -322,9 +358,6 @@ export default function DuelView() {
     return <Notice title="loading…" body="fetching duel state." />
   }
 
-  const myIsP0 = address && duel.creator === address
-  const myIsP1 = address && duel.challenger === address
-  const isParticipant = myIsP0 || myIsP1
   const opponent = myIsP0 ? duel.challenger : duel.creator
   const isLive = duel.status === "ACTIVE"
   // On-chain settlement lands before the indexer mirrors it, so the duel's
@@ -420,7 +453,15 @@ export default function DuelView() {
         </div>
       )}
 
-      <footer className="mt-auto pt-2">
+      <footer className="mt-auto flex flex-col gap-2 pt-2">
+        {duel.status === "COMPLETE" && summary && (
+          <PixelButton
+            onClick={() => setResultOpen(true)}
+            className="h-12 w-full text-lg"
+          >
+            share result
+          </PixelButton>
+        )}
         <Link to="/game/home" className="block">
           <PixelButton style={BLUE_BRAND_STYLE} className="h-12 w-full text-lg">
             back to home
@@ -434,6 +475,17 @@ export default function DuelView() {
           ? "settlement runs automatically — keeper handles the rest"
           : "this match is final"}
       </p>
+
+      {summary && (
+        <DuelResultModal
+          open={resultOpen}
+          onClose={closeResult}
+          duelId={duel.id}
+          summary={summary}
+          myAddress={address}
+          oppAddress={opponent}
+        />
+      )}
     </div>
   )
 }
