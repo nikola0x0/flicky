@@ -11,15 +11,13 @@
   pointer-events: none;
 }
 
-/* Dark semi-transparent backdrop. The clip-path polygon punches a
-   rectangular hole around the highlighted element. */
+/* Click-to-skip surface. No dark overlay — keeps the highlighted
+   component fully visible and clear. */
 .spotlight-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.72);
-  backdrop-filter: blur(2px);
+  background: transparent;
   pointer-events: auto;
-  transition: clip-path 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Pulsing golden glow ring drawn over the target element. */
