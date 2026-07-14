@@ -65,6 +65,22 @@ export interface DepositModalProps {
   open: boolean
   address: string
   onClose: () => void
+  /** Pre-select a tab and amount when the caller already knows exactly how
+   *  much is needed (e.g. the onboarding gate's wallet-funding step).
+   *  Omitted by generic callers (profile, header), which keep the plain
+   *  SUI-tab / "1" defaults. Re-applied every time the modal opens, since
+   *  it stays mounted (just hidden) between opens in callers like
+   *  OnboardingModal — a useState initializer alone would only ever see
+   *  the props from first mount. */
+  defaultTab?: Tab
+  defaultDusdcAmount?: bigint
+}
+
+/** Bare decimal string (not currency-formatted) for seeding the amount
+ *  input from a known dUSDC micro-unit shortfall — exact since dUSDC's
+ *  6 decimals match the micro-unit scale 1:1. */
+function dusdcMicroToInput(micro: bigint): string {
+  return (Number(micro) / 10 ** DUSDC_DECIMALS).toString()
 }
 
 /**
@@ -80,15 +96,38 @@ export interface DepositModalProps {
  * Polls the chain every 3s while the modal is open and shows a
  * success state when the chosen token's balance grows.
  */
-export function DepositModal({ open, address, onClose }: DepositModalProps) {
+export function DepositModal({
+  open,
+  address,
+  onClose,
+  defaultTab,
+  defaultDusdcAmount,
+}: DepositModalProps) {
   useModalSfx(open)
   const invalidateBalances = useInvalidateWalletBalances()
   const { data: suiBalance = 0 } = useSuiBalance()
   const { data: dusdcBalance = 0 } = useDusdcBalance()
-  const [tab, setTab] = useState<Tab>("SUI")
-  const [amount, setAmount] = useState("1")
+  const [tab, setTab] = useState<Tab>(defaultTab ?? "SUI")
+  const [amount, setAmount] = useState(
+    defaultDusdcAmount !== undefined
+      ? dusdcMicroToInput(defaultDusdcAmount)
+      : "1"
+  )
   const [copied, setCopied] = useState(false)
   const [received, setReceived] = useState<number | null>(null)
+
+  // Re-seed from the caller's known amount/tab every time the modal opens.
+  // The useState initializers above only fire on first mount, but a caller
+  // like OnboardingModal keeps this component mounted (just hidden) across
+  // opens, so a later-known shortfall needs an explicit re-seed here.
+  useEffect(() => {
+    if (!open) return
+    if (defaultTab) setTab(defaultTab)
+    if (defaultDusdcAmount !== undefined) {
+      setAmount(dusdcMicroToInput(defaultDusdcAmount))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   // Resolve the receive-flow metadata when we're on SUI/DUSDC tabs.
   // The MANAGER tab is a different UX (signed deposit, no QR) and

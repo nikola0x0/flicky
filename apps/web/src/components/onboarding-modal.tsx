@@ -71,6 +71,10 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "checking" })
   const [walletDusdc, setWalletDusdc] = useState<bigint>(0n)
   const [walletTopupOpen, setWalletTopupOpen] = useState(false)
+  // The exact wallet shortfall at the moment "Get dUSDC" was clicked, so the
+  // DepositModal it opens can land pre-armed with the right tab + amount
+  // instead of its generic SUI/"1" defaults.
+  const [topupNeeded, setTopupNeeded] = useState<bigint>(0n)
 
   /**
    * Single source of truth for "what state are we in?". Reads wallet
@@ -218,7 +222,10 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
             needed={phase.needed}
             current={phase.current}
             stake={stake}
-            onTopup={() => setWalletTopupOpen(true)}
+            onTopup={() => {
+              setTopupNeeded(phase.needed)
+              setWalletTopupOpen(true)
+            }}
           />
         )}
 
@@ -323,6 +330,8 @@ export function OnboardingModal({ open, stake, onClose, onReady }: Props) {
         <DepositModal
           open={walletTopupOpen}
           address={account.address}
+          defaultTab="DUSDC"
+          defaultDusdcAmount={topupNeeded}
           onClose={() => {
             setWalletTopupOpen(false)
             // Refresh balances — if the user funded the wallet, the
