@@ -102,12 +102,22 @@ function fmtPrice(p: number, digits = 1): string {
   })}`
 }
 
+export interface StrikeLine {
+  /** Strike in USD (already de-scaled from 1e9). */
+  price: number
+  label: string
+  color: string
+}
+
 export function BtcSpotChart({
   ticks,
   cards,
+  strikeLines,
 }: {
   ticks: Record<string, Tick>
   cards: Array<{ expiry_market_id: string }>
+  /** Horizontal strike guides (practice lockup drama). Omitted in PvP. */
+  strikeLines?: StrikeLine[]
 }) {
   const spot = pickSpot(ticks, cards)
   const samples = useSpotHistory(spot)
@@ -134,6 +144,10 @@ export function BtcSpotChart({
       if (s.price < lo) lo = s.price
       if (s.price > hi) hi = s.price
     }
+    for (const s of strikeLines ?? []) {
+      if (s.price < lo) lo = s.price
+      if (s.price > hi) hi = s.price
+    }
     const xd: [number, number] = !isFinite(tMax)
       ? [0, 1]
       : [tMax - WINDOW_MS, tMax]
@@ -150,7 +164,7 @@ export function BtcSpotChart({
       xDomain: xd,
       yDomain: [mid - half, mid + half] as [number, number],
     }
-  }, [samples])
+  }, [samples, strikeLines])
 
   const xScale = useMemo(
     () => scaleLinear<number>({ domain: xDomain, range: [0, iw] }),
@@ -279,6 +293,35 @@ export function BtcSpotChart({
                   dominantBaseline="middle"
                 >
                   {Math.round(p).toLocaleString()}
+                </text>
+              </g>
+            )
+          })}
+
+          {/* strike guides — the prices the pending cards settle against */}
+          {(strikeLines ?? []).map((s, i) => {
+            const y = yScale(s.price)
+            if (!isFinite(y) || y < 0 || y > ih) return null
+            return (
+              <g key={`strike-${i}`}>
+                <line
+                  x1={0}
+                  x2={iw}
+                  y1={y}
+                  y2={y}
+                  stroke={s.color}
+                  strokeOpacity={0.8}
+                  strokeDasharray="5 3"
+                  strokeWidth={1}
+                />
+                <text
+                  x={3}
+                  y={y - 3}
+                  fill={s.color}
+                  fontSize="9"
+                  opacity={0.95}
+                >
+                  {s.label}
                 </text>
               </g>
             )

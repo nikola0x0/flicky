@@ -47,3 +47,6 @@ apps/server/.data/
 
 # superpowers brainstorm artifacts (local)
 .superpowers/
+
+# Local Python venv (rembg background-removal tool)
+.venv-rembg/
