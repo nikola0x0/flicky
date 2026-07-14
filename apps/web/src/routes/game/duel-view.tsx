@@ -7,7 +7,7 @@ import { fmtPnlPct, markCardPnl, type SwipeLite } from "@/lib/pnl"
 import { playSfx } from "@/lib/sound"
 import { PixelButton } from "@/components/pixel-button"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
-import { BtcSpotChart } from "@/components/btc-spot-chart"
+import { BtcSpotChart, type StrikeLine } from "@/components/btc-spot-chart"
 import { DuelResultModal } from "@/components/duel-result-modal"
 import { fmtUsd } from "@/components/swipe-screen"
 import { summarizeDuelResult } from "@/lib/duel-result"
@@ -53,8 +53,18 @@ interface DuelLite {
   }>
   swipes: Array<{
     cardIdx: number
-    p0Swipe: { isUp: boolean; quantity: string; orderId: string } | null
-    p1Swipe: { isUp: boolean; quantity: string; orderId: string } | null
+    p0Swipe: {
+      isUp: boolean
+      quantity: string
+      orderId: string
+      premium?: string
+    } | null
+    p1Swipe: {
+      isUp: boolean
+      quantity: string
+      orderId: string
+      premium?: string
+    } | null
   }>
   cards: Array<{ expiry_market_id: string; strike: string; expiryMs?: number }>
 }
@@ -370,6 +380,31 @@ export default function DuelView() {
   )
   const settledCount = Math.max(duel.settledCount, onChainSettled)
 
+  // Strike guide for the current card only — "#N" marker for the
+  // lowest-index card still in flight, moving to #N+1 the instant it
+  // settles (unlike practice mode's lockup chart, which shows all live
+  // cards at once — a real duel's cards are watched one at a time, not
+  // all settling together at the end of a shared lockup window). Reuses
+  // CardTile's combined settled check (indexer outcome OR on-chain tick)
+  // rather than practice's simpler `cardOutcomes`-only check, since a real
+  // duel's on-chain settlement can land before the indexer mirrors it.
+  const currentCardIdx = duel.cards.findIndex((c, i) => {
+    const settled =
+      duel.cardOutcomes.some((o) => o.cardIdx === i) ||
+      ticks[c.expiry_market_id]?.settled === true
+    return !settled
+  })
+  const strikeLines: StrikeLine[] =
+    currentCardIdx === -1
+      ? []
+      : [
+          {
+            price: Number(BigInt(duel.cards[currentCardIdx].strike)) / 1e9,
+            label: `#${currentCardIdx + 1}`,
+            color: "#ffd24a",
+          },
+        ]
+
   return (
     <div className="relative isolate flex h-full flex-col gap-3 overflow-y-auto px-4 py-4 font-pixel text-white [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {/* Decorative header banner — sits behind the top ~40% of the
@@ -437,7 +472,11 @@ export default function DuelView() {
           />
         </div>
         <div className={chartView === "btc" ? "" : "hidden"}>
-          <BtcSpotChart ticks={ticks} cards={duel.cards} />
+          <BtcSpotChart
+            ticks={ticks}
+            cards={duel.cards}
+            strikeLines={strikeLines}
+          />
         </div>
       </div>
 
@@ -653,18 +692,34 @@ function CardTile({
           )
         : null
 
-  // A card is final once the indexer records its outcome OR the oracle
-  // tick reports `settled` (which lands first — the on-chain settlement
-  // precedes the indexer mirror). In the settled case `markCardPnl`
-  // already returns the binary outcome (expiry has passed), so the
-  // win/loss split below is the real result, not a live mark.
+  // A card is final (for COLOR purposes) once the indexer records its
+  // outcome OR the oracle tick reports `settled` (which lands first — the
+  // on-chain settlement precedes the indexer mirror). Past expiry,
+  // `markCardPnl`'s probability collapses to exactly 0 or 1, so its
+  // direction (win/loss) is always right even before the indexer catches
+  // up — safe to color the tile from immediately. Its MAGNITUDE, though,
+  // is a symmetric ±quantity projection with no premium netted in, so it
+  // always reads exactly ±100% — only `outcome.p{0,1}Pnl` (the real,
+  // premium-netted figure) is trustworthy as a displayed number. See the
+  // `hasOutcome` branch below, which gates the TEXT (not the color) on it.
   const settledNow = Boolean(outcome) || tick?.settled === true
+  const hasOutcome = Boolean(outcome)
   const state: CardState =
     settledNow && myPnl !== null ? (myPnl < 0n ? "loss" : "win") : "live"
+  // Real duels never carry a per-card `expiryMs` from the server — only
+  // the oracle tick stream reports it, once `oracle_subscribe` delivers a
+  // tick for this card's market (see the `tick?.expiryMs` read above for
+  // `markCardPnl`). `card.expiryMs` only exists in the demo fixture.
+  const expiryMs = tick?.expiryMs ?? card?.expiryMs
   const remainingMs =
-    !settledNow && card?.expiryMs !== undefined
-      ? Math.max(0, card.expiryMs - nowMs)
+    !settledNow && expiryMs !== undefined
+      ? Math.max(0, expiryMs - nowMs)
       : null
+  // Pre-settle: live sentiment % (once we have a swipe + a live tick to
+  // mark it against) alongside the countdown, not one replacing the
+  // other — rendered as two stacked lines, not squeezed onto one.
+  const livePnlText = myPnl !== null ? signedPercent(myPnl, mySwipe) : null
+  const timeText = remainingMs !== null ? formatRemaining(remainingMs) : null
 
   return (
     <div
@@ -711,8 +766,8 @@ function CardTile({
           {oppSwipe ? (oppSwipe.isUp ? "↑" : "↓") : "…"}
         </span>
       </p>
-      <p
-        className={`text-sm uppercase tabular-nums ${
+      <div
+        className={`text-sm leading-tight uppercase tabular-nums ${
           state === "win"
             ? "text-emerald-300"
             : state === "loss"
@@ -720,14 +775,23 @@ function CardTile({
               : "text-cyan-300"
         }`}
       >
-        {settledNow
-          ? myPnl === null
-            ? "skipped"
-            : signedPercent(myPnl, mySwipe)
-          : remainingMs !== null
-            ? formatRemaining(remainingMs)
-            : "—"}
-      </p>
+        {hasOutcome ? (
+          myPnl === null ? (
+            "skipped"
+          ) : (
+            signedPercent(myPnl, mySwipe)
+          )
+        ) : settledNow ? (
+          "settling…"
+        ) : livePnlText || timeText ? (
+          <>
+            {livePnlText && <p>{livePnlText}</p>}
+            {timeText && <p>{timeText}</p>}
+          </>
+        ) : (
+          "—"
+        )}
+      </div>
     </div>
   )
 }
