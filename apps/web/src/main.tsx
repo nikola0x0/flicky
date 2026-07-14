@@ -16,10 +16,10 @@ import GamePvp from "@/routes/game/pvp.tsx"
 import PlayDuel from "@/routes/game/play.tsx"
 import DuelView from "@/routes/game/duel-view.tsx"
 import GameHistory from "@/routes/game/history.tsx"
+import GamePractice from "@/routes/game/practice.tsx"
 import GameShop from "@/routes/game/shop.tsx"
 import GameRank from "@/routes/game/rank.tsx"
 import GameChat from "@/routes/game/chat.tsx"
-import GameComingSoon from "@/routes/game/coming-soon.tsx"
 
 const router = createBrowserRouter([
   { path: "/", element: <Landing /> },
@@ -35,7 +35,7 @@ const router = createBrowserRouter([
       { path: "play/:duelId", element: <PlayDuel /> },
       { path: "duel/:duelId", element: <DuelView /> },
       { path: "history", element: <GameHistory /> },
-      { path: "practice", element: <GameComingSoon /> },
+      { path: "practice", element: <GamePractice /> },
       { path: "shop", element: <GameShop /> },
       { path: "rank", element: <GameRank /> },
       { path: "inventory", element: <GameChat /> },

@@ -37,13 +37,17 @@ describe("isValidTier", () => {
 
 describe("parseClientMsg", () => {
   test("parses a valid hello message", () => {
-    const msg = parseClientMsg(JSON.stringify({ type: "hello", address: "0xabc" }))
+    const msg = parseClientMsg(
+      JSON.stringify({ type: "hello", address: "0xabc" })
+    )
     expect(msg?.type).toBe("hello")
     if (msg?.type === "hello") expect(msg.address).toBe("0xabc")
   })
 
   test("parses queue_join with tier", () => {
-    const msg = parseClientMsg(JSON.stringify({ type: "queue_join", tier: "casual" }))
+    const msg = parseClientMsg(
+      JSON.stringify({ type: "queue_join", tier: "casual" })
+    )
     expect(msg?.type).toBe("queue_join")
   })
 
@@ -63,5 +67,14 @@ describe("parseClientMsg", () => {
     expect(parseClientMsg(JSON.stringify({ type: 42 }))).toBeNull()
     expect(parseClientMsg(JSON.stringify(null))).toBeNull()
     expect(parseClientMsg(JSON.stringify("string-not-object"))).toBeNull()
+  })
+
+  test("parses spot_subscribe / spot_unsubscribe (no args)", () => {
+    expect(
+      parseClientMsg(JSON.stringify({ type: "spot_subscribe" }))?.type
+    ).toBe("spot_subscribe")
+    expect(
+      parseClientMsg(JSON.stringify({ type: "spot_unsubscribe" }))?.type
+    ).toBe("spot_unsubscribe")
   })
 })

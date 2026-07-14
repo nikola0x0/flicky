@@ -13,7 +13,9 @@ import { handleChatReact, handleChatSend, sendChatHistory } from "./chat"
 import {
   onSocketCloseOracleStream,
   subscribeOracles,
+  subscribeSpot,
   unsubscribeOracles,
+  unsubscribeSpot,
 } from "./oracle-stream"
 import { handlePracticeStart } from "./practice"
 import { isValidTier, parseClientMsg, type ServerMsg } from "./protocol"
@@ -259,6 +261,24 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
       }
       case "oracle_unsubscribe": {
         unsubscribeOracles(ws, msg.marketIds)
+        return
+      }
+      case "spot_subscribe": {
+        const rl = consume("ws:spot_subscribe", ws.data.address ?? "anon")
+        if (!rl.ok) {
+          send(ws, {
+            type: "error",
+            code: "rate_limited",
+            message: `slow down; retry in ${rl.retryMs}ms`,
+            detail: { retryMs: rl.retryMs },
+          })
+          return
+        }
+        subscribeSpot(ws)
+        return
+      }
+      case "spot_unsubscribe": {
+        unsubscribeSpot(ws)
         return
       }
       case "ping": {

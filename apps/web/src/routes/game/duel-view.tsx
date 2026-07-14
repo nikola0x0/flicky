@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useParams } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
@@ -8,6 +8,9 @@ import { playSfx } from "@/lib/sound"
 import { PixelButton } from "@/components/pixel-button"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
+import { DuelResultModal } from "@/components/duel-result-modal"
+import { fmtUsd } from "@/components/swipe-screen"
+import { summarizeDuelResult } from "@/lib/duel-result"
 import type { CSSProperties } from "react"
 import {
   DEMO_DUEL_ID,
@@ -32,6 +35,7 @@ interface DuelLite {
   cardsRevealed: boolean
   cardCount: number
   settledCount: number
+  winner?: "p0" | "p1" | "tie" | null
   startedAtMs: number
   p0Payout: string
   p0Premium: string
@@ -229,6 +233,39 @@ export default function DuelView() {
     })
   }, [settleStates])
 
+  // ── result modal ─────────────────────────────────────────────────
+  const myIsP0 = Boolean(address && duel?.creator === address)
+  const isParticipant =
+    myIsP0 || Boolean(address && duel?.challenger === address)
+  const summary = useMemo(
+    () => (duel && isParticipant ? summarizeDuelResult(duel, myIsP0) : null),
+    [duel, isParticipant, myIsP0]
+  )
+  const [resultOpen, setResultOpen] = useState(false)
+  // Stable identity across the 1 Hz `nowMs` re-render — DuelResultModal's
+  // fanfare/escape/scroll-lock effect depends on `onClose`, so an inline
+  // arrow here would re-fire that effect (and replay the sfx) every
+  // second while the modal is open.
+  const closeResult = useCallback(() => setResultOpen(false), [])
+  // Auto-open exactly once per duel per browser: the seen-key guard
+  // means a refresh or revisit never re-pops it (the "share result"
+  // button below reopens on demand). Demo mode never completes.
+  useEffect(() => {
+    if (demo || !duel || duel.status !== "COMPLETE" || !isParticipant) return
+    const key = `flicky.result-seen.${duel.id}`
+    try {
+      if (globalThis.localStorage?.getItem(key)) return
+      globalThis.localStorage?.setItem(key, "1")
+    } catch {
+      /* storage unavailable — may re-pop next visit; harmless */
+    }
+    // Gated by the localStorage read above — this only fires once per
+    // duel per browser, not on every render, so it's a legitimate
+    // external-system sync rather than derivable render state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setResultOpen(true)
+  }, [demo, duel, isParticipant])
+
   // Initial fetch + polling (mirror of MyMatchTile's pattern — keeps
   // the view honest if the WS room subscription misses an update).
   // Skipped in demo mode (mock seeded below).
@@ -322,9 +359,6 @@ export default function DuelView() {
     return <Notice title="loading…" body="fetching duel state." />
   }
 
-  const myIsP0 = address && duel.creator === address
-  const myIsP1 = address && duel.challenger === address
-  const isParticipant = myIsP0 || myIsP1
   const opponent = myIsP0 ? duel.challenger : duel.creator
   const isLive = duel.status === "ACTIVE"
   // On-chain settlement lands before the indexer mirrors it, so the duel's
@@ -420,7 +454,15 @@ export default function DuelView() {
         </div>
       )}
 
-      <footer className="mt-auto pt-2">
+      <footer className="mt-auto flex flex-col gap-2 pt-2">
+        {duel.status === "COMPLETE" && summary && (
+          <PixelButton
+            onClick={() => setResultOpen(true)}
+            className="h-12 w-full text-lg"
+          >
+            share result
+          </PixelButton>
+        )}
         <Link to="/game/home" className="block">
           <PixelButton style={BLUE_BRAND_STYLE} className="h-12 w-full text-lg">
             back to home
@@ -434,6 +476,17 @@ export default function DuelView() {
           ? "settlement runs automatically — keeper handles the rest"
           : "this match is final"}
       </p>
+
+      {summary && (
+        <DuelResultModal
+          open={resultOpen}
+          onClose={closeResult}
+          duelId={duel.id}
+          summary={summary}
+          myAddress={address}
+          oppAddress={opponent}
+        />
+      )}
     </div>
   )
 }
@@ -507,22 +560,6 @@ function shortAddr(a: string): string {
 
 type CardState = "live" | "win" | "loss"
 
-// Chunky pixel-art border per state: a 2px state-tinted inner ring plus a
-// beveled inset shadow — a soft color highlight along the top and a black
-// shadow along the bottom — so the card reads like a raised game tile. The
-// black outer outline comes from `.pixel-tile`; this colors the inside.
-const CARD_STATE_STYLES: Record<CardState, string> = {
-  live: "bg-cyan-950/40 text-cyan-100 ring-2 ring-cyan-400/70 shadow-[inset_0_3px_0_rgba(125,230,255,0.25),inset_0_-3px_0_rgba(0,0,0,0.5)]",
-  win: "bg-emerald-950/40 text-emerald-100 ring-2 ring-emerald-400/70 shadow-[inset_0_3px_0_rgba(110,231,183,0.25),inset_0_-3px_0_rgba(0,0,0,0.5)]",
-  loss: "bg-rose-950/40 text-rose-200 ring-2 ring-rose-400/70 shadow-[inset_0_3px_0_rgba(253,164,175,0.25),inset_0_-3px_0_rgba(0,0,0,0.5)]",
-}
-
-const CARD_BADGE_SRC: Record<CardState, string> = {
-  live: "/assets/cards/badge-live.png",
-  win: "/assets/cards/badge-win.png",
-  loss: "/assets/cards/badge-loss.png",
-}
-
 function CardList({
   duel,
   myIsP0,
@@ -534,85 +571,24 @@ function CardList({
   ticks: Record<string, Tick>
   nowMs: number
 }) {
-  const slots = Math.max(duel.cardCount, duel.cards.length, 5)
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const scrollByDir = (dir: -1 | 1) => {
-    const el = scrollRef.current
-    if (!el) return
-    // ~2 card-widths per click (card 120px + gap 8px).
-    el.scrollBy({ left: dir * 256, behavior: "smooth" })
-  }
+  const slots = Math.max(duel.cardCount, duel.cards.length)
   return (
-    <div className="group/cards relative flex flex-col gap-2">
+    <div className="flex flex-col gap-2">
       <h3 className="text-xs tracking-[0.2em] text-white/55 uppercase">
         cards
       </h3>
-      {/* Horizontal scroll strip — strikes can be 5-6 digits, so we
-          give each card a fixed minimum width and let the container
-          scroll sideways on narrow viewports. The `-mx-4` + `px-4`
-          combo lets the strip bleed past the page's horizontal padding
-          so cards scroll cleanly off the edge. */}
-      <div
-        ref={scrollRef}
-        className="-mx-4 touch-pan-x snap-x scroll-px-4 overflow-x-auto px-4 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        style={{ WebkitOverflowScrolling: "touch" }}
-      >
-        <div className="flex w-max gap-2">
-          {Array.from({ length: slots }).map((_, i) => {
-            const card = duel.cards[i]
-            const isSettled = i < duel.settledCount
-            const remainingMs =
-              !isSettled && card?.expiryMs !== undefined
-                ? Math.max(0, card.expiryMs - nowMs)
-                : null
-            return (
-              <div
-                key={i}
-                className="flex w-[120px] flex-none snap-start flex-col gap-1"
-              >
-                <CardTile
-                  index={i}
-                  duel={duel}
-                  myIsP0={myIsP0}
-                  ticks={ticks}
-                  nowMs={nowMs}
-                />
-                <div className="text-center font-pixel">
-                  <div className="text-xs tracking-[0.15em] text-white/55 uppercase tabular-nums">
-                    {(i + 1).toString().padStart(2, "0")}
-                  </div>
-                  {remainingMs !== null && remainingMs > 0 && (
-                    <div className="text-xs tracking-[0.18em] text-cyan-300/85 tabular-nums">
-                      {formatRemaining(remainingMs)}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
+      <div className="grid grid-cols-5 gap-1.5">
+        {Array.from({ length: slots }).map((_, i) => (
+          <CardTile
+            key={i}
+            index={i}
+            duel={duel}
+            myIsP0={myIsP0}
+            ticks={ticks}
+            nowMs={nowMs}
+          />
+        ))}
       </div>
-
-      {/* Desktop scroll buttons. Hidden by default; fade in on hover of
-          the card-list area. The `hover:` Tailwind variant only fires
-          on devices with a hovering pointer (desktop), so touch
-          devices never see them — they have native swipe. */}
-      <button
-        type="button"
-        aria-label="scroll left"
-        onClick={() => scrollByDir(-1)}
-        className="pixel-tile absolute top-1/2 left-0 hidden -translate-y-1/2 cursor-pointer items-center justify-center bg-black/55 px-2 py-3 text-white opacity-0 transition-opacity group-hover/cards:opacity-100 hover:bg-black/70 [@media(hover:hover)]:flex"
-      >
-        ◀
-      </button>
-      <button
-        type="button"
-        aria-label="scroll right"
-        onClick={() => scrollByDir(1)}
-        className="pixel-tile absolute top-1/2 right-0 hidden -translate-y-1/2 cursor-pointer items-center justify-center bg-black/55 px-2 py-3 text-white opacity-0 transition-opacity group-hover/cards:opacity-100 hover:bg-black/70 [@media(hover:hover)]:flex"
-      >
-        ▶
-      </button>
     </div>
   )
 }
@@ -631,13 +607,11 @@ function formatRemaining(ms: number): string {
 }
 
 /**
- * One card in the 5-across deck strip. Fixed-width via the parent's
- * `grid-cols-5`, so the layout doesn't jitter as live PnL values
- * wobble. Pixel-tile clip-path matches the rest of the UI.
- *
- * Imagen drop-in spots are marked `TODO(imagen)` — generate the PNGs
- * into `apps/web/public/assets/cards/` and swap the placeholder text
- * for `<img>` to elevate.
+ * One card in the deck grid — same visual language as practice mode's
+ * lockup strip (swipe-screen's cousin in routes/game/practice.tsx): a flat
+ * bordered tile that fades emerald/rose once its outcome is known, mine +
+ * opponent's picks as colored ↑/↓ glyphs (mine bright, theirs dimmed), no
+ * arrow/badge art.
  */
 function CardTile({
   index,
@@ -659,6 +633,11 @@ function CardTile({
     ? myIsP0
       ? swipeRow.p0Swipe
       : swipeRow.p1Swipe
+    : null
+  const oppSwipe = swipeRow
+    ? myIsP0
+      ? swipeRow.p1Swipe
+      : swipeRow.p0Swipe
     : null
   const tick = card ? ticks[card.expiry_market_id] : undefined
   const myPnl: bigint | null =
@@ -682,60 +661,73 @@ function CardTile({
   const settledNow = Boolean(outcome) || tick?.settled === true
   const state: CardState =
     settledNow && myPnl !== null ? (myPnl < 0n ? "loss" : "win") : "live"
-
-  const badgeSrc = CARD_BADGE_SRC[state]
+  const remainingMs =
+    !settledNow && card?.expiryMs !== undefined
+      ? Math.max(0, card.expiryMs - nowMs)
+      : null
 
   return (
     <div
-      className={`pixel-tile relative flex aspect-[3/4] flex-col items-center justify-between p-1.5 text-center font-pixel ring-inset ${CARD_STATE_STYLES[state]}`}
+      className={`border-2 border-black/55 px-1 py-1.5 text-center font-pixel transition-colors ${
+        state === "win"
+          ? "bg-emerald-900/60"
+          : state === "loss"
+            ? "bg-rose-900/60"
+            : "bg-[#0e1530]"
+      }`}
     >
-      <div className="flex w-full items-center justify-between tracking-[0.15em] uppercase opacity-90">
-        <img
-          src="/assets/cards/asset-btc-16.png"
-          alt="BTC"
-          className="block h-7 w-7 [image-rendering:pixelated]"
-        />
-        {card && (
-          <span className="flex items-center gap-1 text-xs leading-none tabular-nums">
-            {state === "live" && (
-              <span
-                aria-label="live"
-                className="inline-block size-1.5 animate-pulse bg-cyan-300 shadow-[0_0_5px_rgba(125,230,255,0.9)]"
-              />
-            )}
-            ${fmtStrike(card.strike)}
-          </span>
-        )}
-      </div>
-
-      {/* Arrow = your prediction. The badge tells you whether it won;
-          the strike above gives context for what you were betting on. */}
-      <img
-        src={
-          mySwipe?.isUp
-            ? "/assets/cards/up-arrow-pixel.png"
-            : "/assets/cards/down-arrow-pixel.png"
-        }
-        alt={mySwipe?.isUp ? "predicted up" : "predicted down"}
-        className="block h-12 w-12 [image-rendering:pixelated]"
-      />
-
-      <div className="flex w-full flex-col items-center gap-1">
-        {badgeSrc && (
-          <img
-            src={badgeSrc}
-            alt={state}
-            className={`block h-10 w-auto [image-rendering:pixelated] ${
-              state === "live" ? "animate-pulse" : ""
-            }`}
+      <p className="flex items-center justify-center gap-1 text-[11px] text-white/60 uppercase tabular-nums">
+        {state === "live" && (
+          <span
+            aria-label="live"
+            className="inline-block size-1.5 animate-pulse bg-cyan-300 shadow-[0_0_5px_rgba(125,230,255,0.9)]"
           />
         )}
+        {card ? fmtUsd(card.strike) : "—"}
+      </p>
+      {/* your pick (bright) · opponent's pick (dimmed) — green up, red down */}
+      <p className="text-xl leading-tight">
         <span
-          className={`text-base leading-none tabular-nums ${pnlTextColor(myPnl)}`}
+          className={
+            mySwipe
+              ? mySwipe.isUp
+                ? "text-emerald-300"
+                : "text-rose-300"
+              : "text-white/40"
+          }
         >
-          {myPnl === null ? "—" : signedPercent(myPnl, mySwipe)}
+          {mySwipe ? (mySwipe.isUp ? "↑" : "↓") : "—"}
         </span>
-      </div>
+        <span className="px-1 text-sm text-white/30">·</span>
+        <span
+          className={
+            oppSwipe
+              ? oppSwipe.isUp
+                ? "text-emerald-300/50"
+                : "text-rose-300/50"
+              : "text-white/40"
+          }
+        >
+          {oppSwipe ? (oppSwipe.isUp ? "↑" : "↓") : "…"}
+        </span>
+      </p>
+      <p
+        className={`text-sm uppercase tabular-nums ${
+          state === "win"
+            ? "text-emerald-300"
+            : state === "loss"
+              ? "text-rose-300"
+              : "text-cyan-300"
+        }`}
+      >
+        {settledNow
+          ? myPnl === null
+            ? "skipped"
+            : signedPercent(myPnl, mySwipe)
+          : remainingMs !== null
+            ? formatRemaining(remainingMs)
+            : "—"}
+      </p>
     </div>
   )
 }
@@ -754,23 +746,4 @@ function signedPercent(
 ): string {
   if (!swipe) return "—"
   return fmtPnlPct(micro, BigInt(swipe.quantity))
-}
-
-/**
- * Tailwind text color for a per-card PnL: green when up, red when down,
- * muted when flat/unknown. Reflects the PnL sign, not the swipe
- * direction — a correct "down" call is still green.
- */
-function pnlTextColor(micro: bigint | null): string {
-  if (micro === null || micro === 0n) return "text-white/70"
-  return micro > 0n ? "text-emerald-300" : "text-rose-300"
-}
-
-/**
- * Format a Move-side strike (on the 1e9 scale) as a whole-dollar label.
- * Full digits — no abbreviation, since the strip scrolls horizontally
- * if 5+ cards × full strike values overflow the container.
- */
-function fmtStrike(raw: string): string {
-  return Math.round(Number(BigInt(raw)) / 1_000_000_000).toString()
 }

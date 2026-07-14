@@ -118,6 +118,7 @@ registerLimit("deckmaster:generate", { capacity: 3, refillPerSec: 1 / 5 })
 registerLimit("sponsor", { capacity: 200, refillPerSec: 2 })
 registerLimit("ws:practice_start", { capacity: 2, refillPerSec: 1 / 10 })
 registerLimit("ws:queue_join", { capacity: 3, refillPerSec: 1 / 2 })
+registerLimit("ws:spot_subscribe", { capacity: 4, refillPerSec: 1 / 2 })
 //   - chat_send / chat_react        1 msg / 1.5 s, burst 4
 registerLimit("ws:chat_send", { capacity: 4, refillPerSec: 1 / 1.5 })
 registerLimit("ws:chat_react", { capacity: 6, refillPerSec: 1 / 1 })
