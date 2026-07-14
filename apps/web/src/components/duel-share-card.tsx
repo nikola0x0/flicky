@@ -108,7 +108,7 @@ export const DuelShareCard = forwardRef<
           flicky
         </span>
         <span className="text-xs tracking-[0.1em] text-white/35">
-          play at flicky.gg
+          play at flicky.site
         </span>
       </footer>
     </div>
