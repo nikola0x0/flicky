@@ -68,6 +68,13 @@ interface DuelLite {
   p0NextCardIdx: number
   p1NextCardIdx: number
   startedAtMs: bigint
+  /**
+   * On-chain `Duel.cards_settled[i]` — flips true once `settle_card(i)`
+   * lands, independent of the other cards. `tryClose` uses this to settle
+   * cards incrementally as their own market resolves, rather than waiting
+   * for every card's market to settle before touching any of them.
+   */
+  cardsSettled: boolean[]
 }
 
 const STATUS_MAP: Record<string, "PENDING" | "ACTIVE" | "COMPLETE"> = {
@@ -164,6 +171,7 @@ export function parseDuelFromObject(
     p0_next_card_idx: string | number
     p1_next_card_idx: string | number
     started_at_ms: string | number
+    cards_settled?: boolean[]
   }
   if (!f.id || f.status === undefined) return null
   const typeMatch = type?.match(/Duel<(.+)>$/)
@@ -190,6 +198,9 @@ export function parseDuelFromObject(
     p1NextCardIdx:
       f.p1_next_card_idx !== undefined ? Number(f.p1_next_card_idx) : 0,
     startedAtMs: f.started_at_ms !== undefined ? BigInt(f.started_at_ms) : 0n,
+    cardsSettled: Array.isArray(f.cards_settled)
+      ? f.cards_settled
+      : f.cards.map(() => false),
   }
 }
 
@@ -348,6 +359,31 @@ export function resolveCardPremiums(
   return { p0Premium: p0.value, p1Premium: p1.value }
 }
 
+/**
+ * Card indices ready for a `settle_card` call right now: not already
+ * settled on-chain (`cardsSettled[i]` false) AND their market has a known
+ * settlement price. A duel's cards can span markets with very different
+ * lifetimes (upstream 6-24 mixes ~3-min and multi-hour markets), so this
+ * intentionally returns a PARTIAL list rather than requiring every card's
+ * market to be settled — `settle_card`'s only on-chain guard is per-card
+ * idempotency, so settling cards as their own market resolves (rather than
+ * waiting for the slowest straggler) is both safe and correct. Pure so
+ * it's directly unit-testable without RPC mocking.
+ */
+export function readyCardIndices(
+  cards: Array<{ expiryMarketId: string }>,
+  cardsSettled: boolean[],
+  settlementByMarket: Map<string, bigint>
+): number[] {
+  const out: number[] = []
+  for (let i = 0; i < cards.length; i++) {
+    if (cardsSettled[i]) continue
+    if (!settlementByMarket.has(cards[i].expiryMarketId)) continue
+    out.push(i)
+  }
+  return out
+}
+
 export class Keeper {
   readonly client: SuiGrpcClient
   private readonly gql = getGraphQLClient()
@@ -435,8 +471,7 @@ export class Keeper {
       await this.tryReveal(duel)
       if (duel.cards.length === 0) return
 
-      // Happy path: both players completed every swipe AND every card's
-      // ExpiryMarket has settled (per the predict indexer). Partial / stuck
+      // Happy path: both players completed every swipe. Partial / stuck
       // duels are left to the players' own `refund_duel` — the server
       // can't sign on their behalf.
       const deckSize = duel.cards.length
@@ -444,15 +479,30 @@ export class Keeper {
         duel.p0NextCardIdx === deckSize && duel.p1NextCardIdx === deckSize
       if (!bothDone) return
 
+      // Per-card settlement, independent of the deck's OTHER cards. A
+      // duel's 5 cards can span markets with wildly different lifetimes
+      // (upstream 6-24 mixes ~3-min and multi-hour markets) — waiting for
+      // EVERY market to settle before touching ANY card can strand a duel
+      // behind one slow straggler for hours, even though the rest finished
+      // minutes ago. `settle_card`'s only on-chain guard is per-card
+      // idempotency (`cards_settled[i]` must be false), so nothing requires
+      // settling in order or all at once.
       const uniqueMarketIds = Array.from(
         new Set(duel.cards.map((c) => c.expiryMarketId))
       )
       const settlementByMarket = new Map<string, bigint>()
       for (const mid of uniqueMarketIds) {
         const state = await readMarketSettlement(mid)
-        if (!state.settled || state.settlementPrice === null) return
-        settlementByMarket.set(mid, state.settlementPrice)
+        if (state.settled && state.settlementPrice !== null) {
+          settlementByMarket.set(mid, state.settlementPrice)
+        }
       }
+      const readyIdx = readyCardIndices(
+        duel.cards,
+        duel.cardsSettled,
+        settlementByMarket
+      )
+      if (readyIdx.length === 0) return // nothing newly eligible this pass
 
       let p0Wrapper: string | null
       let p1Wrapper: string | null
@@ -474,15 +524,16 @@ export class Keeper {
 
       // Resolve every keeper-fed value BEFORE building the PTB — 6-24
       // exposes no public on-chain read for settlement_price or premium, so
-      // both come from the predict indexer.
-      const settlementPrices: bigint[] = []
-      const p0Premiums: bigint[] = []
-      const p1Premiums: bigint[] = []
-      for (let i = 0; i < duel.cards.length; i++) {
+      // both come from the predict indexer. Only for the READY cards —
+      // cards whose market hasn't settled yet are left for a later pass.
+      const settlementPrices = new Map<number, bigint>()
+      const p0Premiums = new Map<number, bigint>()
+      const p1Premiums = new Map<number, bigint>()
+      for (const i of readyIdx) {
         const card = duel.cards[i]
         const price = settlementByMarket.get(card.expiryMarketId)
-        if (price === undefined) return // defensive; can't happen post-gate above
-        settlementPrices.push(price)
+        if (price === undefined) continue // defensive; can't happen post-gate above
+        settlementPrices.set(i, price)
         const p0Swipe = duel.p0Swipes[i]
         const p1Swipe = duel.p1Swipes[i]
         const p0Result = p0Swipe
@@ -500,23 +551,20 @@ export class Keeper {
           )
         }
         const { p0Premium, p1Premium } = resolveCardPremiums(p0Result, p1Result)
-        p0Premiums.push(p0Premium)
-        p1Premiums.push(p1Premium)
+        p0Premiums.set(i, p0Premium)
+        p1Premiums.set(i, p1Premium)
       }
 
       const tx = new Transaction()
 
-      // 1) `settle_card` per card, then `finalize`. Each settle_card scores
-      //    both players' swipes on ONE card against the keeper-fed
-      //    settlement_price and reads each player's LIVE AccountWrapper
-      //    position (anti-replay: `predict_account::has_position`) to flag
-      //    early-redeemers. All settles MUST run before any redeem in this
-      //    PTB — redeeming first would zero the positions and make every
-      //    swipe score as "redeemed early". `finalize` (no market arg)
-      //    distributes the pot from the accumulated per-player payout /
-      //    premium fields filled by settle_card.
-      const settledCount = duel.cards.length
-      for (let i = 0; i < settledCount; i++) {
+      // 1) `settle_card` for each READY card. Scores both players' swipes
+      //    on that card against the keeper-fed settlement_price and reads
+      //    each player's LIVE AccountWrapper position (anti-replay:
+      //    `predict_account::has_position`) to flag early-redeemers. All
+      //    settles MUST run before any redeem in this PTB — redeeming
+      //    first would zero the positions and make every swipe score as
+      //    "redeemed early".
+      for (const i of readyIdx) {
         tx.moveCall({
           target: `${this.packageId}::duel::settle_card`,
           typeArguments: [duel.stakeCoinType],
@@ -525,24 +573,39 @@ export class Keeper {
             tx.object(p0Wrapper),
             tx.object(p1Wrapper),
             tx.pure.u64(BigInt(i)),
-            tx.pure.u64(settlementPrices[i]),
-            tx.pure.u64(p0Premiums[i]),
-            tx.pure.u64(p1Premiums[i]),
+            tx.pure.u64(settlementPrices.get(i)!),
+            tx.pure.u64(p0Premiums.get(i)!),
+            tx.pure.u64(p1Premiums.get(i)!),
           ],
         })
       }
-      tx.moveCall({
-        target: `${this.packageId}::duel::finalize`,
-        typeArguments: [duel.stakeCoinType],
-        arguments: [tx.object(duelId), tx.object("0x6")],
-      })
 
-      // 2) Redeem every recorded position (both players) so their dUSDC
-      //    payout materializes in their AccountWrapper. `redeem_settled` is
-      //    permissionless (no auth/pricer) but requires a FULL close:
-      //    `close_quantity === redeemed_order.quantity()`.
+      // 2) `finalize` (no market arg — distributes the pot from the
+      //    accumulated per-player payout/premium fields) ONLY once this
+      //    batch clears every remaining card. The contract itself requires
+      //    `settled_count == deck_size` for the normal-resolution path
+      //    (`EAllCardsNotSettled`), so this isn't optional — but there's no
+      //    reason to wait on finalize before settling the cards that ARE
+      //    ready; a later poll picks up any still-unsettled stragglers.
+      const settledAfterThisBatch =
+        duel.cardsSettled.filter(Boolean).length + readyIdx.length
+      const willFinalize = settledAfterThisBatch === deckSize
+      if (willFinalize) {
+        tx.moveCall({
+          target: `${this.packageId}::duel::finalize`,
+          typeArguments: [duel.stakeCoinType],
+          arguments: [tx.object(duelId), tx.object("0x6")],
+        })
+      }
+
+      // 3) Redeem the READY cards' recorded positions (both players) so
+      //    their dUSDC payout materializes in their AccountWrapper as soon
+      //    as that specific card is settled — `redeem_settled` is a
+      //    permissionless Predict call keyed on the position's own market,
+      //    independent of flicky's `Duel.status`/finalize, so it doesn't
+      //    need to wait for the whole deck either.
       let redeemsCount = 0
-      for (let i = 0; i < duel.cards.length; i++) {
+      for (const i of readyIdx) {
         const card = duel.cards[i]
         for (const [wrapper, swipe] of [
           [p0Wrapper, duel.p0Swipes[i]] as const,
@@ -578,9 +641,12 @@ export class Keeper {
         return
       }
       await this.client.waitForTransaction({ digest: res.Transaction.digest })
-      this.finalized.add(duelId)
+      if (willFinalize) this.finalized.add(duelId)
       log.info(
-        `settle_card×${settledCount} + finalize ${shortId(duelId)}` +
+        `settle_card×${readyIdx.length}` +
+          (willFinalize
+            ? ` + finalize ${shortId(duelId)}`
+            : ` ${shortId(duelId)} (${settledAfterThisBatch}/${deckSize})`) +
           (redeemsCount ? ` + ${redeemsCount} redeem(s)` : "") +
           ` · ${shortId(res.Transaction.digest)}`
       )
