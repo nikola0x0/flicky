@@ -31,6 +31,22 @@ interface Rect {
   height: number
 }
 
+/**
+ * Build a CSS `polygon()` for a container-sized overlay with a rectangular
+ * cutout at `r` (container-relative). The polygon traces the container
+ * border clockwise, then traces the cutout counter-clockwise to punch a hole.
+ */
+function cutoutPolygon(r: Rect): string {
+  const t = Math.max(0, r.top - PAD)
+  const l = Math.max(0, r.left - PAD)
+  const b = r.top + r.height + PAD
+  const ri = r.left + r.width + PAD
+  return `polygon(
+    0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%,
+    ${l}px ${t}px, ${l}px ${b}px, ${ri}px ${b}px, ${ri}px ${t}px, ${l}px ${t}px
+  )`
+}
+
 export function SpotlightOverlay() {
   const { active, steps, stepIndex, next, skip } = useOnboardingContext()
   const step = active ? steps[stepIndex] : null
@@ -168,8 +184,12 @@ export function SpotlightOverlay() {
 
   return (
     <div ref={rootRef} className="spotlight-root" aria-hidden>
-      {/* Transparent click-to-skip surface */}
-      <div className="spotlight-backdrop" onClick={skip} />
+      {/* Dark backdrop with cutout — dims everything except the highlighted element */}
+      <div
+        className="spotlight-backdrop"
+        style={{ clipPath: cutoutPolygon(rect) }}
+        onClick={skip}
+      />
 
       {/* Glow ring around the target */}
       <div
