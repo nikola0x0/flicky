@@ -66,6 +66,8 @@ export interface DuelSummary {
   freeDuel: boolean
   oddsLabel: string | null
   netLabel: string | null
+  /** Signed % return on stake, e.g. "+140%" / "-40%" — null on free duels. */
+  returnPctLabel: string | null
   shareText: string
 }
 
@@ -89,6 +91,7 @@ export function summarizeDuelResult(
     ? null
     : `${(Number(payout) / Number(premium)).toFixed(1)}×`
   const netLabel = freeDuel ? null : fmtNetShort(payout - premium)
+  const returnPctLabel = freeDuel ? null : fmtPctSigned(payout, premium)
   const parts = [`${hits}/${totalCards} hits`]
   if (oddsLabel) parts.push(`${oddsLabel} odds`)
   if (netLabel) parts.push(`${netLabel} dUSDC`)
@@ -99,6 +102,7 @@ export function summarizeDuelResult(
     freeDuel,
     oddsLabel,
     netLabel,
+    returnPctLabel,
     shareText: `flicky duel — ${parts.join(" · ")} — watch:`,
   }
 }
@@ -112,4 +116,13 @@ function fmtNetShort(micro: bigint): string {
     ? units.toString()
     : units.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
   return `${sign}${label}`
+}
+
+/** Return on stake as a signed percent: "+140%", "-40%", "+0%". */
+function fmtPctSigned(payout: bigint, premium: bigint): string {
+  const pct = (Number(payout - premium) / Number(premium)) * 100
+  const sign = pct > 0 ? "+" : pct < 0 ? "-" : ""
+  const abs = Math.abs(pct)
+  const label = Number.isInteger(abs) ? abs.toString() : abs.toFixed(1)
+  return `${sign}${label}%`
 }

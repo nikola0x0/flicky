@@ -38,6 +38,7 @@ test("staked duel from the winner's side", () => {
   expect(s.freeDuel).toBe(false)
   expect(s.oddsLabel).toBe("2.4×")
   expect(s.netLabel).toBe("+7")
+  expect(s.returnPctLabel).toBe("+140%")
   expect(s.shareText).toBe(
     "flicky duel — 3/5 hits · 2.4× odds · +7 dUSDC — watch:"
   )
@@ -49,6 +50,7 @@ test("same duel from the loser's side", () => {
   expect(s.hits).toBe(2)
   expect(s.oddsLabel).toBe("0.6×")
   expect(s.netLabel).toBe("-2")
+  expect(s.returnPctLabel).toBe("-40%")
 })
 
 test("authoritative winner field overrides the net comparison", () => {
@@ -80,10 +82,12 @@ test("free duel: no odds/net, hits-only share text", () => {
   expect(s.freeDuel).toBe(true)
   expect(s.oddsLabel).toBeNull()
   expect(s.netLabel).toBeNull()
+  expect(s.returnPctLabel).toBeNull()
   expect(s.shareText).toBe("flicky duel — 3/5 hits — watch:")
 })
 
 test("fractional net trims trailing zeros", () => {
   const s = summarizeDuelResult({ ...staked, p0Payout: "11500000" }, true)
   expect(s.netLabel).toBe("+6.5")
+  expect(s.returnPctLabel).toBe("+130%")
 })
