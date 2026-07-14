@@ -14,7 +14,7 @@
  */
 import { useEffect, useSyncExternalStore } from "react"
 import { CONFIG } from "@/lib/config"
-import { isValidIconId } from "@/lib/avatar-icons"
+import { AVATAR_ICONS, isValidIconId } from "@/lib/avatar-icons"
 
 const API = CONFIG.serverHttpUrl
 const SELF_KEY = "flicky.avatar.self"
@@ -26,6 +26,17 @@ const cache = new Map<string, string | null>()
 const pending = new Set<string>()
 const inflight = new Set<string>()
 let flushScheduled = false
+
+// Addresses a fetch has confirmed have NO `player_profile` row at all —
+// as opposed to a row with `avatar_icon = NULL` (an explicit gradient-only
+// choice). `cache` alone can't tell those apart (both read back as `null`);
+// `ensureStarterAvatar` needs the distinction to know when to auto-assign.
+const confirmedAbsent = new Set<string>()
+// Addresses currently mid-assignment, guarding against `ensureStarterAvatar`
+// being invoked twice for the same key before the first call's fetch
+// resolves (e.g. React StrictMode's dev double-effect) — without this, both
+// calls would independently roll a random icon and race their writes.
+const assigning = new Set<string>()
 
 const listeners = new Set<() => void>()
 function emit() {
@@ -74,6 +85,7 @@ async function fetchChunk(addresses: string[]): Promise<void> {
     // Every requested address is now "known": a valid id, or null for
     // "no row" / explicit gradient-only / anything unexpected.
     for (const a of addresses) {
+      if (!Object.hasOwn(map, a)) confirmedAbsent.add(a)
       const v = map[a]
       cache.set(a, isValidIconId(v) ? v : null)
     }
@@ -90,6 +102,51 @@ async function fetchChunk(addresses: string[]): Promise<void> {
 /** Warm the cache for a known set of addresses (e.g. the leaderboard list). */
 export function prefetchAvatarIcons(addresses: string[]): void {
   for (const a of addresses) enqueue(norm(a))
+}
+
+/** Resolves once `key` is no longer awaiting a fetch, one way or another. */
+function whenSettled(key: string): Promise<void> {
+  const settled = () =>
+    cache.has(key) || (!pending.has(key) && !inflight.has(key))
+  if (settled()) return Promise.resolve()
+  return new Promise((resolve) => {
+    const unsub = subscribe(() => {
+      if (settled()) {
+        unsub()
+        resolve()
+      }
+    })
+  })
+}
+
+/**
+ * Give a brand-new signed-in address a random starter icon, so a first
+ * login isn't a bare gradient. Distinguishes "never had a profile row"
+ * from "explicitly cleared to gradient-only" (the server keeps that as a
+ * present-but-null row) via `confirmedAbsent`, fed by the *same* batched
+ * fetch every `PlayerAvatar` on screen already triggers — piggybacking on
+ * `enqueue` instead of firing an independent request avoids a race where
+ * a second, later-resolving fetch for the same address (issued before the
+ * assignment landed) would overwrite the freshly-assigned icon back to
+ * null. A no-op for any address that already has a row either way. Safe
+ * to call every session (e.g. from the game shell, keyed on the signed-in
+ * address) — it's a no-op past the very first time.
+ */
+export function ensureStarterAvatar(address: string): void {
+  const key = norm(address)
+  if (cache.has(key) || assigning.has(key)) return
+  assigning.add(key)
+  void (async () => {
+    try {
+      enqueue(key)
+      await whenSettled(key)
+      if (!confirmedAbsent.has(key)) return // row exists — real pick or explicit gradient
+      const id = AVATAR_ICONS[Math.floor(Math.random() * AVATAR_ICONS.length)].id
+      setAvatarIcon(address, id)
+    } finally {
+      assigning.delete(key)
+    }
+  })()
 }
 
 // ─── Public read/write (same signatures as the localStorage version) ─────────

@@ -31,6 +31,7 @@ import { MenuButton } from "@/components/menu-button"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { useDusdcBalance, useManagerBalance } from "@/hooks/use-wallet-balances"
+import { ensureStarterAvatar } from "@/lib/avatar-store"
 import { clearPendingSwipe, peekPendingSwipe } from "@/lib/nav-transition"
 import { installAudioUnlock, playSfx, startBgm, stopBgm } from "@/lib/sound"
 import { DeviceFrame } from "@/components/device-frame"
@@ -93,6 +94,12 @@ export default function GameLayout() {
       stopBgm()
     }
   }, [])
+
+  // First login gets a random starter icon instead of a bare gradient.
+  // No-op for returning players — see ensureStarterAvatar's own guard.
+  useEffect(() => {
+    if (account?.address) ensureStarterAvatar(account.address)
+  }, [account?.address])
 
   return (
     <>
