@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import {
+  ensureStarterAvatar,
   getAvatarIcon,
   prefetchAvatarIcons,
   setAvatarIcon,
 } from "./avatar-store"
+import { isValidIconId } from "./avatar-icons"
 
 // The store is a module singleton (cache persists across tests), so each
 // test uses unique addresses to stay isolated. fetch is mocked to record
@@ -82,4 +84,47 @@ test("an already-cached address is not re-fetched", async () => {
   prefetchAvatarIcons(["0xg1"])
   await tick()
   expect(calls.filter((c) => c.method === "GET").length).toBe(before)
+})
+
+test("ensureStarterAvatar assigns a random valid icon when the address has never had a row", async () => {
+  getResponse = {} // key absent — brand-new address
+  ensureStarterAvatar("0xNEW1")
+  await tick()
+  const icon = getAvatarIcon("0xnew1")
+  expect(icon).not.toBeNull()
+  expect(isValidIconId(icon)).toBe(true)
+  const post = calls.find((c) => c.method === "POST")
+  expect(JSON.parse(post!.body!).address).toBe("0xnew1")
+})
+
+test("ensureStarterAvatar is a no-op when a profile row already exists, even null", async () => {
+  getResponse = { "0xold1": null } // explicit gradient-only choice
+  ensureStarterAvatar("0xOLD1")
+  await tick()
+  expect(getAvatarIcon("0xold1")).toBeNull()
+  expect(calls.some((c) => c.method === "POST")).toBe(false)
+})
+
+test("ensureStarterAvatar survives a concurrent PlayerAvatar fetch for the same address", async () => {
+  // Regression: a sibling <PlayerAvatar address={self}> mounting in the
+  // same render also triggers useAvatarIcon → enqueue for this address.
+  // Both calls must collapse into ONE request, so the random assignment
+  // isn't clobbered back to null by a second, independently-issued fetch
+  // resolving after it.
+  getResponse = {} // brand-new address, no row yet
+  ensureStarterAvatar("0xRACE1")
+  prefetchAvatarIcons(["0xRACE1"]) // simulates the sibling PlayerAvatar
+  await tick()
+  expect(calls.filter((c) => c.method === "GET")).toHaveLength(1)
+  const icon = getAvatarIcon("0xrace1")
+  expect(icon).not.toBeNull()
+  expect(isValidIconId(icon)).toBe(true)
+})
+
+test("ensureStarterAvatar does not double-assign when called twice before the fetch resolves", async () => {
+  getResponse = {} // brand-new address
+  ensureStarterAvatar("0xDOUBLE1")
+  ensureStarterAvatar("0xDOUBLE1") // e.g. React StrictMode's dev double-effect
+  await tick()
+  expect(calls.filter((c) => c.method === "POST")).toHaveLength(1)
 })
