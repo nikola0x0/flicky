@@ -107,7 +107,6 @@ export function DuelResultModal({
     setShareState("working")
     void shareCardImage(cardRef.current, {
       text: summary.shareText,
-      url,
       filename: `flicky-duel-${duelId}.png`,
     }).then((status) => {
       if (status === "cancelled" || status === "failed") {

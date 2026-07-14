@@ -9,10 +9,16 @@ export type ShareImageStatus = "shared" | "downloaded" | "cancelled" | "failed"
  * a browser download otherwise. `cacheBust` matters here: avatar
  * gradients/images are re-rendered fresh per share, and a stale cached
  * capture would show an outdated card.
+ *
+ * Deliberately does NOT include the duel URL in the shared text: several
+ * share targets (macOS's system share sheet among them) auto-generate a
+ * rendered link-preview thumbnail for any URL in the text, which then
+ * pastes as a second image alongside the actual PNG. The URL has its own
+ * dedicated path — the "copy link" button.
  */
 export async function shareCardImage(
   node: HTMLElement,
-  opts: { text: string; url: string; filename: string }
+  opts: { text: string; filename: string }
 ): Promise<ShareImageStatus> {
   let blob: Blob | null
   try {
@@ -33,9 +39,7 @@ export async function shareCardImage(
 
   if (canShareFile) {
     try {
-      // Fold the url into text rather than passing a separate `url` field —
-      // some browsers reject combining `files` with `url` in one share.
-      await nav.share({ files: [file], text: `${opts.text} ${opts.url}` })
+      await nav.share({ files: [file], text: opts.text })
       return "shared"
     } catch (e) {
       if (e instanceof Error && e.name === "AbortError") return "cancelled"
