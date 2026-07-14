@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react"
+import { playSfx } from "@/lib/sound"
 
 type Variant = "default" | "bordered"
 
@@ -28,6 +29,7 @@ export function PixelButton({
   className = "",
   children,
   type = "button",
+  onClick,
   ...rest
 }: PixelButtonProps) {
   const variantClass =
@@ -39,6 +41,10 @@ export function PixelButton({
     <button
       type={type}
       className={` ${variantClass} group inline-flex items-center justify-center px-3 py-2 text-lg text-white uppercase sm:text-lg ${className} `}
+      onClick={(e) => {
+        playSfx("click")
+        onClick?.(e)
+      }}
       {...rest}
     >
       {children}

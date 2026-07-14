@@ -10,6 +10,7 @@ import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
 import { fetchSeason, prizeForRank, type Season } from "@/lib/season"
 import { fmtCountdown } from "@/lib/countdown"
 import { useNow } from "@/lib/use-now"
+import { playSfx } from "@/lib/sound"
 import type { CSSProperties } from "react"
 
 const BLUE_BRAND_STYLE = {
@@ -348,6 +349,7 @@ function Empty() {
       </p>
       <Link
         to="/game/pvp"
+        onClick={() => playSfx("click")}
         className="mt-1 rounded border border-white/30 bg-white/5 px-3 py-1 text-sm tracking-wider uppercase hover:bg-white/10"
       >
         find a duel
