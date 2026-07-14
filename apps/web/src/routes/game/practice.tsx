@@ -155,7 +155,7 @@ function IntroView({
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-5 px-4 text-center">
       <img
-        src="/banners/mode-practice.png"
+        src="/banners/mode-practice.webp"
         alt=""
         aria-hidden
         className="pixel-tile no-hover w-full max-w-xs [image-rendering:pixelated]"

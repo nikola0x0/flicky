@@ -7,7 +7,7 @@
 export function SeasonBanner({ className = "" }: { className?: string }) {
   return (
     <img
-      src="/banners/session-banner.png"
+      src="/banners/session-banner.webp"
       alt="season 1"
       className={`block aspect-[3/1] w-full object-cover [image-rendering:pixelated] ${className}`}
     />

@@ -18,7 +18,7 @@ export default function GameHome() {
         className="pointer-events-none absolute inset-0 -z-10 bg-cover bg-top bg-no-repeat [image-rendering:pixelated]"
         style={{
           backgroundImage:
-            "linear-gradient(180deg, #151837 0%, rgba(21,24,55,0) 18%, rgba(27,37,72,0) 70%, #1b2548 100%), url(/assets/home/home-bg.png)",
+            "linear-gradient(180deg, #151837 0%, rgba(21,24,55,0) 18%, rgba(27,37,72,0) 70%, #1b2548 100%), url(/assets/home/home-bg.webp)",
         }}
       />
       {/* Season 0 promo — tap through to the leaderboard/prizes. */}

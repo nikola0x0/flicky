@@ -416,7 +416,7 @@ export default function DuelView() {
         className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[28%] bg-cover bg-top bg-no-repeat [image-rendering:pixelated]"
         style={{
           backgroundImage:
-            "linear-gradient(180deg, rgba(27,37,72,0) 0%, rgba(27,37,72,0.6) 50%, #1b2548 85%), url(/assets/duel/duel-header.png)",
+            "linear-gradient(180deg, rgba(27,37,72,0) 0%, rgba(27,37,72,0.6) 50%, #1b2548 85%), url(/assets/duel/duel-header.webp)",
         }}
       />
       <header className="flex items-center justify-between">

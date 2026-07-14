@@ -165,7 +165,7 @@ function StandbyView({
   return (
     <div className="flex h-full flex-col gap-5 px-4 py-4">
       <img
-        src="/banners/pvp-banner.png"
+        src="/banners/pvp-banner.webp"
         alt="pvp duel"
         className="mt-4 block aspect-video w-full object-cover [image-rendering:pixelated]"
       />
@@ -332,7 +332,7 @@ function QueueScreen({
           feel — no scale, no expanding pings. */}
       <div className="relative -mx-4">
         <img
-          src="/banners/searching.png"
+          src="/banners/searching.webp"
           alt="searching for opponent"
           className="block aspect-video w-full [mask-image:linear-gradient(to_bottom,transparent_0%,black_8%,black_78%,transparent_100%)] object-cover [image-rendering:pixelated]"
         />

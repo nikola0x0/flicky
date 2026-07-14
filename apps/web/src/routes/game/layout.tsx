@@ -115,7 +115,7 @@ export default function GameLayout() {
             className="pointer-events-none absolute inset-0 -z-10 bg-cover bg-top bg-no-repeat [image-rendering:pixelated]"
             style={{
               backgroundImage:
-                "linear-gradient(180deg, rgba(10,14,30,0.6) 0%, rgba(16,20,40,0.32) 22%, rgba(16,22,46,0.45) 62%, #10162e 100%), url(/duel/duel-bg.png)",
+                "linear-gradient(180deg, rgba(10,14,30,0.6) 0%, rgba(16,20,40,0.32) 22%, rgba(16,22,46,0.45) 62%, #10162e 100%), url(/duel/duel-bg.webp)",
             }}
           />
         )}

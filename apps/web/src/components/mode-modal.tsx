@@ -19,7 +19,7 @@ const MODES: ModeInfo[] = [
     title: "Practice",
     tagline: "Familiarize yourself with bots. No pressure.",
     icon: "/icons/joystick.png",
-    banner: "/banners/mode-practice.png",
+    banner: "/banners/mode-practice.webp",
     to: "/game/practice",
     headerStyle: { backgroundColor: "#3a8a4a" },
   },
