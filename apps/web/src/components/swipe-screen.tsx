@@ -18,6 +18,7 @@ import { SWIPE_QUANTITY } from "@/lib/funding"
 import { fmtDusdc } from "@/lib/deepbook"
 import { liveCardPnl, fmtPnlPct, upProbability } from "@/lib/pnl"
 import { toSwipeLite, type RoomState } from "@/lib/room-state"
+import { playSfx } from "@/lib/sound"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { BtcSpotChart } from "@/components/btc-spot-chart"
 
@@ -134,6 +135,7 @@ export function SwipeScreen({
 
   const doSwipe = async (isUp: boolean) => {
     if (disabled) return
+    playSfx(isUp ? "swipe-up" : "swipe-down")
     setBusy(true)
     setError(null)
     try {
