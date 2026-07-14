@@ -99,7 +99,7 @@ export default function GameChat() {
 
       <div
         ref={scrollRef}
-        className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-3 [mask-image:linear-gradient(to_bottom,transparent_0%,black_6%,black_100%)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {messages.length === 0 ? (
           <Empty />
