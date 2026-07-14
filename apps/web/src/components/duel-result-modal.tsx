@@ -172,6 +172,14 @@ export function DuelResultModal({
             {copy.title}
           </h2>
 
+          {!summary.freeDuel && summary.returnPctLabel && (
+            <p
+              className={`mt-1 text-center text-5xl font-bold tabular-nums ${copy.tone}`}
+            >
+              {summary.returnPctLabel}
+            </p>
+          )}
+
           <div className="mt-5 flex items-center justify-center gap-4">
             <PlayerAvatar address={myAddress} size={64} />
             <span className="text-xl tracking-[0.2em] text-white/55 uppercase">
