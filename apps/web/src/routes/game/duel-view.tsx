@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useParams } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
@@ -241,6 +241,11 @@ export default function DuelView() {
     [duel, isParticipant, myIsP0]
   )
   const [resultOpen, setResultOpen] = useState(false)
+  // Stable identity across the 1 Hz `nowMs` re-render — DuelResultModal's
+  // fanfare/escape/scroll-lock effect depends on `onClose`, so an inline
+  // arrow here would re-fire that effect (and replay the sfx) every
+  // second while the modal is open.
+  const closeResult = useCallback(() => setResultOpen(false), [])
   // Auto-open exactly once per duel per browser: the seen-key guard
   // means a refresh or revisit never re-pops it (the "share result"
   // button below reopens on demand). Demo mode never completes.
@@ -474,7 +479,7 @@ export default function DuelView() {
       {summary && (
         <DuelResultModal
           open={resultOpen}
-          onClose={() => setResultOpen(false)}
+          onClose={closeResult}
           duelId={duel.id}
           summary={summary}
           myAddress={address}

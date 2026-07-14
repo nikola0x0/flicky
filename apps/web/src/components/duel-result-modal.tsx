@@ -77,10 +77,14 @@ export function DuelResultModal({
     void navigator.share({ text: summary.shareText, url }).catch(() => {})
   }
   const onCopy = () => {
-    void navigator.clipboard
-      .writeText(url)
-      .then(() => setCopied(true))
-      .catch(() => {})
+    try {
+      void navigator.clipboard
+        ?.writeText(url)
+        .then(() => setCopied(true))
+        .catch(() => {})
+    } catch {
+      /* clipboard unavailable — enhancement only */
+    }
   }
 
   return createPortal(
