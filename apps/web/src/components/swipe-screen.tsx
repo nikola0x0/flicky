@@ -241,11 +241,13 @@ export function SwipeScreen({
         </span>
         <div className="flex gap-2">
           <ChartChip
+            id="chart-btc"
             label="btc"
             icon="/icons/coins.png"
             onClick={() => setChartModal("btc")}
           />
           <ChartChip
+            id="chart-pnl"
             label="pnl"
             icon="/icons/arrow_up_down.png"
             onClick={() => setChartModal("pnl")}
@@ -297,7 +299,10 @@ export function SwipeScreen({
           )}
 
           {/* title banner */}
-          <div className="flex items-center justify-between border-2 border-black/55 bg-[#0e1530] px-2.5 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.45)]">
+          <div
+            id="card-title"
+            className="flex items-center justify-between border-2 border-black/55 bg-[#0e1530] px-2.5 py-1.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.45)]"
+          >
             <span className="flex items-center gap-1.5 font-pixel text-base tracking-[0.18em] text-amber-300 uppercase">
               <img
                 src="/assets/cards/asset-btc-16.png"
@@ -332,7 +337,10 @@ export function SwipeScreen({
           </div>
 
           {/* TCG quote box */}
-          <div className="relative border-2 border-black/55 bg-[#11183a] px-3 py-2.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.5)]">
+          <div
+            id="strike-box"
+            className="relative border-2 border-black/55 bg-[#11183a] px-3 py-2.5 shadow-[inset_0_2px_0_rgba(255,255,255,0.06),inset_0_-2px_0_rgba(0,0,0,0.5)]"
+          >
             <div className="pointer-events-none absolute inset-1 border border-white/10" />
             <p className="font-pixel text-sm tracking-[0.22em] text-amber-300/80 uppercase">
               will btc settle
@@ -342,6 +350,7 @@ export function SwipeScreen({
             </p>
             {(settleLabel || countdown) && (
               <p
+                id="card-countdown"
                 className={`mt-1.5 flex items-center gap-1.5 font-pixel text-sm tracking-[0.2em] uppercase tabular-nums ${
                   settleLabel ? "text-cyan-300" : countdownColor
                 }`}
@@ -397,7 +406,7 @@ export function SwipeScreen({
           </div>
 
           {/* yes / no action chips — with estimated per-side win odds */}
-          <div className="grid grid-cols-2 gap-2">
+          <div id="yes-no-chips" className="grid grid-cols-2 gap-2">
             <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#3a1620] px-2 py-2">
               <img
                 src="/icons/arrow_left.png"
@@ -476,13 +485,16 @@ function ChartChip({
   label,
   icon,
   onClick,
+  id,
 }: {
   label: string
   icon: string
   onClick: () => void
+  id?: string
 }) {
   return (
     <button
+      id={id}
       type="button"
       onClick={onClick}
       className="pixel-tile flex items-center gap-1.5 bg-[#3a4d8a] px-3 py-2 font-pixel text-base tracking-[0.15em] text-white uppercase hover:bg-[#46599e]"

@@ -1,12 +1,3 @@
-/**
- * Practice mode — solo vs. bot, no queue, no chain. The whole match runs
- * client-side off `usePracticeSession`; the server only supplies the
- * synthetic deck and the live `spot_tick` stream. Flow:
- *   INTRO → SWIPING (untimed, bot reveals its pick 1–3s behind you)
- *         → LOCKUP (45s: live chart + strike lines, cards flip as they
- *           expire against real Pyth spot)
- *         → RESULT (PnL verdict + 1/p × speed points recap).
- */
 import { useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
@@ -44,6 +35,7 @@ export default function GamePractice() {
       <div className="flex items-center justify-between">
         <h2 className="text-3xl tracking-[0.2em] uppercase">Practice</h2>
         <button
+          id="exit-button"
           type="button"
           onClick={() => navigate("/game/home")}
           className="rounded border border-white/25 bg-black/40 px-3 py-1 text-lg backdrop-blur-md hover:bg-black/55"
@@ -244,7 +236,10 @@ function LockupView({
             {Math.ceil(remainingMs / 1000)}s
           </span>
         </div>
-        <div className="h-2 border-2 border-black/55 bg-[#0e1530]">
+        <div
+          id="lockup-bar"
+          className="h-2 border-2 border-black/55 bg-[#0e1530]"
+        >
           <div
             className="h-full bg-cyan-400 transition-[width] duration-200 ease-linear"
             style={{ width: `${frac * 100}%` }}
@@ -365,7 +360,10 @@ function ResultView({
 }) {
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto">
-      <div className="rounded border-2 border-black/55 bg-[#1b2548] p-4 text-center">
+      <div
+        id="result-view"
+        className="rounded border-2 border-black/55 bg-[#1b2548] p-4 text-center"
+      >
         {!result.tied && (
           <img
             src={
@@ -396,6 +394,7 @@ function ResultView({
       <CardLedger roomState={roomState} myIsP0={true} ticks={ticks} />
       <div className="mt-auto flex flex-col gap-2">
         <button
+          id="play-again-button"
           type="button"
           onClick={onPlayAgain}
           className="pixel-tile bg-emerald-600 px-4 py-3 font-pixel text-sm uppercase"
@@ -403,12 +402,14 @@ function ResultView({
           play again
         </button>
         <Link
+          id="find-match-link"
           to="/game/pvp"
           className="pixel-tile no-hover bg-[#3a4d8a] px-4 py-3 text-center font-pixel text-sm uppercase"
         >
           find a real match
         </Link>
         <Link
+          id="back-home-link"
           to="/game/home"
           className="pixel-tile no-hover bg-[#1b2548] px-4 py-3 text-center font-pixel text-sm uppercase"
         >

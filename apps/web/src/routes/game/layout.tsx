@@ -1,7 +1,12 @@
 import { Fragment, useEffect, useRef, useState } from "react"
-import { Link, NavLink, Outlet, useLocation } from "react-router"
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router"
 import type { CSSProperties } from "react"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
+import {
+  OnboardingProvider,
+  useOnboardingContext,
+} from "@/components/onboarding-context"
+import { SpotlightOverlay } from "@/components/HighlightOverlay"
 
 /**
  * Game-route context, passed through react-router's <Outlet />. Lets
@@ -102,7 +107,7 @@ export default function GameLayout() {
   }, [account?.address])
 
   return (
-    <>
+    <OnboardingProvider>
       <DeviceFrame className={isPvp ? "bg-checker-dark" : "bg-[#1b2548]"}>
         {isPlay && (
           <div
@@ -114,9 +119,6 @@ export default function GameLayout() {
             }}
           />
         )}
-        {/* On the signed-out empty state the header's only control is a
-            sign-in button, now redundant with the centered CTA below — so
-            drop the header there and let the prompt own the full area. */}
         {showOutlet && (
           <FrameHeader
             onSignInClick={() => setLoginOpen(true)}
@@ -132,7 +134,10 @@ export default function GameLayout() {
           )}
         </main>
         <FrameBottomNav />
+        <SpotlightOverlay />
       </DeviceFrame>
+
+      <WelcomeTourTrigger />
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
       {account && (
@@ -142,8 +147,45 @@ export default function GameLayout() {
           onClose={() => setDepositOpen(false)}
         />
       )}
-    </>
+    </OnboardingProvider>
   )
+}
+
+/**
+ * Triggers the unified "welcome" tour when a signed-in player first
+ * arrives (e.g. just logged in). Navigates to /game/home if needed so
+ * the tour always starts from the home screen.
+ */
+function WelcomeTourTrigger() {
+  const account = useCurrentAccount()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const { startTour, hasSeen } = useOnboardingContext()
+  const redirected = useRef(false)
+
+  // Effect 1: Redirect to /game/home on first sign-in (if not already there).
+  useEffect(() => {
+    if (!account?.address || redirected.current) return
+    if (hasSeen("welcome")) return
+    if (location.pathname !== "/game/home") {
+      redirected.current = true
+      navigate("/game/home")
+    }
+  }, [account?.address, hasSeen, navigate, location.pathname])
+
+  // Effect 2: Start the welcome tour once the player is on /game/home.
+  // This fires independently of the redirect, so a navigate() in Effect 1
+  // won't cancel it.
+  useEffect(() => {
+    if (!account?.address) return
+    if (hasSeen("welcome")) return
+    if (location.pathname !== "/game/home") return
+
+    const t = setTimeout(() => startTour("welcome"), 700)
+    return () => clearTimeout(t)
+  }, [account?.address, hasSeen, startTour, location.pathname])
+
+  return null
 }
 
 /**
@@ -313,6 +355,7 @@ function HeaderBalances({
   return (
     <div className="flex items-center gap-5">
       <Link
+        id="header-avatar"
         to="/profile"
         aria-label="open profile"
         state={{ from: location.pathname }}
@@ -323,12 +366,14 @@ function HeaderBalances({
       </Link>
       <div className="flex items-center gap-4">
         <BalanceChip
+          id="balance-wallet"
           icon="/tokens/usdc-icon.png"
           amount={(dusdc ?? 0).toFixed(2)}
           label="wallet"
           onClick={onAddClick}
         />
         <BalanceChip
+          id="balance-manager"
           icon="/tokens/manager-usdc.png"
           amount={managerBalance.toFixed(2)}
           label="manager"
@@ -374,6 +419,7 @@ function NavTab({
 }) {
   return (
     <NavLink
+      id={`nav-${label}`}
       to={to}
       aria-label={label}
       onClick={() => playSfx("click")}
@@ -424,6 +470,7 @@ function FeaturedNavTab({
 }) {
   return (
     <NavLink
+      id={`nav-${label}`}
       to={to}
       aria-label={label}
       onClick={() => playSfx("click")}
