@@ -51,7 +51,7 @@ What to look for — these are the things that separate Flicky from a generic Pr
 ```
 
 1. **Sign in** — zkLogin via Enoki (Google OAuth → Sui address), or connect an existing wallet. No seed phrase, no extension required either way. On first sign-in, a Predict funding account is created for you, **sponsored by Flicky** — the app calls it your "manager." Your wallet only ever holds dUSDC.
-2. **Fund & queue** — deposit dUSDC (or use the in-app SUI → dUSDC swap — a testnet convenience for trying the game, not a core feature), pick a stake tier (**1 / 3 / 5 / 10 dUSDC**), and enter matchmaking, which pairs you against an opponent close to your rating. Entry is gated on the manager holding **≥ 5 dUSDC** (worst-case premium across a full 5-card deck).
+2. **Fund & queue** — deposit dUSDC (or use the in-app SUI → dUSDC swap — a testnet convenience for trying the game, not a core feature), pick a stake tier (**1 / 5 / 10 dUSDC**), and enter matchmaking, which pairs you against an opponent close to your rating. Entry is gated on the manager holding **≥ 5 dUSDC** (worst-case premium across a full 5-card deck).
 3. **Match & reveal** — matchmaking pairs two players into a Move `Duel` shared object that escrows both stakes. The deck is **commit-reveal**: hashed at `create_duel`, revealed only at match start, so neither player can pre-stage trades.
 4. **Swipe (≤ 5 min)** — swipe right = YES, left = NO, through every card in the deck. Each swipe fires a **single atomic PTB** that mints on *your own* Predict account (opening a real Predict position) and calls `record_swipe` on the shared `Duel` (logging your direction and the mint's order id, so the swipe can never be replayed or forged). No wallet popup — the PTB is gas-sponsored.
 5. **Lockup / watch** — once both players finish swiping (or the clock expires), the duel enters a shared live view of spot vs. strike, ticking toward each card's expiry, with live per-card PnL for both players. Dead waiting time becomes the ritual.
@@ -74,7 +74,7 @@ Highest total PnL wins the entire dUSDC side-pot; a tie splits it. **Predict's o
 ### Modes
 
 - **Practice** — solo vs. a bot, swiping a synthetic deck priced off live BTC spot. No stake, no chain calls at all — the on-ramp for the swipe loop, and where the onboarding tour lives.
-- **Staked PvP** — 1v1 duels with real dUSDC side-pots at fixed tiers (1 / 3 / 5 / 10 dUSDC) and ranked MMR.
+- **Staked PvP** — 1v1 duels with real dUSDC side-pots at fixed tiers (1 / 5 / 10 dUSDC) and ranked MMR.
 - The contract also exposes a free/social PvP path (`*_free` entrypoints — join, swipe, settle, finalize) that mirrors staked play with the stake removed, so a no-stake head-to-head mode is a UI toggle away rather than a new engine.
 
 Staked and free/social PvP run the exact same swipe → lockup → settlement flow on-chain; only the money flow is gated. Practice is a separate, fully off-chain mode built for onboarding.
@@ -116,7 +116,7 @@ flicky/
 ├── apps/
 │   ├── web        # Vite + React 19 — swipe UI, lockup view, share card
 │   ├── server     # Bun — WebSocket relay, indexer, settled-redeem keeper,
-│   │              #       sponsored-gas service, AI Deckmaster
+│   │              #       sponsored-gas service, Deckmaster
 │   └── contracts  # Move package (duel engine + season/swap side-packages)
 │                  #   + TS deploy/upgrade/codegen scripts
 └── packages/

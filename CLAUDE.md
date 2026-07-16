@@ -11,7 +11,7 @@ Flicky is a Tinder-style PvP prediction-duel built on Sui + DeepBook Predict. Tw
 Bun workspaces + Turborepo monorepo.
 
 - `apps/web` — Vite + React 19 + Tailwind v4 + shadcn/ui. Swipe UI, lockup view.
-- `apps/server` — Bun runtime (`Bun.serve`). WebSocket relay, settled-redeem keeper, sponsored-gas service, AI Deckmaster, ranked MMR + leaderboard, avatar service. No infra deps beyond the `@mysten/*` SDK family — uses `Bun.*` APIs directly (including `Bun.sql` for Postgres, no ORM).
+- `apps/server` — Bun runtime (`Bun.serve`). WebSocket relay, settled-redeem keeper, sponsored-gas service, Deckmaster (seed-based deck engine, no LLM), ranked MMR + leaderboard, avatar service. No infra deps beyond the `@mysten/*` SDK family — uses `Bun.*` APIs directly (including `Bun.sql` for Postgres, no ORM).
 - `packages/ui` (`@workspace/ui`) — shared shadcn components, hooks, lib utils, and `globals.css`.
 - `apps/contracts` — Move package for the `Duel` object, escrow, scoring, plus standalone `season` (prize-pool escrow) and `swap` (AMM) side-packages, and TS deploy/upgrade/codegen scripts.
 
