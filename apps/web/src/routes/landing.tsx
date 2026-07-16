@@ -19,6 +19,10 @@ import { CONFIG } from "@/lib/config"
  * Hero art slots (`/home/shot-swipe.png`, `/home/keyart-card.png`) and the
  * badge/step icons all degrade to styled placeholders if the file is
  * missing, so a fresh checkout without the art never renders broken.
+ *
+ * The button mascot (`/mascot/hero.png`, `/mascot/button-idle.png`) follows
+ * the same rule — `AssetImage`'s fallback is `null`, so until that art
+ * exists the wrapper just renders the bare CTA with no layout shift.
  */
 
 // CSS gates the CRT power-on keyframes behind `html[data-crt]` so the
@@ -131,7 +135,7 @@ function Hero() {
         {/* Left — pitch */}
         <div className="min-w-0 flex-[1.1]">
           <span className="inline-block bg-[#0f1430] px-3 py-1.5 text-[10px] tracking-[0.14em] text-[#7ec8e3] uppercase sm:text-xs 2xl:px-4 2xl:py-2 2xl:text-base">
-            PvP prediction duels · on-chain
+            The Prediction Arena
           </span>
           <h1 className="mt-5 text-[1.85rem] leading-[1.12] break-words [text-shadow:2px_2px_0_#000] sm:text-4xl md:text-5xl lg:text-[3.4rem] xl:text-[4rem] 2xl:mt-7 2xl:text-[5rem]">
             Prediction markets, turned into a{" "}
@@ -144,16 +148,11 @@ function Hero() {
             the pot.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-4 2xl:mt-11 2xl:gap-6">
-            <PixelButton
-              onClick={() => enterGameWithCrt(navigate)}
-              className="h-12 px-7 text-base lg:h-14 lg:px-9 lg:text-lg 2xl:h-[68px] 2xl:px-12 2xl:text-2xl"
-            >
-              ▶ enter the game
-            </PixelButton>
+            <EnterGameButton onClick={() => enterGameWithCrt(navigate)} />
           </div>
           <div className="mt-9 flex flex-wrap gap-3 2xl:mt-12 2xl:gap-4">
             <Badge
-              icon="/tokens/usdc-icon.png"
+              icon="/assets/landing/deepbook.png"
               label="Powered by DeepBook Predict"
             />
             <Badge icon="/tokens/sui.png" label="Built on Sui" />
@@ -169,13 +168,43 @@ function Hero() {
   )
 }
 
+/**
+ * The "enter the game" CTA plus its climbing mascot, perched on the
+ * button's top-left corner. `pointer-events-none` so the fox never steals
+ * the click from the button underneath. Missing art (pre-asset-drop) just
+ * means an invisible slot; see the file-level doc comment.
+ */
+function EnterGameButton({ onClick }: { onClick: () => void }) {
+  return (
+    <div className="relative inline-block">
+      <PixelButton
+        onClick={onClick}
+        className="h-12 px-7 text-base lg:h-14 lg:px-9 lg:text-lg 2xl:h-[68px] 2xl:px-12 2xl:text-2xl"
+      >
+        ▶ enter the game
+      </PixelButton>
+      {/* button-idle.png has a lot of transparent headroom above the fox
+          (it's cropped for a tall climbing pose), so the offset needed to
+          perch it on the rim is much bigger than the rendered width would
+          suggest — tuned so only the paws dip slightly into the button. */}
+      <AssetImage
+        src="/mascot/button-idle.png"
+        alt=""
+        className="pointer-events-none absolute -top-14 -left-3 w-11 -rotate-6 [image-rendering:pixelated] lg:-top-[73px] lg:-left-4 lg:w-14 2xl:-top-[105px] 2xl:-left-6 2xl:w-20"
+      />
+    </div>
+  )
+}
+
 function Badge({ icon, label }: { icon: string; label: string }) {
   return (
     <span className="flex items-center gap-2 border-2 border-black bg-[#0f1430] px-3 py-2 text-[11px] text-[#dfe4f2] shadow-[2px_2px_0_rgba(0,0,0,0.45)] sm:text-xs lg:gap-2.5 lg:px-4 lg:py-2.5 2xl:gap-3 2xl:px-5 2xl:py-3.5 2xl:text-lg">
+      {/* w-auto + object-contain: some badge icons (deepbook.png) are wide
+          marks, not square glyphs — a fixed square box would squash them. */}
       <AssetImage
         src={icon}
         alt=""
-        className="h-4 w-4 [image-rendering:pixelated] lg:h-5 lg:w-5 2xl:h-7 2xl:w-7"
+        className="h-4 w-auto object-contain [image-rendering:pixelated] lg:h-5 2xl:h-7"
         fallback={<span className="h-2 w-2 rounded-full bg-[#4094fb]" />}
       />
       {label}
@@ -221,6 +250,18 @@ function HeroPreview() {
               YES
             </div>
           }
+        />
+      </div>
+      {/* Flicky mascot, mirroring the keyart-card accent on the opposite
+          corner, flicking a YES card toward the phone. Stays small and
+          tucked close on mobile (stacked layout only has the phone's own
+          centering margin to bleed into) and grows/moves outward once the
+          hero switches to a two-column layout at `md`. */}
+      <div className="pointer-events-none absolute -left-8 bottom-1 w-16 -rotate-6 sm:-left-12 sm:w-20 md:-left-14 md:w-24 lg:-left-24 lg:bottom-4 lg:w-44 2xl:-left-32 2xl:w-56">
+        <AssetImage
+          src="/mascot/hero.png"
+          alt=""
+          className="w-full drop-shadow-[4px_4px_0_rgba(0,0,0,0.35)] [image-rendering:pixelated]"
         />
       </div>
     </div>
@@ -318,7 +359,7 @@ function SiteFooter() {
       <div
         className={`flex flex-col items-center justify-between gap-2 px-5 py-4 text-[11px] text-[#8b93b4] sm:flex-row sm:px-8 sm:text-xs lg:px-12 lg:py-5 2xl:px-20 2xl:py-8 2xl:text-lg ${CONTENT_W}`}
       >
-        <span>flicky · prediction duels on Sui</span>
+        <span>flicky · the prediction arena on Sui</span>
         <div className="flex items-center gap-4 lg:gap-6 2xl:gap-10">
           <a
             href={DEEPBOOK_URL}
