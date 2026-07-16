@@ -11,9 +11,9 @@ Flicky is a Tinder-style PvP prediction-duel built on Sui + DeepBook Predict. Tw
 Bun workspaces + Turborepo monorepo.
 
 - `apps/web` — Vite + React 19 + Tailwind v4 + shadcn/ui. Swipe UI, lockup view.
-- `apps/server` — Bun runtime (`Bun.serve`). WebSocket relay, settled-redeem keeper, sponsored-gas service, AI Deckmaster. No deps yet — uses `Bun.*` APIs directly.
+- `apps/server` — Bun runtime (`Bun.serve`). WebSocket relay, settled-redeem keeper, sponsored-gas service, AI Deckmaster, ranked MMR + leaderboard, avatar service. No infra deps beyond the `@mysten/*` SDK family — uses `Bun.*` APIs directly (including `Bun.sql` for Postgres, no ORM).
 - `packages/ui` (`@workspace/ui`) — shared shadcn components, hooks, lib utils, and `globals.css`.
-- `move/` — Move package for `Duel` object, escrow, scoring (not yet present; TBD).
+- `apps/contracts` — Move package for the `Duel` object, escrow, scoring, plus standalone `season` (prize-pool escrow) and `swap` (AMM) side-packages, and TS deploy/upgrade/codegen scripts.
 
 ## Commands
 
@@ -49,12 +49,12 @@ Web-app-local components go in `apps/web/src/components` and are imported via th
 
 These are load-bearing design decisions — preserve them when implementing:
 
-- **Player-signed swipe PTBs are atomic.** Each swipe is a single PTB that calls `predict::mint` on the player's own `PredictManager` and `duel::record_swipe` on the shared `Duel` in the same transaction. Forced by Predict's `sender == manager.owner()` invariant — don't try to route mint through the keeper.
-- **`Duel` shared object does NOT hold Predict positions.** Each player owns their `PredictManager`; the `Duel` escrows the dUSDC side-pot and records swipes (direction + snapshotted `p_swiped` + decide-time). Settlement reads scores from `record_swipe` data, not from positions.
-- **Two tiers share one engine.** Free/Social tier runs the exact same swipe + lockup + settlement flow as Staked, only with `predict::mint` and the dUSDC stake removed. Don't fork the code paths — gate the money flow, keep the engine.
+- **Player-signed swipe PTBs are atomic.** Each swipe is a single PTB that mints on the player's own Predict account and calls `duel::record_swipe` on the shared `Duel` in the same transaction. Forced by Predict's requirement that the sender own the account being minted from — don't try to route mint through the keeper.
+- **`Duel` shared object does NOT hold Predict positions.** Each player owns their own Predict account (an `AccountWrapper`, commonly called their "manager"); the `Duel` escrows the dUSDC side-pot and records swipes (direction + the mint's `order_id`, for anti-replay). Settlement reads scores from `record_swipe` data plus keeper-supplied settlement data, not from positions.
+- **Two tiers share one engine.** Free/Social tier runs the exact same swipe + lockup + settlement flow as Staked, only with the Predict mint and the dUSDC stake removed. Don't fork the code paths — gate the money flow, keep the engine.
 - **Sponsored gas end-to-end.** Player zkLogin wallets only ever hold dUSDC. Any new PTB the player signs (create_duel, join_duel, per-swipe, settle) must go through the sponsored-gas service in `apps/server`.
 - **Commit-reveal deck.** Cards are hashed at duel creation, revealed at match start. Don't expose the unrevealed deck through the WebSocket relay or anywhere else before reveal time.
-- **`p_swiped` is snapshotted at swipe time.** Scoring uses `1 / p_swiped × speed_multiplier`. The snapshot must come from Predict's SVI surface inside the swipe PTB, not a later read.
+- **Settlement is keeper-fed, not on-chain-read.** The DeepBook Predict deployment Flicky is pinned to (`predict-testnet-6-24`) doesn't expose on-chain reads for market price or premium. `settle_card` takes the settlement price and both players' premiums as keeper-supplied arguments (sourced from Predict's off-chain indexer), not from an oracle object read inside the swipe PTB. Scoring is `card_pnl = payout − premium`, summed per player across the deck — there's no on-chain probability snapshot and no speed multiplier. This pin has moved before (it used to be `predict-testnet-4-16`); if a stub call starts failing, check whether upstream changed what it exposes again before assuming a local bug.
 
 ## Code style
 
