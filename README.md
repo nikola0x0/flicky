@@ -51,7 +51,7 @@ What to look for — these are the things that separate Flicky from a generic Pr
 ```
 
 1. **Sign in** — zkLogin via Enoki (Google OAuth → Sui address), or connect an existing wallet. No seed phrase, no extension required either way. On first sign-in, a Predict funding account is created for you, **sponsored by Flicky** — the app calls it your "manager." Your wallet only ever holds dUSDC.
-2. **Fund & queue** — deposit dUSDC (or swap SUI → dUSDC at a fixed 1:10 rate inside the app), pick a stake tier (**1 / 3 / 5 / 10 dUSDC**), and enter matchmaking, which pairs you against an opponent close to your rating. Entry is gated on the manager holding **≥ 5 dUSDC** (worst-case premium across a full 5-card deck).
+2. **Fund & queue** — deposit dUSDC (or use the in-app SUI → dUSDC swap — a testnet convenience for trying the game, not a core feature), pick a stake tier (**1 / 3 / 5 / 10 dUSDC**), and enter matchmaking, which pairs you against an opponent close to your rating. Entry is gated on the manager holding **≥ 5 dUSDC** (worst-case premium across a full 5-card deck).
 3. **Match & reveal** — matchmaking pairs two players into a Move `Duel` shared object that escrows both stakes. The deck is **commit-reveal**: hashed at `create_duel`, revealed only at match start, so neither player can pre-stage trades.
 4. **Swipe (≤ 5 min)** — swipe right = YES, left = NO, through every card in the deck. Each swipe fires a **single atomic PTB** that mints on *your own* Predict account (opening a real Predict position) and calls `record_swipe` on the shared `Duel` (logging your direction and the mint's order id, so the swipe can never be replayed or forged). No wallet popup — the PTB is gas-sponsored.
 5. **Lockup / watch** — once both players finish swiping (or the clock expires), the duel enters a shared live view of spot vs. strike, ticking toward each card's expiry, with live per-card PnL for both players. Dead waiting time becomes the ritual.
@@ -97,7 +97,7 @@ Flicky is not a Predict front-end with a database behind it — the duel lifecyc
 ### Flicky's Move package (`apps/contracts/`)
 
 - **`duel` module** — the whole engine. A shared `Duel` object escrows the dUSDC side-pot and records every swipe (card index, direction, mint order id, premium paid). It does **not** hold Predict positions — each player owns their own account. Lifecycle entrypoints: `create_duel` / `join_duel` / `reveal_deck` / `record_swipe` / `settle_card` / `finalize`, each with a `*_free` variant for the no-stake tier, plus `refund_duel` / `claim_reveal_timeout` safety paths. Covered by a 29-test Move unit-test suite (`tests/duel_tests.move`).
-- **Two independent side-packages**: `season::prize_pool` (admin-operated escrow that pays out ranked-leaderboard prizes each season) and `swap::swap` (a small constant-product SUI ↔ dUSDC AMM backing the in-app Deposit/Swap screen).
+- **Two independent side-packages**: `season::prize_pool` (admin-operated escrow that pays out ranked-leaderboard prizes each season) and `swap::swap` (a small constant-product SUI ↔ dUSDC AMM backing the in-app Deposit/Swap screen — a testnet convenience so players can fund a wallet without hunting for dUSDC, not part of the core game).
 - **Local link-stub packages** (`account`, `deepbook_predict`) that dispatch to the real deployed Predict/account packages via `published-at` — currently pinned to the `predict-testnet-6-24` branch snapshot. This pin has moved before (upstream keeps changing what it exposes on-chain) and will again; check git history around any `duel.move` rewrite before assuming the current shape is permanent.
 
 ### Why these design decisions
@@ -139,7 +139,7 @@ flicky/
 
 ## Status
 
-**Shipped — live on Sui testnet.** The full duel lifecycle works end-to-end: zkLogin sign-in, sponsored Predict-account bootstrap, matchmaking, commit-reveal decks (deckmaster, adaptive 3–5 sizing), atomic player-signed swipe PTBs, the live lockup view, keeper-fed settlement (`settle_card` → `finalize`), ranked MMR + leaderboard with on-chain Season prize payouts, player avatars, a global lobby chat, game audio, shareable result cards, a solo practice mode, and the in-app SUI → dUSDC swap. Staked and free/social PvP run on the same engine.
+**Shipped — live on Sui testnet.** The full duel lifecycle works end-to-end: zkLogin sign-in, sponsored Predict-account bootstrap, matchmaking, commit-reveal decks (deckmaster, adaptive 3–5 sizing), atomic player-signed swipe PTBs, the live lockup view, keeper-fed settlement (`settle_card` → `finalize`), ranked MMR + leaderboard with on-chain Season prize payouts, player avatars, a global lobby chat, game audio, shareable result cards, a solo practice mode, and the in-app SUI → dUSDC swap (a testnet funding convenience). Staked and free/social PvP run on the same engine.
 
 The deployed package id lives in [`apps/contracts/deployed.json`](apps/contracts/deployed.json) (source of truth).
 
