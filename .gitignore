@@ -45,6 +45,10 @@ apps/server/.data/
 # Local Claude Code state
 .claude/
 
+# Agent scratch/session dirs that have leaked into commits before
+# (e.g. apps/brain/<uuid>/scratch/...) — not a real workspace, never track it.
+apps/brain/
+
 # superpowers brainstorm artifacts (local)
 .superpowers/
 
