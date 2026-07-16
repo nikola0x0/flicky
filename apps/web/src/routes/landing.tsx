@@ -183,10 +183,14 @@ function EnterGameButton({ onClick }: { onClick: () => void }) {
       >
         ▶ enter the game
       </PixelButton>
+      {/* button-idle.png has a lot of transparent headroom above the fox
+          (it's cropped for a tall climbing pose), so the offset needed to
+          perch it on the rim is much bigger than the rendered width would
+          suggest — tuned so only the paws dip slightly into the button. */}
       <AssetImage
         src="/mascot/button-idle.png"
         alt=""
-        className="pointer-events-none absolute -top-6 left-0 w-11 -rotate-6 [image-rendering:pixelated] lg:-top-8 lg:w-14 2xl:-top-11 2xl:w-20"
+        className="pointer-events-none absolute -top-14 -left-3 w-11 -rotate-6 [image-rendering:pixelated] lg:-top-[73px] lg:-left-4 lg:w-14 2xl:-top-[105px] 2xl:-left-6 2xl:w-20"
       />
     </div>
   )
