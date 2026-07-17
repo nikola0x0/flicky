@@ -1,6 +1,13 @@
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test"
 import type { ServerWebSocket } from "bun"
-import { closeDb } from "../db"
+import { closeDb, upsertDuel } from "../db"
 import { HAS_TEST_DB, resetTables } from "../test-db"
 import {
   __resetForTests,
@@ -22,9 +29,7 @@ import {
 // Bypass real deck generation in queue tests — the matchmaking layer is
 // what's under test here, not Deckmaster. Tests that DO care about
 // deck-gen should override this stub locally.
-setDeckHashProvider(async () =>
-  "0x" + "a".repeat(64),
-)
+setDeckHashProvider(async () => "0x" + "a".repeat(64))
 
 // `joinQueue` now reads player ratings from Postgres for MMR pairing, so
 // the queue-mechanics suites need a TEST_DATABASE_URL (see test-preload.ts)
@@ -101,14 +106,21 @@ queueSuite("joinQueue", () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
     await joinQueue(ws, "practice")
-    expect(lastMsg(ws)).toMatchObject({ type: "error", code: "practice_no_queue" })
+    expect(lastMsg(ws)).toMatchObject({
+      type: "error",
+      code: "practice_no_queue",
+    })
   })
 
   test("a single waiting socket gets queue_status with size 1", async () => {
     const ws = makeWs()
     registerAddress(ws, "0xalice")
     await joinQueue(ws, "casual")
-    expect(lastMsg(ws)).toMatchObject({ type: "queue_status", tier: "casual", size: 1 })
+    expect(lastMsg(ws)).toMatchObject({
+      type: "queue_status",
+      tier: "casual",
+      size: 1,
+    })
     expect(queueStats().casual).toBe(1)
   })
 
@@ -137,7 +149,9 @@ queueSuite("joinQueue", () => {
       opponent: "0xalice",
     })
     // deckHash is carried in match_found (any 0x-prefixed string in tests).
-    expect((aMsgs.at(-1) as { deckHash?: string }).deckHash).toMatch(/^0x[0-9a-f]+$/i)
+    expect((aMsgs.at(-1) as { deckHash?: string }).deckHash).toMatch(
+      /^0x[0-9a-f]+$/i
+    )
   })
 
   test("two sockets in DIFFERENT tiers do not pair", async () => {
@@ -207,6 +221,72 @@ describe("rooms", () => {
   })
 })
 
+queueSuite("room snapshot on subscribe", () => {
+  const DUEL_ID = "0xduelsnapshot"
+
+  async function seedDuel(): Promise<void> {
+    await upsertDuel({
+      id: DUEL_ID,
+      status: "ACTIVE",
+      stakeCoinType: "0x2::dusdc::DUSDC",
+      creator: "0xalice",
+      challenger: "0xbob",
+      cardsRevealed: true,
+      cardCount: 3,
+      settledCount: 0,
+      p0Payout: "0",
+      p0Premium: "0",
+      p1Payout: "0",
+      p1Premium: "0",
+      startedAtMs: 1_700_000_000_000,
+      cardOutcomes: [],
+      swipes: [],
+      cards: [{ expiry_market_id: "0xmarket1", strike: "100000" }],
+    })
+  }
+
+  /** The snapshot is fired-and-forgotten off `subscribeRoom`, so give the
+   *  DB read a moment to land before asserting. */
+  async function waitForMsg(ws: FakeWs): Promise<void> {
+    for (let i = 0; i < 50 && ws._sent.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
+
+  test("pushes the mirrored duel state without waiting for an indexer event", async () => {
+    await seedDuel()
+    const ws = makeWs()
+    subscribeRoom(ws, DUEL_ID)
+    await waitForMsg(ws)
+    const msg = lastMsg(ws) as Record<string, unknown>
+    expect(msg.type).toBe("room_state")
+    expect(msg.duelId).toBe(DUEL_ID)
+    // The fields the resuming client needs to leave AWAIT_REVEAL.
+    expect(msg.status).toBe("ACTIVE")
+    expect(msg.cardsRevealed).toBe(true)
+    expect(msg.cardCount).toBe(3)
+    expect(msg.cards).toEqual([
+      { expiry_market_id: "0xmarket1", strike: "100000" },
+    ])
+  })
+
+  test("a duel the indexer hasn't mirrored yet sends nothing", async () => {
+    const ws = makeWs()
+    subscribeRoom(ws, "0xnotmirroredyet")
+    await waitForMsg(ws)
+    expect(ws._sent).toHaveLength(0)
+  })
+
+  test("no snapshot once the socket has already unsubscribed", async () => {
+    await seedDuel()
+    const ws = makeWs()
+    subscribeRoom(ws, DUEL_ID)
+    unsubscribeRoom(ws, DUEL_ID)
+    await waitForMsg(ws)
+    expect(ws._sent).toHaveLength(0)
+  })
+})
+
 queueSuite("rooms + queue cleanup", () => {
   test("onSocketClose cleans up queue + room subscriptions", async () => {
     const ws = makeWs()
@@ -223,57 +303,60 @@ queueSuite("rooms + queue cleanup", () => {
   })
 })
 
-queueSuite("sync-only queue (no bot-fill — Practice Mode is the only bot path)", () => {
-  test("a lone socket waits indefinitely with no auto-match", async () => {
-    const ws = makeWs()
-    registerAddress(ws, "0xalice")
-    await joinQueue(ws, "casual")
-    // Wait longer than the OLD bot-fill window would have fired — no extra
-    // messages should arrive.
-    await new Promise((r) => setTimeout(r, 100))
-    const msgs = allMsgs(ws)
-    expect(msgs).toHaveLength(2) // hello + queue_status
-    expect(queueStats().casual).toBe(1)
-  })
+queueSuite(
+  "sync-only queue (no bot-fill — Practice Mode is the only bot path)",
+  () => {
+    test("a lone socket waits indefinitely with no auto-match", async () => {
+      const ws = makeWs()
+      registerAddress(ws, "0xalice")
+      await joinQueue(ws, "casual")
+      // Wait longer than the OLD bot-fill window would have fired — no extra
+      // messages should arrive.
+      await new Promise((r) => setTimeout(r, 100))
+      const msgs = allMsgs(ws)
+      expect(msgs).toHaveLength(2) // hello + queue_status
+      expect(queueStats().casual).toBe(1)
+    })
 
-  test("match_found has no bot-related fields, never pairs with a bot opponent", async () => {
-    const a = makeWs()
-    const b = makeWs()
-    registerAddress(a, "0xa")
-    registerAddress(b, "0xb")
-    await joinQueue(a, "casual")
-    await joinQueue(b, "casual")
-    const ack = lastMsg(a) as Record<string, unknown>
-    expect(ack.type).toBe("match_found")
-    expect(ack.opponent).not.toBe("bot")
-    expect("botFillInMs" in ack).toBe(false)
-    expect(["creator", "challenger"]).toContain(ack.role as string) // not "bot_target"
-  })
+    test("match_found has no bot-related fields, never pairs with a bot opponent", async () => {
+      const a = makeWs()
+      const b = makeWs()
+      registerAddress(a, "0xa")
+      registerAddress(b, "0xb")
+      await joinQueue(a, "casual")
+      await joinQueue(b, "casual")
+      const ack = lastMsg(a) as Record<string, unknown>
+      expect(ack.type).toBe("match_found")
+      expect(ack.opponent).not.toBe("bot")
+      expect("botFillInMs" in ack).toBe(false)
+      expect(["creator", "challenger"]).toContain(ack.role as string) // not "bot_target"
+    })
 
-  test("practice tier never enters the queue — directs to practice_start instead", async () => {
-    const ws = makeWs()
-    registerAddress(ws, "0xalice")
-    await joinQueue(ws, "practice")
-    const err = lastMsg(ws) as Record<string, unknown>
-    expect(err.type).toBe("error")
-    expect(err.code).toBe("practice_no_queue")
-    // Make sure the directive points at the WS message, not a queue tier
-    expect(String(err.message)).toContain("practice_start")
-    // And no slot in any queue gets taken
-    for (const v of Object.values(queueStats())) expect(v).toBe(0)
-  })
+    test("practice tier never enters the queue — directs to practice_start instead", async () => {
+      const ws = makeWs()
+      registerAddress(ws, "0xalice")
+      await joinQueue(ws, "practice")
+      const err = lastMsg(ws) as Record<string, unknown>
+      expect(err.type).toBe("error")
+      expect(err.code).toBe("practice_no_queue")
+      // Make sure the directive points at the WS message, not a queue tier
+      expect(String(err.message)).toContain("practice_start")
+      // And no slot in any queue gets taken
+      for (const v of Object.values(queueStats())) expect(v).toBe(0)
+    })
 
-  test("two lone sockets after 200ms still receive no extra messages (no bot timer)", async () => {
-    const a = makeWs()
-    const b = makeWs()
-    registerAddress(a, "0xa")
-    registerAddress(b, "0xb")
-    // Both queue in DIFFERENT tiers so they don't pair each other.
-    await joinQueue(a, "casual")
-    await joinQueue(b, "standard")
-    await new Promise((r) => setTimeout(r, 200))
-    // Each should have hello + queue_status only — no match_found from a bot.
-    expect(allMsgs(a)).toHaveLength(2)
-    expect(allMsgs(b)).toHaveLength(2)
-  })
-})
+    test("two lone sockets after 200ms still receive no extra messages (no bot timer)", async () => {
+      const a = makeWs()
+      const b = makeWs()
+      registerAddress(a, "0xa")
+      registerAddress(b, "0xb")
+      // Both queue in DIFFERENT tiers so they don't pair each other.
+      await joinQueue(a, "casual")
+      await joinQueue(b, "standard")
+      await new Promise((r) => setTimeout(r, 200))
+      // Each should have hello + queue_status only — no match_found from a bot.
+      expect(allMsgs(a)).toHaveLength(2)
+      expect(allMsgs(b)).toHaveLength(2)
+    })
+  }
+)

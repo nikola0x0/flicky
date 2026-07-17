@@ -22,7 +22,7 @@
  * just re-subscribe and pick the duel back up.
  */
 import type { ServerWebSocket } from "bun"
-import { getPlayerRating } from "../db"
+import { getDuel, getPlayerRating } from "../db"
 import {
   commitDeck,
   decideDeckSize,
@@ -414,6 +414,56 @@ export function subscribeRoom(ws: AnyWs, duelId: string): void {
         broadcastRoom(duelId, { type: "peer_rejoined", duelId, address: addr })
       }
     }
+  }
+  void sendRoomSnapshot(ws, duelId)
+}
+
+/**
+ * Push the duel's current state to a socket the moment it subscribes.
+ *
+ * Without this, a client that subscribes mid-duel — F5, deep-link, or an
+ * auto-reconnect after a network blip — registers itself and then hears
+ * nothing until the indexer happens to drain a fresh on-chain event for
+ * that duel, because `room_state` is only ever broadcast from
+ * `indexer.ts::refreshDuel`. During lockup, with both players done
+ * swiping, no such event is coming, so the client sat on AWAIT_REVEAL
+ * forever and the duel looked unrejoinable.
+ *
+ * Served from the indexer's mirror rather than a chain read: this is on
+ * the subscribe path, staleness is bounded by INDEXER_POLL_INTERVAL_MS,
+ * and the next event-driven broadcast corrects any drift. A duel that
+ * isn't mirrored yet (just created) sends nothing and falls back to the
+ * event-driven path, same as before.
+ */
+async function sendRoomSnapshot(ws: AnyWs, duelId: string): Promise<void> {
+  try {
+    const d = await getDuel(duelId)
+    if (!d) return
+    // The socket may have unsubscribed or closed while we were reading.
+    if (!ws.data.subscribedDuels.has(duelId)) return
+    send(ws, {
+      type: "room_state",
+      duelId: d.id,
+      status: d.status,
+      cardsRevealed: d.cardsRevealed,
+      cardCount: d.cardCount,
+      cards: d.cards,
+      settledCount: d.settledCount,
+      p0Payout: d.p0Payout,
+      p0Premium: d.p0Premium,
+      p1Payout: d.p1Payout,
+      p1Premium: d.p1Premium,
+      startedAtMs: d.startedAtMs,
+      creator: d.creator,
+      challenger: d.challenger,
+      stakeCoinType: d.stakeCoinType,
+      cardOutcomes: d.cardOutcomes,
+      swipes: d.swipes,
+    })
+  } catch (e) {
+    log.warn(
+      `room snapshot ${shortId(duelId)} failed: ${e instanceof Error ? e.message : String(e)}`
+    )
   }
 }
 
