@@ -159,6 +159,8 @@ const forfeitTimers = new Map<string, ReturnType<typeof setTimeout>>()
  * duel id to the matched challenger's sockets without any client polling.
  */
 const pendingPairs = new Map<string, string>() // creator_addr → challenger_addr
+/** creator_addr → timer tearing down a pairing the creator never took on chain. */
+const pendingPairTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function send(ws: AnyWs, msg: ServerMsg): void {
   try {
@@ -335,6 +337,60 @@ async function matchPair(
     opponent: creatorAddr ?? "",
     deckHash: deckHashHex,
   })
+  if (creatorAddr && challengerAddr) {
+    armHandshakeTimeout(creator, challenger, creatorAddr)
+  }
+}
+
+/**
+ * How long the creator gets to land `create_duel` on chain after
+ * `match_found` before we tear the pairing down.
+ *
+ * The creator signs `create_duel` in their wallet; only once the indexer
+ * sees the resulting `DuelCreated` does the challenger get
+ * `duel_assigned` and move off "Setting up the match…". If that signature
+ * never happens — the player dismissed the wallet popup, or the tx failed
+ * — nothing else ever cleared the pairing: the challenger waited forever
+ * and the `pendingPairs` entry leaked.
+ *
+ * Budget: a slow wallet signature (external wallets pop a dialog; zkLogin
+ * doesn't) plus one indexer poll, which is 15s on prod. 90s leaves room
+ * for both without stranding anyone for minutes.
+ */
+const MATCH_HANDSHAKE_TIMEOUT_MS = 90_000
+
+function armHandshakeTimeout(
+  creator: AnyWs,
+  challenger: AnyWs,
+  creatorAddr: string
+): void {
+  clearHandshakeTimeout(creatorAddr)
+  const timer = setTimeout(() => {
+    pendingPairTimers.delete(creatorAddr)
+    // `takeMatchedPair` clears this timer, so still being pending means
+    // the creator's DuelCreated never surfaced.
+    if (!pendingPairs.has(creatorAddr)) return
+    pendingPairs.delete(creatorAddr)
+    const message =
+      "the other player never confirmed the match — head back and queue again"
+    // Deliberately NOT a requeue: the creator's create_duel may yet land
+    // late, and re-queueing them here could double-book a duel they've
+    // already paid for. Let both players re-enter the queue by hand.
+    send(creator, { type: "error", code: "match_abandoned", message })
+    send(challenger, { type: "error", code: "match_abandoned", message })
+    log.info(
+      `handshake timeout: ${shortId(creatorAddr)} never created the duel — pairing dropped`
+    )
+  }, MATCH_HANDSHAKE_TIMEOUT_MS)
+  pendingPairTimers.set(creatorAddr, timer)
+}
+
+function clearHandshakeTimeout(creatorAddr: string): void {
+  const timer = pendingPairTimers.get(creatorAddr)
+  if (timer) {
+    clearTimeout(timer)
+    pendingPairTimers.delete(creatorAddr)
+  }
 }
 
 /**
@@ -387,6 +443,8 @@ function scheduleRetryPair(a: AnyWs, b: AnyWs, tier: Tier): void {
 export function takeMatchedPair(creatorAddr: string): string | null {
   const challenger = pendingPairs.get(creatorAddr)
   if (challenger) pendingPairs.delete(creatorAddr)
+  // The duel is on chain — the handshake landed, so stand the teardown down.
+  clearHandshakeTimeout(creatorAddr)
   return challenger ?? null
 }
 
@@ -571,6 +629,8 @@ export function roomCount(): number {
 export function __resetForTests(): void {
   for (const t of forfeitTimers.values()) clearTimeout(t)
   forfeitTimers.clear()
+  for (const t of pendingPairTimers.values()) clearTimeout(t)
+  pendingPairTimers.clear()
   socketsByAddress.clear()
   queues.clear()
   roomSubscribers.clear()

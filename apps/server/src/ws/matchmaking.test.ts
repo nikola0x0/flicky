@@ -4,6 +4,7 @@ import {
   beforeEach,
   describe,
   expect,
+  jest,
   test,
 } from "bun:test"
 import type { ServerWebSocket } from "bun"
@@ -22,6 +23,7 @@ import {
   roomCount,
   setDeckHashProvider,
   subscribeRoom,
+  takeMatchedPair,
   type SocketState,
   unsubscribeRoom,
 } from "./matchmaking"
@@ -218,6 +220,59 @@ describe("rooms", () => {
     // Subsequent broadcast no-ops, no message sent.
     broadcastRoom("0xduel1", { type: "pong" })
     expect(ws._sent).toHaveLength(0)
+  })
+})
+
+queueSuite("match handshake timeout", () => {
+  // The teardown timer is armed inside matchPair, so fake timers have to be
+  // installed before the pairing happens. joinQueue awaits a real Postgres
+  // read on the way there, hence the real-timer restore in afterEach.
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  async function pairWithFakeTimers(): Promise<{
+    alice: FakeWs
+    bob: FakeWs
+  }> {
+    const alice = makeWs()
+    const bob = makeWs()
+    registerAddress(alice, "0xalice")
+    registerAddress(bob, "0xbob")
+    jest.useFakeTimers()
+    await joinQueue(alice, "casual")
+    await joinQueue(bob, "casual")
+    return { alice, bob }
+  }
+
+  test("drops the pairing and tells both players when the creator never creates the duel", async () => {
+    const { alice, bob } = await pairWithFakeTimers()
+    // alice queued first, so she's the creator and owes the create_duel.
+    expect(allMsgs(alice).at(-1)).toMatchObject({
+      type: "match_found",
+      role: "creator",
+    })
+    // Creator never signs — walk past the 90s handshake deadline.
+    jest.advanceTimersByTime(91_000)
+    for (const ws of [alice, bob]) {
+      expect(allMsgs(ws).at(-1)).toMatchObject({
+        type: "error",
+        code: "match_abandoned",
+      })
+    }
+    // Pairing is gone, so the indexer can't assign a stale challenger later.
+    expect(takeMatchedPair("0xalice")).toBeNull()
+  })
+
+  test("a duel that lands on chain cancels the teardown", async () => {
+    const { alice, bob } = await pairWithFakeTimers()
+    // The indexer sees DuelCreated and claims the pairing.
+    expect(takeMatchedPair("0xalice")).toBe("0xbob")
+    jest.advanceTimersByTime(91_000)
+    // No abandonment error — match_found stays the last thing either saw.
+    for (const ws of [alice, bob]) {
+      expect(allMsgs(ws).at(-1)).toMatchObject({ type: "match_found" })
+    }
   })
 })
 

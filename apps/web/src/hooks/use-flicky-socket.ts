@@ -26,6 +26,19 @@ const MIN_BACKOFF_MS = 500
 const MAX_BACKOFF_MS = 10_000
 
 /**
+ * Client→server keepalive interval.
+ *
+ * Nothing else guarantees traffic on an idle socket: the server only
+ * pushes on rooms/oracles the socket has actually subscribed to, so one
+ * parked in the lobby can sit completely silent — long enough for Bun's
+ * 120s default `idleTimeout`, or any proxy in between, to close it. The
+ * player then eats a reconnect (and, mid-duel, a re-subscribe) for no
+ * reason. The server answers `ping` with `pong`; we don't care about the
+ * reply, only that bytes move often enough to keep the connection alive.
+ */
+const KEEPALIVE_MS = 30_000
+
+/**
  * @param address  Wallet address to announce via `hello` once connected.
  *   Optional — the socket connects anonymously without it (oracle/room
  *   read streams don't require identity) and sends `hello` as soon as an
@@ -38,7 +51,7 @@ const MAX_BACKOFF_MS = 10_000
  */
 export function useFlickySocket(
   address?: string,
-  options?: { enabled?: boolean },
+  options?: { enabled?: boolean }
 ) {
   const enabled = options?.enabled ?? true
   const wsRef = useRef<WebSocket | null>(null)
@@ -66,6 +79,14 @@ export function useFlickySocket(
     let unmounted = false
     let attempt = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let keepaliveTimer: ReturnType<typeof setInterval> | null = null
+
+    const stopKeepalive = () => {
+      if (keepaliveTimer) {
+        clearInterval(keepaliveTimer)
+        keepaliveTimer = null
+      }
+    }
 
     const connect = () => {
       if (unmounted) return
@@ -78,8 +99,16 @@ export function useFlickySocket(
         setWsOpen(true)
         const addr = addressRef.current
         if (addr) {
-          ws.send(JSON.stringify({ type: "hello", address: addr } satisfies ClientMsg))
+          ws.send(
+            JSON.stringify({ type: "hello", address: addr } satisfies ClientMsg)
+          )
         }
+        // Re-armed per connection so a reconnected socket is kept alive too.
+        stopKeepalive()
+        keepaliveTimer = setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) return
+          ws.send(JSON.stringify({ type: "ping" } satisfies ClientMsg))
+        }, KEEPALIVE_MS)
       }
 
       ws.onmessage = (ev) => {
@@ -100,6 +129,7 @@ export function useFlickySocket(
       }
 
       ws.onclose = () => {
+        stopKeepalive()
         setWsOpen(false)
         wsRef.current = null
         if (unmounted) return
@@ -115,6 +145,7 @@ export function useFlickySocket(
 
     return () => {
       unmounted = true
+      stopKeepalive()
       if (reconnectTimer) clearTimeout(reconnectTimer)
       const ws = wsRef.current
       if (ws) {
@@ -157,7 +188,7 @@ export function useFlickySocket(
         handlersRef.current.delete(handler)
       }
     },
-    [],
+    []
   )
 
   return { wsOpen, send, onMessage }

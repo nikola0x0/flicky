@@ -25,12 +25,22 @@ const SILENT_CODES = new Set<string>(["rate_limited", "pong"])
  * be self-explanatory once the surrounding context (queue / duel) is in
  * play.
  */
-function describe(code: string, fallback: string): { title: string; body: string } {
+function describe(
+  code: string,
+  fallback: string
+): { title: string; body: string } {
   switch (code) {
     case "match_setup_failed":
       return {
         title: "trouble setting up the match",
         body: "we'll keep retrying — hang tight or cancel to step out of the queue.",
+      }
+    // Distinct from `match_setup_failed`: nothing is retrying here. The
+    // pairing is gone and the player has to queue again themselves.
+    case "match_abandoned":
+      return {
+        title: "match fell through",
+        body: "the other player never confirmed — queue again to find someone else.",
       }
     case "oracles_unavailable":
       return {
@@ -94,7 +104,7 @@ export function WsErrorBanner({
       aria-live="polite"
       className="pointer-events-none absolute inset-x-3 top-3 z-50 flex justify-center"
     >
-      <div className="pointer-events-auto flex w-full items-start gap-3 rounded-md border-2 border-black/55 bg-[#3a1717] px-3 py-2.5 font-pixel shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08),0_4px_0_rgba(0,0,0,0.45)] animate-in slide-in-from-top-2 fade-in duration-200">
+      <div className="pointer-events-auto flex w-full animate-in items-start gap-3 rounded-md border-2 border-black/55 bg-[#3a1717] px-3 py-2.5 font-pixel shadow-[inset_0_-2px_0_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08),0_4px_0_rgba(0,0,0,0.45)] duration-200 fade-in slide-in-from-top-2">
         <img
           src="/icons/warn.png"
           alt=""

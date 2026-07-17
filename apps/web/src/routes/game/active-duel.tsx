@@ -40,6 +40,19 @@ import { type RoomState } from "@/lib/room-state"
  */
 const MIN_ACCOUNT_PER_SWIPE = (SWIPE_QUANTITY * 7n) / 10n
 
+/**
+ * How long the challenger waits for `duel_assigned` before giving up.
+ *
+ * It only arrives once the creator has signed `create_duel` AND the
+ * indexer has seen the resulting event, so a creator who dismisses their
+ * wallet popup used to leave the challenger on "Setting up the match…"
+ * forever. The server tears the pairing down at 90s and sends
+ * `match_abandoned`; this is the local backstop for when that message
+ * can't reach us (socket dropped in the meantime), so it deliberately
+ * sits past the server's own deadline.
+ */
+const CHALLENGER_ASSIGN_TIMEOUT_MS = 120_000
+
 interface Props {
   /**
    * Matchmaking entry: the player's role drives the create/join PTB.
@@ -315,6 +328,27 @@ export function ActiveDuel({
       }
     })
   }, [role, onMessage, account, client, sign, tier, send, onDuelReady])
+
+  // Challenger backstop: surface a dead pairing instead of sitting on
+  // "Setting up the match…" indefinitely. Only fires while still in ENTRY
+  // — once `duel_assigned` lands, `sentJoinRef` is set and the phase has
+  // moved on.
+  useEffect(() => {
+    if (role !== "challenger") return
+    const id = setTimeout(() => {
+      if (sentJoinRef.current) return
+      setPhase((p) =>
+        p.kind === "ENTRY"
+          ? {
+              kind: "ERROR",
+              message:
+                "the other player never confirmed the match — exit and queue again.",
+            }
+          : p
+      )
+    }, CHALLENGER_ASSIGN_TIMEOUT_MS)
+    return () => clearTimeout(id)
+  }, [role])
 
   // 1 Hz wall-clock driving the match-wide swipe-window countdown.
   const [nowMs, setNowMs] = useState(() => Date.now())
