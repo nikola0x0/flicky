@@ -223,6 +223,28 @@ describe("rooms", () => {
   })
 })
 
+queueSuite("queue leak on mid-lookup disconnect", () => {
+  test("a socket that closes during the rating lookup isn't stranded in the queue", async () => {
+    const ws = makeWs()
+    registerAddress(ws, "0xalice")
+    // joinQueue runs synchronously as far as the rating lookup, then
+    // suspends — so this close lands in exactly the window where the
+    // socket has a queuedTier but isn't in the bucket yet.
+    const pending = joinQueue(ws, "starter")
+    onSocketClose(ws)
+    await pending
+    expect(queueStats().starter).toBe(0)
+    expect(connectedAddressCount()).toBe(0)
+  })
+
+  test("a socket that stays connected still queues normally", async () => {
+    const ws = makeWs()
+    registerAddress(ws, "0xalice")
+    await joinQueue(ws, "starter")
+    expect(queueStats().starter).toBe(1)
+  })
+})
+
 queueSuite("match handshake timeout", () => {
   // The teardown timer is armed inside matchPair, so fake timers have to be
   // installed before the pairing happens. joinQueue awaits a real Postgres

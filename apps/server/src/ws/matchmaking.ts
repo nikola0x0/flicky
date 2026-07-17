@@ -256,6 +256,13 @@ export async function joinQueue(ws: AnyWs, tier: Tier): Promise<void> {
     }
   }
 
+  // The socket can close while we're awaiting the rating lookup above. By
+  // then `onSocketClose` has already run `leaveQueue`, which found nothing
+  // to remove because we hadn't pushed yet — so pushing now strands a dead
+  // socket in the bucket permanently: nothing ever reaps it, and it
+  // inflates the `queue_status` size every later joiner sees. Observed on
+  // prod as starter:2 against zero connected addresses.
+  if (!ws.data.address || ws.data.queuedTier !== tier) return
   q.push(ws)
   send(ws, { type: "queue_status", tier, size: q.length, waitMs: 0 })
 }
