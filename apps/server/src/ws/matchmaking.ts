@@ -22,7 +22,7 @@
  * just re-subscribe and pick the duel back up.
  */
 import type { ServerWebSocket } from "bun"
-import { getPlayerRating } from "../db"
+import { getDuel, getPlayerRating } from "../db"
 import {
   commitDeck,
   decideDeckSize,
@@ -159,6 +159,8 @@ const forfeitTimers = new Map<string, ReturnType<typeof setTimeout>>()
  * duel id to the matched challenger's sockets without any client polling.
  */
 const pendingPairs = new Map<string, string>() // creator_addr → challenger_addr
+/** creator_addr → timer tearing down a pairing the creator never took on chain. */
+const pendingPairTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function send(ws: AnyWs, msg: ServerMsg): void {
   try {
@@ -254,6 +256,13 @@ export async function joinQueue(ws: AnyWs, tier: Tier): Promise<void> {
     }
   }
 
+  // The socket can close while we're awaiting the rating lookup above. By
+  // then `onSocketClose` has already run `leaveQueue`, which found nothing
+  // to remove because we hadn't pushed yet — so pushing now strands a dead
+  // socket in the bucket permanently: nothing ever reaps it, and it
+  // inflates the `queue_status` size every later joiner sees. Observed on
+  // prod as starter:2 against zero connected addresses.
+  if (!ws.data.address || ws.data.queuedTier !== tier) return
   q.push(ws)
   send(ws, { type: "queue_status", tier, size: q.length, waitMs: 0 })
 }
@@ -335,6 +344,60 @@ async function matchPair(
     opponent: creatorAddr ?? "",
     deckHash: deckHashHex,
   })
+  if (creatorAddr && challengerAddr) {
+    armHandshakeTimeout(creator, challenger, creatorAddr)
+  }
+}
+
+/**
+ * How long the creator gets to land `create_duel` on chain after
+ * `match_found` before we tear the pairing down.
+ *
+ * The creator signs `create_duel` in their wallet; only once the indexer
+ * sees the resulting `DuelCreated` does the challenger get
+ * `duel_assigned` and move off "Setting up the match…". If that signature
+ * never happens — the player dismissed the wallet popup, or the tx failed
+ * — nothing else ever cleared the pairing: the challenger waited forever
+ * and the `pendingPairs` entry leaked.
+ *
+ * Budget: a slow wallet signature (external wallets pop a dialog; zkLogin
+ * doesn't) plus one indexer poll, which is 15s on prod. 90s leaves room
+ * for both without stranding anyone for minutes.
+ */
+const MATCH_HANDSHAKE_TIMEOUT_MS = 90_000
+
+function armHandshakeTimeout(
+  creator: AnyWs,
+  challenger: AnyWs,
+  creatorAddr: string
+): void {
+  clearHandshakeTimeout(creatorAddr)
+  const timer = setTimeout(() => {
+    pendingPairTimers.delete(creatorAddr)
+    // `takeMatchedPair` clears this timer, so still being pending means
+    // the creator's DuelCreated never surfaced.
+    if (!pendingPairs.has(creatorAddr)) return
+    pendingPairs.delete(creatorAddr)
+    const message =
+      "the other player never confirmed the match — head back and queue again"
+    // Deliberately NOT a requeue: the creator's create_duel may yet land
+    // late, and re-queueing them here could double-book a duel they've
+    // already paid for. Let both players re-enter the queue by hand.
+    send(creator, { type: "error", code: "match_abandoned", message })
+    send(challenger, { type: "error", code: "match_abandoned", message })
+    log.info(
+      `handshake timeout: ${shortId(creatorAddr)} never created the duel — pairing dropped`
+    )
+  }, MATCH_HANDSHAKE_TIMEOUT_MS)
+  pendingPairTimers.set(creatorAddr, timer)
+}
+
+function clearHandshakeTimeout(creatorAddr: string): void {
+  const timer = pendingPairTimers.get(creatorAddr)
+  if (timer) {
+    clearTimeout(timer)
+    pendingPairTimers.delete(creatorAddr)
+  }
 }
 
 /**
@@ -387,6 +450,8 @@ function scheduleRetryPair(a: AnyWs, b: AnyWs, tier: Tier): void {
 export function takeMatchedPair(creatorAddr: string): string | null {
   const challenger = pendingPairs.get(creatorAddr)
   if (challenger) pendingPairs.delete(creatorAddr)
+  // The duel is on chain — the handshake landed, so stand the teardown down.
+  clearHandshakeTimeout(creatorAddr)
   return challenger ?? null
 }
 
@@ -414,6 +479,56 @@ export function subscribeRoom(ws: AnyWs, duelId: string): void {
         broadcastRoom(duelId, { type: "peer_rejoined", duelId, address: addr })
       }
     }
+  }
+  void sendRoomSnapshot(ws, duelId)
+}
+
+/**
+ * Push the duel's current state to a socket the moment it subscribes.
+ *
+ * Without this, a client that subscribes mid-duel — F5, deep-link, or an
+ * auto-reconnect after a network blip — registers itself and then hears
+ * nothing until the indexer happens to drain a fresh on-chain event for
+ * that duel, because `room_state` is only ever broadcast from
+ * `indexer.ts::refreshDuel`. During lockup, with both players done
+ * swiping, no such event is coming, so the client sat on AWAIT_REVEAL
+ * forever and the duel looked unrejoinable.
+ *
+ * Served from the indexer's mirror rather than a chain read: this is on
+ * the subscribe path, staleness is bounded by INDEXER_POLL_INTERVAL_MS,
+ * and the next event-driven broadcast corrects any drift. A duel that
+ * isn't mirrored yet (just created) sends nothing and falls back to the
+ * event-driven path, same as before.
+ */
+async function sendRoomSnapshot(ws: AnyWs, duelId: string): Promise<void> {
+  try {
+    const d = await getDuel(duelId)
+    if (!d) return
+    // The socket may have unsubscribed or closed while we were reading.
+    if (!ws.data.subscribedDuels.has(duelId)) return
+    send(ws, {
+      type: "room_state",
+      duelId: d.id,
+      status: d.status,
+      cardsRevealed: d.cardsRevealed,
+      cardCount: d.cardCount,
+      cards: d.cards,
+      settledCount: d.settledCount,
+      p0Payout: d.p0Payout,
+      p0Premium: d.p0Premium,
+      p1Payout: d.p1Payout,
+      p1Premium: d.p1Premium,
+      startedAtMs: d.startedAtMs,
+      creator: d.creator,
+      challenger: d.challenger,
+      stakeCoinType: d.stakeCoinType,
+      cardOutcomes: d.cardOutcomes,
+      swipes: d.swipes,
+    })
+  } catch (e) {
+    log.warn(
+      `room snapshot ${shortId(duelId)} failed: ${e instanceof Error ? e.message : String(e)}`
+    )
   }
 }
 
@@ -521,6 +636,8 @@ export function roomCount(): number {
 export function __resetForTests(): void {
   for (const t of forfeitTimers.values()) clearTimeout(t)
   forfeitTimers.clear()
+  for (const t of pendingPairTimers.values()) clearTimeout(t)
+  pendingPairTimers.clear()
   socketsByAddress.clear()
   queues.clear()
   roomSubscribers.clear()
