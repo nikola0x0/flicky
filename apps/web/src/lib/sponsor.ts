@@ -23,7 +23,7 @@
  * path so the app keeps working in dev.
  */
 import { toBase64 } from "@mysten/sui/utils"
-import type { Transaction } from "@mysten/sui/transactions"
+import { Transaction } from "@mysten/sui/transactions"
 import type { ClientWithCoreApi } from "@mysten/sui/client"
 
 const SPONSOR_URL =
@@ -151,6 +151,60 @@ async function postSponsorWithRetry(body: unknown): Promise<Response> {
 }
 
 /**
+ * True when built tx bytes carry the bounded expiration the sponsor policy
+ * demands: an `Epoch` expiration, or `ValidDuring` with a `maxEpoch`.
+ * (`ValidDuring` with only timestamp bounds still 403s as
+ * EXPIRATION_REQUIRED — the policy reads `maxEpoch` alone.)
+ */
+export function hasBoundedExpiration(bytes: Uint8Array): boolean {
+  const exp = Transaction.from(bytes).getData().expiration
+  if (!exp) return false
+  if (exp.$kind === "Epoch") return true
+  return exp.$kind === "ValidDuring" && exp.ValidDuring.maxEpoch != null
+}
+
+/** Minimal structural view of `SuiGrpcClient` — `ClientWithCoreApi` doesn't
+ * surface the raw ledger service, but the dapp-kit client always has it. */
+interface LedgerServiceLike {
+  ledgerService?: {
+    getServiceInfo(input: object): PromiseLike<{
+      response: { epoch?: bigint; chainId?: string }
+    }>
+  }
+}
+
+/**
+ * Client-side replacement for the expiration the fullnode failed to attach:
+ * the current epoch + chain id from `getServiceInfo`, valid through the next
+ * epoch (the widest window the sponsor policy accepts), with a random nonce
+ * for address-balance replay protection.
+ */
+async function boundedValidDuring(client: ClientWithCoreApi) {
+  const svc = (client as unknown as LedgerServiceLike).ledgerService
+  if (!svc) {
+    throw new Error(
+      "sponsor build lacks a bounded expiration and the client has no ledger service to derive one",
+    )
+  }
+  const { response } = await svc.getServiceInfo({})
+  if (response.epoch == null || !response.chainId) {
+    throw new Error(
+      "sponsor build lacks a bounded expiration and getServiceInfo returned no epoch/chainId",
+    )
+  }
+  return {
+    ValidDuring: {
+      minEpoch: String(response.epoch),
+      maxEpoch: String(response.epoch + 1n),
+      minTimestamp: null,
+      maxTimestamp: null,
+      chain: response.chainId,
+      nonce: crypto.getRandomValues(new Uint32Array(1))[0],
+    },
+  }
+}
+
+/**
  * Try the sponsor path. If the server is down / unconfigured (detected at the
  * config step, before `tx` is touched) it throws a fallback-eligible error;
  * once past that point the transaction has been mutated with the sponsor as
@@ -174,7 +228,22 @@ export async function executeSponsored(
   tx.setSender(sender)
   tx.setGasOwner(sponsor)
   tx.setGasPayment([])
-  const bytes = await tx.build({ client })
+  let bytes = await tx.build({ client })
+
+  // The fullnode only attaches `ValidDuring` while doing gas selection, and
+  // it skips gas selection when the transaction already carries a gas budget
+  // AND a payment (payment `[]` counts as set). A `Transaction` instance
+  // that has been built once caches budget/price/payment back into itself,
+  // so a reused instance resolves WITHOUT the expiration and the sponsor
+  // rejects the bytes with EXPIRATION_REQUIRED. Stamp our own bounded
+  // window and rebuild — everything is resolved by now, so this is local.
+  if (!hasBoundedExpiration(bytes)) {
+    console.warn(
+      "[sponsor] built bytes lack a bounded expiration — stamping ValidDuring",
+    )
+    tx.setExpiration(await boundedValidDuring(client))
+    bytes = await tx.build({ client })
+  }
 
   // Player signs the FINAL sponsored bytes. signTransaction returns
   // { signature } only — the wallet does NOT submit.
