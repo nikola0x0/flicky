@@ -15,18 +15,20 @@ import { DEFAULT_DECK_SIZE } from "@/lib/flicky"
  * `net_premium = entry_probability × quantity / leverage` must clear the
  * protocol's `min_net_premium` floor ($1 = 1_000_000) or the mint aborts
  * with `ENetPremiumBelowMinimum` (`strike_exposure_config::assert_mint_admission`,
- * abort code 4). By design the position is kept as CHEAP as the protocol
- * allows — the duel STAKE (side-pot) is the game's real prize, the mint is
- * just how each swipe takes a genuine Predict position for scoring. So this
- * sits at 3 dUSDC notional: at this quantity BOTH sides of an offset-strike
- * card clear the floor (band widens to p ∈ [0.334, 0.666], covering every
- * `ZONE_TARGET_PROB` zone in deckmaster) — the favored side (win prob ≳ 0.56)
- * yields a premium of ~$1.68–1.89, and the long-shot side ~$1.11–1.32 — while
- * a 5-card duel draws ~$7.5–9 of premium total, so a stake pool of a few
- * dUSDC per side still dominates it. MUST match the server's
- * `SWIPE_QUANTITY_MIST`.
+ * abort code 4). The duel STAKE (side-pot) is the game's real prize; the mint
+ * is just how each swipe takes a genuine Predict position for scoring. This
+ * sits at 6 dUSDC notional so BOTH sides of an offset-strike card clear the
+ * floor with wide margin (mintable band p ∈ [0.167, 0.833]). At the previous
+ * 3 dUSDC the long-shot side (p 0.37–0.44 per deckmaster `ZONE_TARGET_PROB`)
+ * had only $0.11–0.32 of margin over the floor, which time decay (1/√T
+ * probability sharpening on short-expiry markets) plus spot drift routinely
+ * erased mid-match, aborting one swipe direction — see
+ * docs/report/2026-07-18-longshot-swipe-abort-report.md. At 6 dUSDC the
+ * favored side (win prob ≳ 0.56) draws a premium of ~$3.36–3.78 and the
+ * long-shot side ~$2.22–2.64; a 5-card duel draws ~$15–18 of premium total.
+ * MUST match the server's `SWIPE_QUANTITY_MIST` and mint-probe `PROBE_QTY`.
  */
-export const SWIPE_QUANTITY = 3_000_000n
+export const SWIPE_QUANTITY = 6_000_000n
 
 /**
  * Absolute floor the AccountWrapper must hold before queueing, mirroring the

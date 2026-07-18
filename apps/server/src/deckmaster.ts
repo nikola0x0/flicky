@@ -345,12 +345,13 @@ export const POS_INF_TICK = (1n << 30n) - 1n
  *  probability clears BOTH the `min_net_premium` floor (low-probability side,
  *  `assert_mint_admission`, code 4) AND the `[min_entry, max_entry]` band
  *  (`assert_mint_probability_and_leverage_policy`, code 1). A card must be
- *  mintable in EITHER direction (the player picks UP/NO at swipe time), so
- *  its probability has to stay inside ~[0.33, 0.67] — which, on these
- *  short-expiry (10 min–few hr) BTC markets, means strikes within ~10 bps of
- *  spot. Wider offsets abort live (verified on-chain). Real difficulty
- *  variety needs an on-chain probability probe — that's the `svi_quote`
- *  mode's job; this fixed ladder is the near-ATM interim. */
+ *  mintable in EITHER direction (the player picks UP/NO at swipe time). At
+ *  `SWIPE_QUANTITY = 6` dUSDC the floor-derived band is p ∈ [0.167, 0.833]
+ *  (it was [0.334, 0.666] at qty=3, when wider offsets aborted live —
+ *  verified on-chain); the ladder stays near-ATM anyway so the lean the
+ *  player sees matches the svi_quote targets. Real difficulty variety needs
+ *  an on-chain probability probe — that's the `svi_quote` mode's job; this
+ *  fixed ladder is the near-ATM interim. */
 const ZONE_OFFSET_BPS: Record<Zone, number> = {
   close: 3,
   mid: 6,
@@ -398,12 +399,16 @@ const SVI_MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000
 /** Target win-probability for the FAVORED direction, by difficulty zone.
  *  Bounded so BOTH sides' premiums (`p × quantity` and `(1-p) × quantity`)
  *  clear the protocol per-swipe `min_net_premium` floor ($1) at
- *  `SWIPE_QUANTITY = 3` dUSDC — the both-sides-mintable band is
- *  p ∈ [0.334, 0.666], and every zone below sits inside it with margin (e.g.
- *  edge 0.63 → long-shot premium ≳ $1.11). mint-probe `buildProbedDeck` now
- *  requires BOTH directions to mint, falling back to ATM only if either
- *  fails. Higher p = stronger lean = more dramatic time-decay PnL drift
- *  toward ±quantity near settlement. */
+ *  `SWIPE_QUANTITY = 6` dUSDC — the both-sides-mintable band is
+ *  p ∈ [0.167, 0.833], and every zone below sits inside it with wide margin
+ *  (e.g. edge 0.63 → long-shot premium ≳ $2.22, more than 2× the floor).
+ *  That margin is what survives the 1/√T time-decay sharpening + spot drift
+ *  over the swipe window — at qty=3 the long-shot margin was $0.11–0.32 and
+ *  routinely eroded mid-match, killing one swipe direction (see
+ *  docs/report/2026-07-18-longshot-swipe-abort-report.md). mint-probe
+ *  `buildProbedDeck` still requires BOTH directions to mint, falling back to
+ *  ATM only if either fails. Higher p = stronger lean = more dramatic
+ *  time-decay PnL drift toward ±quantity near settlement. */
 const ZONE_TARGET_PROB: Record<Zone, number> = {
   close: 0.56,
   mid: 0.61,

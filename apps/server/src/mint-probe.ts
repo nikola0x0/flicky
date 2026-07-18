@@ -45,7 +45,7 @@ const LEVERAGE_1X = 1_000_000_000n
  * admission math (`net_premium = probability × quantity / leverage` vs
  * `min_net_premium`) mirrors what a real swipe will do.
  */
-const PROBE_QTY = 3_000_000n
+const PROBE_QTY = 6_000_000n
 
 /**
  * (sender, wrapper) used to build probe PTBs. `undefined` = not yet resolved,
@@ -247,10 +247,12 @@ function atmCard(
  * ways. This is the 6-24 revival of the old 4-16 `buildAndProbeDeck`
  * ATM-fallback (env.ts's `deckCardMinHeadroomMs` comment).
  *
- * At `PROBE_QTY = 3` dUSDC (matching web `SWIPE_QUANTITY`) plus Task 1's
- * 30min–3h market-headroom floor, the both-sides-mintable band widens to
- * p ∈ [0.334, 0.666], which covers every deckmaster `ZONE_TARGET_PROB` zone —
- * so both directions can be required outright instead of favored-only.
+ * At `PROBE_QTY = 6` dUSDC (matching web `SWIPE_QUANTITY`) the both-sides-
+ * mintable band widens to p ∈ [0.167, 0.833], which covers every deckmaster
+ * `ZONE_TARGET_PROB` zone with wide margin — so both directions can be
+ * required outright instead of favored-only, and the margin survives the
+ * time-decay/drift erosion that broke the long-shot side at qty=3 (see
+ * docs/report/2026-07-18-longshot-swipe-abort-report.md).
  *
  * Fail-open: if the probe can't run (disabled / no identity) it returns the
  * raw `buildDeck` output. Assumes `markets` already passed
@@ -273,12 +275,12 @@ export async function buildProbedDeck(
     cards.map(async (card, i) => {
       const market = markets[i % markets.length]
       const strikeTick = card.strike / market.tickSize
-      // At qty=3 + Task 1's 30min-3h markets, BOTH sides clear the
-      // min_net_premium floor at placement — so require YES *and* NO to be
-      // mintable and only fall back to ATM if EITHER fails. (Old favored-only
-      // rule existed because at qty=2 the long-shot could never clear the
-      // floor with any offset; that constraint is gone.) This is the line
-      // that keeps both swipe directions playable.
+      // At qty=6, BOTH sides clear the min_net_premium floor at placement
+      // with wide margin — so require YES *and* NO to be mintable and only
+      // fall back to ATM if EITHER fails. (Old favored-only rule existed
+      // because at qty=2 the long-shot could never clear the floor with any
+      // offset; that constraint is gone.) This is the line that keeps both
+      // swipe directions playable.
       const [upMints, downMints] = await Promise.all([
         mintProbeSucceeds(market, strikeTick, true, id.sender, id.wrapperId),
         mintProbeSucceeds(market, strikeTick, false, id.sender, id.wrapperId),
