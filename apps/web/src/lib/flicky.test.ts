@@ -5,11 +5,14 @@ import {
   buildCreateDuelTx,
   buildJoinDuelDusdcTx,
   buildJoinDuelTx,
+  buildRefundDuelTx,
   buildRevealDeckTx,
   buildSwipeTx,
   computeDeckHash,
   oracleStrikes,
   parseDuel,
+  refundEligibility,
+  REFUND_TIMEOUT_MS,
   type DeckCard,
 } from "./flicky"
 import { CONFIG } from "./config"
@@ -72,6 +75,68 @@ describe("oracleStrikes", () => {
     for (let i = 1; i < strikes.length; i++) {
       expect(strikes[i] > strikes[i - 1]).toBe(true)
     }
+  })
+})
+
+// === refundEligibility ===
+
+describe("refundEligibility", () => {
+  const P0 = "0xaaaaaa"
+  const P1 = "0xbbbbbb"
+  const START = 1_000_000
+  const AFTER_TIMEOUT = START + REFUND_TIMEOUT_MS + 1
+  const swipe = { isUp: true } as const
+
+  // 5-card row where each player swiped the given number of cards.
+  function row(p0Swipes: number, p1Swipes: number, status = "ACTIVE") {
+    return {
+      status,
+      creator: P0,
+      challenger: P1,
+      cardCount: 5,
+      startedAtMs: START,
+      swipes: Array.from({ length: 5 }, (_, i) => ({
+        p0Swipe: i < p0Swipes ? swipe : null,
+        p1Swipe: i < p1Swipes ? swipe : null,
+      })),
+    }
+  }
+
+  test("PENDING: creator can cancel, others cannot", () => {
+    const d = row(0, 0, "PENDING")
+    expect(refundEligibility(d, P0, AFTER_TIMEOUT)).toBe("cancel")
+    expect(refundEligibility(d, P1, AFTER_TIMEOUT)).toBeNull()
+  })
+
+  test("ACTIVE abandoned duel: either player can refund after 1h", () => {
+    const d = row(5, 0)
+    expect(refundEligibility(d, P0, AFTER_TIMEOUT)).toBe("refund")
+    expect(refundEligibility(d, P1, AFTER_TIMEOUT)).toBe("refund")
+  })
+
+  test("ACTIVE: no refund before the 1h timeout", () => {
+    expect(refundEligibility(row(5, 0), P0, START + 60_000)).toBeNull()
+  })
+
+  test("ACTIVE: both decks complete must finalize, not refund", () => {
+    expect(refundEligibility(row(5, 5), P0, AFTER_TIMEOUT)).toBeNull()
+  })
+
+  test("non-players never see a refund path", () => {
+    expect(refundEligibility(row(5, 0), "0xcccccc", AFTER_TIMEOUT)).toBeNull()
+  })
+
+  test("COMPLETE duels are never refundable", () => {
+    expect(refundEligibility(row(5, 0, "COMPLETE"), P0, AFTER_TIMEOUT)).toBeNull()
+  })
+})
+
+// === buildRefundDuelTx ===
+
+describe("buildRefundDuelTx", () => {
+  test("builds a transaction without touching wallet coins", () => {
+    const tx = buildRefundDuelTx("0xd0e1", DUSDC)
+    expect(tx).toBeInstanceOf(Transaction)
   })
 })
 

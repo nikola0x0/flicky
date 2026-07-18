@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from "react"
 import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
+import { buildRefundDuelTx, refundEligibility } from "@/lib/flicky"
+import { useFlickySign } from "@/lib/use-flicky-sign"
 import { fmtPnlPct } from "@/lib/pnl"
 import { playerDuelResult } from "@/lib/duel-result"
 import { PixelButton } from "@/components/pixel-button"
 import { playSfx } from "@/lib/sound"
-import type { CSSProperties } from "react"
+import type { CSSProperties, MouseEvent } from "react"
 
 const BLUE_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -20,6 +22,7 @@ const BLUE_BRAND_STYLE = {
 interface DuelRow {
   id: string
   status: "PENDING" | "ACTIVE" | "COMPLETE"
+  stakeCoinType?: string
   creator: string
   challenger: string
   cardCount: number
@@ -31,6 +34,11 @@ interface DuelRow {
   winner?: "p0" | "p1" | "tie" | null
   startedAtMs: number
   lastUpdatedMs: number
+  swipes: Array<{
+    cardIdx: number
+    p0Swipe: unknown | null
+    p1Swipe: unknown | null
+  }>
 }
 
 const POLL_INTERVAL_MS = 8_000
@@ -142,6 +150,32 @@ function MatchRow({ duel, address }: { duel: DuelRow; address: string }) {
 
   const result = duelResult(duel, address)
 
+  // Escape hatch for stuck duels — creator-cancel (PENDING) or timeout
+  // refund (ACTIVE, opponent never finished). Same sponsored sign path as
+  // every other duel call; the 8s poll flips the row once the tx lands.
+  const { mutateAsync: sign, isPending: refunding } = useFlickySign()
+  const [refunded, setRefunded] = useState(false)
+  const refundKind = refunded ? null : refundEligibility(duel, address)
+
+  const onRefund = async (e: MouseEvent) => {
+    // The row is a Link — keep the tap on the button from navigating.
+    e.preventDefault()
+    e.stopPropagation()
+    if (refunding) return
+    playSfx("click")
+    try {
+      await sign({
+        transaction: buildRefundDuelTx(
+          duel.id,
+          duel.stakeCoinType || CONFIG.stakeType
+        ),
+      })
+      setRefunded(true)
+    } catch {
+      // Leave the button up — next tap retries.
+    }
+  }
+
   return (
     <li>
       <Link
@@ -163,27 +197,48 @@ function MatchRow({ duel, address }: { duel: DuelRow; address: string }) {
           </div>
         </div>
 
-        <div className="flex shrink-0 flex-col items-end">
-          {duel.status === "COMPLETE" ? (
-            <span
-              className={`text-lg tabular-nums ${pnlColor(net, myPremium)}`}
+        <div className="flex shrink-0 items-center gap-2">
+          {refundKind && (
+            <button
+              type="button"
+              onClick={onRefund}
+              disabled={refunding}
+              className="rounded border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-xs tracking-[0.18em] text-amber-200 uppercase hover:bg-amber-900/50 disabled:opacity-60"
             >
-              {fmtPnlPct(net, myPremium)}
-            </span>
-          ) : duel.status === "ACTIVE" ? (
-            <span className="text-lg text-white tabular-nums">
-              {duel.settledCount}/{duel.cardCount || 5}
-            </span>
-          ) : (
-            <span className="text-base text-white/55 uppercase">pending</span>
+              {refunding
+                ? "refunding…"
+                : refundKind === "cancel"
+                  ? "cancel"
+                  : "claim refund"}
+            </button>
           )}
-          <span className="text-xs tracking-[0.18em] text-white/40 uppercase">
-            {duel.status === "ACTIVE"
-              ? "settled"
-              : duel.status === "COMPLETE"
-                ? "return"
-                : ""}
-          </span>
+          {refunded && (
+            <span className="text-xs tracking-[0.18em] text-emerald-300 uppercase">
+              refunded ✓
+            </span>
+          )}
+          <div className="flex flex-col items-end">
+            {duel.status === "COMPLETE" ? (
+              <span
+                className={`text-lg tabular-nums ${pnlColor(net, myPremium)}`}
+              >
+                {fmtPnlPct(net, myPremium)}
+              </span>
+            ) : duel.status === "ACTIVE" ? (
+              <span className="text-lg text-white tabular-nums">
+                {duel.settledCount}/{duel.cardCount || 5}
+              </span>
+            ) : (
+              <span className="text-base text-white/55 uppercase">pending</span>
+            )}
+            <span className="text-xs tracking-[0.18em] text-white/40 uppercase">
+              {duel.status === "ACTIVE"
+                ? "settled"
+                : duel.status === "COMPLETE"
+                  ? "return"
+                  : ""}
+            </span>
+          </div>
         </div>
       </Link>
     </li>

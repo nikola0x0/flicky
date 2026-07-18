@@ -351,6 +351,65 @@ export function buildJoinDuelTx(
   return tx
 }
 
+/** Mirrors `REFUND_TIMEOUT_MS` in duel.move — ACTIVE refunds open after 1h. */
+export const REFUND_TIMEOUT_MS = 3_600_000
+
+/**
+ * Which `refund_duel` path (if any) the viewer can take on a duel, mirroring
+ * the contract's gates (`duel.move::refund_duel`) so the UI only offers the
+ * call when it would succeed:
+ *   - "cancel" — PENDING, viewer is the creator (no timeout).
+ *   - "refund" — ACTIVE, viewer is a player, >1h since start, and at least
+ *     one player hasn't completed the deck (both-done duels must `finalize`).
+ */
+export function refundEligibility(
+  duel: {
+    status: string
+    creator: string
+    challenger: string
+    cardCount: number
+    startedAtMs: number
+    swipes: Array<{ p0Swipe: unknown | null; p1Swipe: unknown | null }>
+  },
+  viewer: string,
+  nowMs: number = Date.now()
+): "cancel" | "refund" | null {
+  if (duel.status === "PENDING") {
+    return viewer === duel.creator ? "cancel" : null
+  }
+  if (duel.status !== "ACTIVE") return null
+  if (viewer !== duel.creator && viewer !== duel.challenger) return null
+  if (!duel.startedAtMs || nowMs <= duel.startedAtMs + REFUND_TIMEOUT_MS)
+    return null
+  const p0Done =
+    duel.cardCount > 0 &&
+    duel.swipes.filter((s) => s.p0Swipe != null).length >= duel.cardCount
+  const p1Done =
+    duel.cardCount > 0 &&
+    duel.swipes.filter((s) => s.p1Swipe != null).length >= duel.cardCount
+  return p0Done && p1Done ? null : "refund"
+}
+
+/**
+ * Refund a stuck duel (`duel::refund_duel`) — creator-cancel for PENDING,
+ * either player after the 1h timeout for ACTIVE. Player-signed + sponsored
+ * like every other duel call; the Clock arg is auto-injected by codegen.
+ */
+export function buildRefundDuelTx(
+  duelId: string,
+  stakeCoinType: string = CONFIG.stakeType
+): Transaction {
+  const tx = new Transaction()
+  tx.add(
+    duelGen.refundDuel({
+      package: packageId,
+      arguments: [duelId],
+      typeArguments: [stakeCoinType],
+    })
+  )
+  return tx
+}
+
 /**
  * Record a single swipe on the next card in the player's sequence.
  *
