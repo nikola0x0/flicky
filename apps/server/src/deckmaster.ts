@@ -353,9 +353,9 @@ export const POS_INF_TICK = (1n << 30n) - 1n
  *  an on-chain probability probe — that's the `svi_quote` mode's job; this
  *  fixed ladder is the near-ATM interim. */
 const ZONE_OFFSET_BPS: Record<Zone, number> = {
-  close: 3,
-  mid: 6,
-  edge: 10,
+  close: 2,
+  mid: 4,
+  edge: 6,
 }
 
 /** One deck card in price space — the shape `buildDeck` returns. Not the
@@ -384,8 +384,8 @@ export interface DeckCardOut {
  *  card is dull but harmless (the deck vector may contain duplicates; the
  *  commitment hash and reveal are unaffected), whereas an out-of-band strike
  *  would abort the mint at swipe time. */
-const DEDUP_BUMP_STEP_BPS = 3
-const DEDUP_MAX_BUMP_BPS = 15
+const DEDUP_BUMP_STEP_BPS = 2
+const DEDUP_MAX_BUMP_BPS = 8
 
 // ─── svi_quote strike placement (probability-targeted) ───────────────────────
 
