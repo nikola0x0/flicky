@@ -6,7 +6,12 @@
 import type { WebSocketHandler } from "bun"
 import { getSuiClient } from "../lib/sui"
 import { makeLogger, shortId } from "../log"
-import { checkQueueBalanceGate, requiredQueueBalance } from "../predict"
+import {
+  checkQueueBalanceGate,
+  MAX_DECK_SIZE,
+  requiredQueueBalance,
+  SWIPE_QUANTITY_MIST,
+} from "../predict"
 import { findDeckMarkets } from "../deckmaster"
 import { consume } from "../ratelimit"
 import { handleChatReact, handleChatSend, sendChatHistory } from "./chat"
@@ -127,7 +132,7 @@ export const websocketHandler: WebSocketHandler<SocketState> = {
             send(ws, {
               type: "error",
               code: "insufficient_balance",
-              message: `account balance < ${required} (need stake + ~15 dUSDC premium budget) — deposit before queueing`,
+              message: `account balance < ${required} (need stake + ${Number(MAX_DECK_SIZE * SWIPE_QUANTITY_MIST) / 1e6} dUSDC premium budget) — deposit before queueing`,
               detail: {
                 need: required.toString(),
                 have: gate.balance.toString(),

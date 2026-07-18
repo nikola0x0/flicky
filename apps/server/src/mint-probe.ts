@@ -45,7 +45,90 @@ const LEVERAGE_1X = 1_000_000_000n
  * admission math (`net_premium = probability × quantity / leverage` vs
  * `min_net_premium`) mirrors what a real swipe will do.
  */
-const PROBE_QTY = 3_000_000n
+const PROBE_QTY = 6_000_000n
+
+// ─── Off-chain BS probability check ──────────────────────────────────────────
+// Mirrors the web's `upProbability` (apps/web/src/lib/pnl.ts) and the
+// deckmaster's `sviRawStrike` model — same vol, same formula, forward
+// direction: given (spot, strike, T) → P(up).
+
+/** MUST match `SVI_VOL` in deckmaster.ts and `ASSUMED_VOL` in pnl.ts. */
+const BS_VOL = 0.6
+const MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000
+
+/** Standard normal CDF (Abramowitz & Stegun 7.1.26 erf approximation).
+ *  Matches the web's `normCdf` in pnl.ts. */
+function normCdf(x: number): number {
+  const sign = x < 0 ? -1 : 1
+  const z = Math.abs(x) / Math.SQRT2
+  const t = 1 / (1 + 0.3275911 * z)
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) *
+      t +
+      0.254829592) *
+      t *
+      Math.exp(-z * z)
+  return 0.5 * (1 + sign * y)
+}
+
+/**
+ * Digital-BS probability P(settle > strike) — the forward of deckmaster's
+ * `sviRawStrike` inversion.  `spot` and `strike` are 1e9-fixed USD.
+ * `expiryMs` is the oracle's expiry epoch-ms, `nowMs` is the current time.
+ * Returns a number in [0, 1].
+ */
+function digitalBsProbability(
+  spot: bigint,
+  strike: bigint,
+  expiryMs: number,
+  nowMs: number
+): number {
+  const S = Number(spot)
+  const K = Number(strike)
+  if (!(S > 0) || !(K > 0)) return 0.5
+  const tYears = Math.max(1e-9, (expiryMs - nowMs) / MS_PER_YEAR)
+  const v = BS_VOL * Math.sqrt(tYears)
+  const d2 = (Math.log(S / K) - 0.5 * v * v) / v
+  return normCdf(d2)
+}
+
+/**
+ * On-chain `min_net_premium` floor = $1 dUSDC = 1_000_000 micro-units.
+ * A swipe's `net_premium = probability × quantity / leverage`. At leverage
+ * 1× (the only lever Flicky uses), the premium for the swiped direction
+ * is `p × quantity`.  If this falls below $1, the mint aborts with
+ * `ENetPremiumBelowMinimum`.
+ *
+ * The deck is generated at match creation, but the player may swipe up to
+ * `SWIPE_WINDOW_MS` (5 min) later — by which time the market's TTL has
+ * shortened and time-decay has sharpened the probability further from 0.5.
+ * We project the probability at the **worst-case swipe time** (end of the
+ * window) and add a 50% safety margin to absorb off-chain/on-chain model
+ * differences (our flat vol=0.6 BS vs the on-chain SVI surface, plus any
+ * spot drift during the match).
+ */
+const MIN_NET_PREMIUM = 1_000_000
+const SAFETY_MARGIN = 1.5
+/** Must match `SWIPE_WINDOW_MS` in duel.move / swipe-window.ts. */
+const SWIPE_WINDOW_MS = 300_000
+
+/** Returns true when BOTH directions' premiums clear the floor at worst-case
+ *  swipe time (end of the 5-min swipe window). */
+function premiumClearsFloor(
+  spot: bigint,
+  strike: bigint,
+  expiryMs: number,
+  nowMs: number,
+  quantity: number
+): boolean {
+  // Project to end of swipe window — the latest a player can swipe.
+  const worstCaseSwipeMs = nowMs + SWIPE_WINDOW_MS
+  const pUp = digitalBsProbability(spot, strike, expiryMs, worstCaseSwipeMs)
+  const pLong = Math.min(pUp, 1 - pUp) // the weaker side's probability
+  const longPremium = pLong * quantity
+  return longPremium >= MIN_NET_PREMIUM * SAFETY_MARGIN
+}
 
 /**
  * (sender, wrapper) used to build probe PTBs. `undefined` = not yet resolved,
@@ -238,56 +321,43 @@ function atmCard(
 }
 
 /**
- * Build a deck whose every card is currently mintable in BOTH directions.
+ * Build a deck whose every card is mintable in BOTH swipe directions.
  *
- * Starts from `buildDeck`, then per card probes UP and DOWN; any card that
- * fails either direction — its offset strike pushed one side's premium under
- * the floor (`ENetPremiumBelowMinimum`) on a short-expiry market — is
- * replaced with a pure ATM card on the same market, which mints ~0.5 both
- * ways. This is the 6-24 revival of the old 4-16 `buildAndProbeDeck`
- * ATM-fallback (env.ts's `deckCardMinHeadroomMs` comment).
+ * Uses an **off-chain** Black-Scholes probability check instead of an
+ * on-chain mint probe — no AccountWrapper, no dUSDC, no network calls.
+ * For each card, computes `pLong = min(pUp, 1-pUp)` (the weaker side's
+ * probability) and checks `pLong × SWIPE_QUANTITY ≥ $1 floor × 1.1`.
+ * Cards that fail (the long-shot side's premium would abort) are replaced
+ * with pure ATM cards on the same market.
  *
- * At `PROBE_QTY = 3` dUSDC (matching web `SWIPE_QUANTITY`) plus Task 1's
- * 30min–3h market-headroom floor, the both-sides-mintable band widens to
- * p ∈ [0.334, 0.666], which covers every deckmaster `ZONE_TARGET_PROB` zone —
- * so both directions can be required outright instead of favored-only.
+ * This eliminates the dependency on the on-chain mint probe (which needed
+ * a funded AccountWrapper) while catching the same failure mode:
+ * `ENetPremiumBelowMinimum` on short-TTL markets where time-decay pushed
+ * probability too far from 0.5 for the offset strike to admit.
  *
- * Fail-open: if the probe can't run (disabled / no identity) it returns the
- * raw `buildDeck` output. Assumes `markets` already passed
- * `filterMintableMarkets`, so the ATM fallback is guaranteed to admit. Two
- * cards on the same market falling back to ATM become identical (market,
- * strike) — a harmless duplicate in the committed vector.
+ * The on-chain `filterMintableMarkets` probe (ATM-level LP-backing check)
+ * is a separate concern and still runs when enabled — it catches the
+ * strike-independent `EInsufficientCash` failure, not the probability-band
+ * violation this function handles.
  */
-export async function buildProbedDeck(
+export function buildProbedDeck(
   markets: MarketSnapshot[],
   spot: bigint,
   seed: Uint8Array,
   deckSize: number,
   nowMs?: number
-): Promise<DeckCardOut[]> {
+): DeckCardOut[] {
   const cards = buildDeck(markets, spot, seed, deckSize, nowMs)
-  if (!env.deckProbeMintable) return cards
-  const id = await getProbeIdentity()
-  if (!id) return cards
-  return Promise.all(
-    cards.map(async (card, i) => {
-      const market = markets[i % markets.length]
-      const strikeTick = card.strike / market.tickSize
-      // At qty=3 + Task 1's 30min-3h markets, BOTH sides clear the
-      // min_net_premium floor at placement — so require YES *and* NO to be
-      // mintable and only fall back to ATM if EITHER fails. (Old favored-only
-      // rule existed because at qty=2 the long-shot could never clear the
-      // floor with any offset; that constraint is gone.) This is the line
-      // that keeps both swipe directions playable.
-      const [upMints, downMints] = await Promise.all([
-        mintProbeSucceeds(market, strikeTick, true, id.sender, id.wrapperId),
-        mintProbeSucceeds(market, strikeTick, false, id.sender, id.wrapperId),
-      ])
-      if (upMints && downMints) return card
-      log.info(
-        `card ${i} (${market.expiryMarketId.slice(0, 10)}) not mintable both ways (up=${upMints} down=${downMints}) — ATM fallback`
-      )
-      return atmCard(card, market, spot)
-    })
-  )
+  const now = nowMs ?? Date.now()
+  const qty = Number(PROBE_QTY)
+  return cards.map((card, i) => {
+    const market = markets[i % markets.length]
+    if (premiumClearsFloor(spot, card.strike, market.expiry, now, qty)) {
+      return card
+    }
+    log.info(
+      `card ${i} (${market.expiryMarketId.slice(0, 10)}) long-shot premium below floor — ATM fallback`
+    )
+    return atmCard(card, market, spot)
+  })
 }

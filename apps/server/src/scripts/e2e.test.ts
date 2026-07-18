@@ -126,13 +126,15 @@ const P1_FUND_DUSDC = 10_000_000n // 10 dUSDC — covers stake(1) + deposit(8) +
 // requires `net_premium = entry_probability * quantity / leverage >= 1_000_000`
 // (min_net_premium, $1). Confirmed live 2026-07-10 via devInspect probe
 // against a real ATM BTC ExpiryMarket (entry_probability ~0.50, both UP and
-// DOWN): quantity=1_000_000 (the value apps/web's SWIPE_QUANTITY currently
-// uses) aborts with code 4 (net_premium ~500k, half the minimum);
-// quantity=2_000_000 clears it right at the edge (net_premium ~1.015M);
-// quantity=3_000_000 clears it with ~50% margin (net_premium ~1.49-1.51M
-// either side, + ~30k trading fee) — used here for headroom against
-// per-market entry_probability drift.
-const SWIPE_QTY = 3_000_000n
+// DOWN): quantity=1_000_000 aborts with code 4 (net_premium ~500k, half the
+// minimum); quantity=2_000_000 clears it right at the edge (net_premium
+// ~1.015M); quantity=3_000_000 clears ATM with ~50% margin but left the
+// offset-strike long-shot side only $0.11-0.32 above the floor — eroded by
+// time decay/drift mid-match (docs/report/2026-07-18-longshot-swipe-abort-
+// report.md). quantity=6_000_000 (apps/web's SWIPE_QUANTITY since
+// 2026-07-18) clears ATM ~3x and keeps every ZONE_TARGET_PROB long-shot
+// ≥2.2x the floor for the whole swipe window.
+const SWIPE_QTY = 6_000_000n
 const DECK_SIZE = 5
 const MARKET_HEADROOM_MS = 5 * 60_000 // markets must clear "now + 5min"
 

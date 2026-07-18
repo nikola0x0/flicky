@@ -317,7 +317,12 @@ function useChartHistory(
   useEffect(() => {
     const interval = setInterval(() => {
       const cur = duelRef.current
-      const ts = smoothedTicksRef.current
+      // Use raw server ticks (targetTicksRef), NOT smoothed (smoothedTicksRef).
+      // Smoothed values depend on each client's RAF timing and diverge across
+      // tabs — raw ticks are identical on both clients (same WS payload), so
+      // the resulting PnL history is deterministic and the two players' charts
+      // match (you-line on A == opp-line on B, and vice versa).
+      const ts = targetTicksRef.current
       const now = Date.now()
       // Don't record until there's a real data source — a live tick eased in
       // or a settled card. The pre-first-tick window (and the post-F5

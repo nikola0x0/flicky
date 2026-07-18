@@ -68,9 +68,11 @@ async function devInspectReturn(
 export const MIN_BALANCE_FOR_QUEUE = 5_000_000n // 5 dUSDC, 6 decimals
 
 // Per-swipe premium quantity — MUST match web SWIPE_QUANTITY
-// (onboarding-modal.tsx) and server PROBE_QTY (mint-probe.ts). A deck is
-// at most MAX_DECK_SIZE cards.
-export const SWIPE_QUANTITY_MIST = 3_000_000n
+// (apps/web/src/lib/funding.ts) and server PROBE_QTY (mint-probe.ts). A deck
+// is at most MAX_DECK_SIZE cards. 6 dUSDC keeps both swipe directions above
+// the protocol's $1 min_net_premium floor for the whole swipe window (see
+// docs/report/2026-07-18-longshot-swipe-abort-report.md).
+export const SWIPE_QUANTITY_MIST = 6_000_000n
 export const MAX_DECK_SIZE = 5n
 
 /**
