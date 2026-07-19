@@ -16,7 +16,7 @@ import { Group } from "@visx/group"
 import { scaleLinear } from "@visx/scale"
 import { LinePath } from "@visx/shape"
 import { curveMonotoneX } from "@visx/curve"
-import { markCardPnl, type SwipeLite } from "@/lib/pnl"
+import { tickCardPnl, type SwipeLite } from "@/lib/pnl"
 import {
   MAX_SAMPLES,
   yAmpFor,
@@ -59,6 +59,9 @@ export interface ChartTick {
   spot: string
   /** Market expiry (ms). Drives time-decay in the continuous mark. */
   expiryMs?: number
+  /** Settled market's final price — locks the card's mark (see
+   *  `tickCardPnl`); the eased live spot no longer moves it. */
+  settlementPrice?: string
 }
 
 const SAMPLE_INTERVAL_MS = 1000 // 1 Hz — one PnL sample per second
@@ -171,13 +174,7 @@ function currentRunningPnl(
     if (!card) continue
     const tick = ticks[card.expiry_market_id]
     if (!tick) continue
-    const pnl = markCardPnl(
-      toSwipeLite(swipe),
-      card.strike,
-      tick.spot,
-      tick.expiryMs,
-      nowMs
-    )
+    const pnl = tickCardPnl(toSwipeLite(swipe), card.strike, tick, nowMs)
     if (pnl !== null) running += pnl
   }
   return running
@@ -253,6 +250,9 @@ function useChartHistory(
         smoothed[id] = {
           spot: BigInt(Math.round(f)).toString(),
           expiryMs: t.expiryMs,
+          // Must survive the easing copy — it's what locks a settled
+          // card's mark in `currentRunningPnl`.
+          settlementPrice: t.settlementPrice,
         }
       }
       raf = requestAnimationFrame(step)
