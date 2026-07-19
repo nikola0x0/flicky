@@ -26,6 +26,13 @@ const RED_BRAND_STYLE = {
   "--btn-highlight": "#f08585",
 } as CSSProperties
 
+// Secondary/navigation styling — blue so "my duels" reads as a way out to
+// history, distinct from the orange primary CTAs.
+const HISTORY_BRAND_STYLE = {
+  "--btn-bg": "#3a6ea5",
+  "--btn-highlight": "#6ea0d8",
+} as CSSProperties
+
 const TIER_LABEL: Record<Tier, string> = {
   practice: "practice",
   starter: "starter",
@@ -128,6 +135,7 @@ export default function GamePvp() {
         setStake={setStake}
         onQueueMatch={onQueueMatch}
         onOpenMode={() => setModeOpen(true)}
+        onViewDuels={() => navigate("/game/history")}
       />
     )
   }
@@ -156,11 +164,13 @@ function StandbyView({
   setStake,
   onQueueMatch,
   onOpenMode,
+  onViewDuels,
 }: {
   stake: Stake
   setStake: (s: Stake) => void
   onQueueMatch: () => void
   onOpenMode: () => void
+  onViewDuels: () => void
 }) {
   return (
     <div className="flex h-full flex-col gap-5 px-4 py-4">
@@ -204,6 +214,13 @@ function StandbyView({
             label={<span className="text-2xl">game mode</span>}
             style={MODE_BRAND_STYLE}
             onClick={onOpenMode}
+          />
+        </div>
+        <div id="my-duels-btn">
+          <MatchButton
+            label={<span className="text-2xl">my duels</span>}
+            style={HISTORY_BRAND_STYLE}
+            onClick={onViewDuels}
           />
         </div>
       </div>
