@@ -216,6 +216,13 @@ function StandbyView({
             onClick={onOpenMode}
           />
         </div>
+        {/* Separate the primary "start a duel" actions above from the
+            navigation button below so they don't read as one crowded stack.
+            Recessed groove line matches the buttons' pixel bevel. */}
+        <div
+          aria-hidden
+          className="my-1.5 h-0.5 w-full bg-black/45 shadow-[0_1px_0_rgba(255,255,255,0.08)]"
+        />
         <div id="my-duels-btn">
           <MatchButton
             label={<span className="text-2xl">my duels</span>}
