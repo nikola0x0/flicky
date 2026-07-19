@@ -35,6 +35,10 @@ import { handleManagerRequest } from "./manager-api"
 import { handleSeasonRequest } from "./season"
 import { handleOracleRequest } from "./oracle"
 import { handleSponsorRequest } from "./sponsor"
+import {
+  sponsorBalanceSnapshot,
+  startSponsorBalanceMonitor,
+} from "./sponsor-balance"
 import { websocketHandler } from "./ws/handlers"
 import { newSocketState } from "./ws/matchmaking"
 import { connectedAddressCount, queueStats, roomCount } from "./ws/matchmaking"
@@ -114,6 +118,7 @@ const server = Bun.serve({
         },
         cursors,
         oracleStream: oracleStreamStats(),
+        sponsorBalance: sponsorBalanceSnapshot(),
       })
     }
 
@@ -214,6 +219,7 @@ if (env.indexerEnabled && env.flickyPackageId) {
 startMatchClock()
 startOracleStream()
 startChatPruneLoop()
+startSponsorBalanceMonitor()
 
 if (env.keeperEnabled && env.keeperSecretKey && env.flickyPackageId) {
   try {
