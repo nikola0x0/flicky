@@ -28,8 +28,8 @@ const BLUE_BRAND_STYLE = {
  * but with its own header (back arrow + balance chips) and no bottom
  * nav. Reached by clicking the avatar in the game header.
  *
- * Layout mirrors the reference: avatar + identity, divider, 3 stats,
- * 3 action buttons, then a 1v1 history list with an empty state.
+ * Layout mirrors the reference: avatar + identity, divider, stats,
+ * and action buttons.
  */
 export default function Profile() {
   const account = useCurrentAccount()
@@ -181,29 +181,6 @@ export default function Profile() {
               icon="/icons/disk_load.png"
               onClick={() => setWithdrawOpen(true)}
             />
-          </section>
-
-          <section className="mt-6">
-            <button
-              type="button"
-              style={BLUE_BRAND_STYLE}
-              className="default-btn-green-container flex w-full items-center justify-between px-4 py-3 text-base text-lg tracking-wider text-white uppercase"
-            >
-              <span className="flex items-center gap-2">
-                <img
-                  src="/icons/swords.png"
-                  alt=""
-                  aria-hidden
-                  className="size-5 [image-rendering:pixelated]"
-                />
-                pvp history
-              </span>
-              <span className="text-base">▾</span>
-            </button>
-
-            <div className="mt-10 text-center text-base text-white/55">
-              no 1v1 history yet
-            </div>
           </section>
 
           {/* Required by the Uppbeat free-tier license for bgm.mp3 — see
