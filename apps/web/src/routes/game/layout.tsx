@@ -312,11 +312,11 @@ function FrameHeader({
 
   return (
     <header
-      className={`flex justify-center gap-2 px-3 py-3 min-[400px]:justify-between ${isShop
-          ? "min-h-[128px] items-start bg-[url('/decorations/top-decor.png')] bg-[length:auto_100%] bg-repeat-x [image-rendering:pixelated]"
-          : isHome
-            ? "items-center bg-[#151837]"
-            : "items-center"
+      className={`flex justify-between gap-2 px-3 py-3 min-[400px]:justify-between ${isShop
+        ? "min-h-[128px] items-start bg-[url('/decorations/top-decor.png')] bg-[length:auto_100%] bg-repeat-x [image-rendering:pixelated]"
+        : isHome
+          ? "items-center bg-[#151837]"
+          : "items-center"
         } `}
     >
       {account ? (
