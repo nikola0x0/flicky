@@ -178,7 +178,7 @@ export default function DuelView() {
   // referentially stable from useMemo's perspective.
   const [demoStartedAtMs] = useState(() => Date.now() - 60_000)
 
-  // 1 Hz wall-clock tick — drives the "settles in Xs" countdowns
+  // 1 Hz wall-clock tick — drives the per-card settle countdowns
   // on each unsettled card. Kept here so the entire CardList re-renders
   // once per second rather than each card timing itself independently.
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -633,13 +633,12 @@ function CardList({
 }
 
 /**
- * Format a duration as a compact "settles in X" string.
- * < 60s  → "30s"
- * ≥ 60s  → "1:30"
+ * Format a duration as a compact clock countdown — always m:ss, so a
+ * sub-minute value reads "0:30" rather than "30s". Keeps every card's
+ * countdown in one consistent format instead of switching units at 60s.
  */
 function formatRemaining(ms: number): string {
   const totalSec = Math.ceil(ms / 1000)
-  if (totalSec < 60) return `${totalSec}s`
   const min = Math.floor(totalSec / 60)
   const sec = totalSec % 60
   return `${min}:${sec.toString().padStart(2, "0")}`
@@ -712,9 +711,7 @@ function CardTile({
   // `markCardPnl`). `card.expiryMs` only exists in the demo fixture.
   const expiryMs = tick?.expiryMs ?? card?.expiryMs
   const remainingMs =
-    !settledNow && expiryMs !== undefined
-      ? Math.max(0, expiryMs - nowMs)
-      : null
+    !settledNow && expiryMs !== undefined ? Math.max(0, expiryMs - nowMs) : null
   // Pre-settle: live sentiment % (once we have a swipe + a live tick to
   // mark it against) alongside the countdown, not one replacing the
   // other — rendered as two stacked lines, not squeezed onto one.
