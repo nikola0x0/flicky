@@ -344,9 +344,9 @@ function FrameHeader({
       } `}
     >
       {account ? (
-        <div className="flex min-w-0 flex-1 flex-col gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between">
-          {/* Narrow: row 1 = avatar + menu. Wide: avatar + inline chips (left). */}
-          <div className="flex items-center justify-between gap-2 min-[400px]:justify-start min-[400px]:gap-5">
+        <div className="flex min-w-0 flex-1 flex-col items-center gap-2 min-[400px]:flex-row min-[400px]:justify-between">
+          {/* Narrow: row 1 = avatar + menu, centered. Wide: avatar + inline chips (left). */}
+          <div className="flex items-center justify-center gap-3 min-[400px]:justify-start min-[400px]:gap-5">
             <div className="flex items-center gap-2.5 min-[400px]:gap-5">
               <Link
                 id="header-avatar"
@@ -371,8 +371,8 @@ function FrameHeader({
             </div>
             {!isShop && <MenuButton className="min-[400px]:hidden" />}
           </div>
-          {/* Narrow: row 2 = the balance chips on their own line. */}
-          {chips("flex min-[400px]:hidden")}
+          {/* Narrow: row 2 = the balance chips, centered on their own line. */}
+          {chips("flex justify-center min-[400px]:hidden")}
           {/* Wide: menu at the far right of the header row. */}
           {!isShop && <MenuButton className="hidden min-[400px]:block" />}
         </div>
