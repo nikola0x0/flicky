@@ -353,18 +353,27 @@ function HeaderBalances({
   const managerBalance = managerInfo?.balance ?? 0
   const location = useLocation()
   return (
-    <div className="flex items-center gap-5">
+    <div className="flex min-w-0 items-center gap-2.5 overflow-x-auto [scrollbar-width:none] min-[400px]:gap-5 [&::-webkit-scrollbar]:hidden">
       <Link
         id="header-avatar"
         to="/profile"
         aria-label="open profile"
         state={{ from: location.pathname }}
         onClick={() => playSfx("click")}
-        className="transition-opacity hover:opacity-85"
+        className="shrink-0 transition-opacity hover:opacity-85"
       >
-        <PlayerAvatar address={address} size={56} />
+        <PlayerAvatar
+          address={address}
+          size={48}
+          className="min-[400px]:hidden"
+        />
+        <PlayerAvatar
+          address={address}
+          size={56}
+          className="hidden min-[400px]:block"
+        />
       </Link>
-      <div className="flex items-center gap-4">
+      <div className="flex min-w-0 items-center gap-2 min-[400px]:gap-4">
         <BalanceChip
           id="balance-wallet"
           icon="/tokens/usdc-icon.png"
