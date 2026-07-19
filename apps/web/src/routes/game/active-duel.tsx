@@ -454,18 +454,27 @@ export function ActiveDuel({
       await sign.mutateAsync({ transaction: tx })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      const insufficient =
-        /withdraw_balance|EInsufficient|abort code: 1\b/.test(msg)
+      // Per-market LP backing gate (expiry_cash::assert_backing /
+      // EInsufficientCash, abort code 0). Backing flips within seconds on
+      // testnet, so a retry usually clears it — we throw (which resets the
+      // card, keeping the player on THIS card) rather than advancing. Check
+      // this BEFORE `insufficient`, whose old `EInsufficient` pattern also
+      // matched EInsufficientCash and mislabeled it as a balance problem.
+      const backingDropped =
+        /assert_backing|EInsufficientCash|abort code: 0\b/.test(msg)
+      const insufficient = /withdraw_balance|abort code: 1\b/.test(msg)
       const longShotUnavailable =
         /assert_mint_admission|ENetPremiumBelowMinimum|abort code: 4\b/.test(
           msg
         )
       throw new Error(
-        insufficient
-          ? "Your account ran out of dUSDC for this swipe's mint premium — top up your account and swipe again."
-          : longShotUnavailable
-            ? "That long-shot side is too unlikely to place on this market — swipe the other way (the favored call)."
-            : msg
+        backingDropped
+          ? "This market's liquidity backing dipped for a moment — swipe again (it usually clears within a few seconds)."
+          : insufficient
+            ? "Your account ran out of dUSDC for this swipe's mint premium — top up your account and swipe again."
+            : longShotUnavailable
+              ? "That long-shot side is too unlikely to place on this market — swipe the other way (the favored call)."
+              : msg
       )
     }
     setPhase((p) =>
