@@ -129,7 +129,7 @@ if (eligible.length > 0) {
 // ─── Tiered selection preview (DECK_TIER_ENABLED path) ───────────────────────
 console.log()
 console.log(
-  `  ── Tiered preview: ${env.deckShortCount} short + ${env.deckMidCount} mid` +
+  `  ── Tiered preview: up to ${env.deckTierSize} distinct markets, min 2` +
     ` (DECK_TIER_ENABLED=${env.deckTierEnabled}) ──`
 )
 const tiered = selectTieredMarkets(rows, {
@@ -145,11 +145,13 @@ if (tiered.length === 0) {
     `  (no safe short/mid markets — matchmaking falls back to the flat picker)`
   )
 } else {
+  // The actual deck: up to `deckTierSize` distinct markets, soonest-first.
+  const deck = tiered.slice(0, env.deckTierSize)
   const bufM = env.deckTxBufferMs / 60_000
   console.log(
     `  card  expiry(UTC)  settle(min)  swipe-deadline(min, −${env.deckTxBufferMs / 1000}s buf)`
   )
-  tiered.forEach((m, i) => {
+  deck.forEach((m, i) => {
     const settleMin = (m.expiry - now) / 60_000
     const deadlineMin = settleMin - bufM
     console.log(
@@ -163,10 +165,13 @@ if (tiered.length === 0) {
         .padStart(6)}`
     )
   })
-  const slowest = (tiered[tiered.length - 1].expiry - now) / 60_000
+  const slowest = (deck[deck.length - 1].expiry - now) / 60_000
   console.log(
-    `  → duel finishes ~${slowest.toFixed(0)} min after lockup; ` +
-      `${tiered.length} distinct market(s), ${DECK_SIZE} cards round-robin across them`
+    `  → ${deck.length} distinct-market card(s)` +
+      (deck.length < 2
+        ? " ⚠ below min 2 — matchmaking retries/falls back"
+        : "") +
+      `; duel finishes ~${slowest.toFixed(0)} min after lockup`
   )
 }
 console.log()

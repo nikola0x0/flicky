@@ -66,6 +66,7 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
   let spot = 0n
   let decision = decideDeckSize(0, resolveDeckBounds({}))
   let usedTiered = false
+  let enough = false
   for (let attempt = 1; attempt <= DECK_GEN_ATTEMPTS; attempt++) {
     // Tiered selection (2 short + 3 mid, short-first) when enabled — staggered
     // settle times, ≤~15-min duel. Falls back to the flat horizon picker if
@@ -91,7 +92,11 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
     // live markets (each with a distinct strike). A full deck needs only >= 1
     // market (decideDeckSize's floor) — the strike grid does the rest.
     decision = decideDeckSize(markets.length, resolveDeckBounds({}))
-    if (decision.ok) break
+    // Tiered wants >= 2 DISTINCT markets (min 2 cards, no padding — we never
+    // duplicate a market to hit a fixed size, which would repeat the same
+    // question/settle time). The flat fallback keeps decideDeckSize's >= 1 floor.
+    enough = usedTiered ? markets.length >= 2 : decision.ok
+    if (enough) break
     if (attempt < DECK_GEN_ATTEMPTS) {
       log.info(
         `deck-gen attempt ${attempt}/${DECK_GEN_ATTEMPTS}: ${markets.length} mintable market(s) — retrying in ${DECK_GEN_RETRY_MS}ms`
@@ -99,9 +104,9 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
       await new Promise((r) => setTimeout(r, DECK_GEN_RETRY_MS))
     }
   }
-  if (!decision.ok) {
+  if (!enough) {
     throw new Error(
-      `no mintable markets after ${DECK_GEN_ATTEMPTS} tries — BTC market LP backing is thin right now, retry shortly`
+      `not enough live BTC markets after ${DECK_GEN_ATTEMPTS} tries — supply is thin right now, retry shortly`
     )
   }
   const nonceHex = hashToHex(crypto.getRandomValues(new Uint8Array(16)))
@@ -112,13 +117,20 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
     timestampMs: Date.now(),
     nonceHex,
   })
-  // Tiered decks pin ONE card per distinct market (no round-robin), so the
-  // deck is exactly the number of live short+mid markets (~4) and cards come
-  // out sorted by expiry ascending — soonest-timeout first, no short market
-  // wrapped to the deck tail where the in-order swipe reaches it after it has
-  // expired. The flat fallback keeps its round-robin `decision.deckSize`.
-  const deckSize = usedTiered ? markets.length : decision.deckSize
-  const cards = await buildProbedDeck(markets, spot, seed, deckSize, Date.now())
+  // Tiered decks take up to `deckTierSize` (4) DISTINCT markets, soonest-first
+  // (one card each) — never padding/duplicating a market to hit a fixed size,
+  // so every card is a different market + settle time (varied, staggered). The
+  // count floats 2–4 with the live supply. The flat fallback keeps its
+  // round-robin `decision.deckSize`.
+  const deckMarkets = usedTiered ? markets.slice(0, env.deckTierSize) : markets
+  const deckSize = usedTiered ? deckMarkets.length : decision.deckSize
+  const cards = await buildProbedDeck(
+    deckMarkets,
+    spot,
+    seed,
+    deckSize,
+    Date.now()
+  )
   const deck = commitDeck(cards)
   await rememberDeck(deck.hash, deck.cards, seed)
   // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields
