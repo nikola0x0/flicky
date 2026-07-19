@@ -1,24 +1,189 @@
-# Oracle Selection — picking which `OracleSVI` a duel pins to
+# Oracle / Market Selection — which `ExpiryMarket`s a duel's cards pin to
 
-This doc explains why a duel's settlement clock isn't a single, fixed
-number ("the deck settles 75 minutes after start"), where the clock
-actually comes from, and how Flicky picks an oracle so duels finish
-quickly instead of dragging out for hours.
+This doc explains where a duel's settlement clock comes from, how Flicky
+picks markets so duels finish quickly instead of dragging out for hours,
+and why — on the current DeepBook Predict `6-24` testnet — that's harder
+than it sounds.
 
-If you've ever stared at the lockup screen wondering why one duel
-settles in 6 minutes and another in 4 hours, this is the answer.
+If you've ever stared at the lockup screen wondering why one duel settles
+in 12 minutes and another in ~3 hours, this is the answer.
 
-> **⚠️ Superseded by the new PRD direction.** Everything below describes
-> the **as-built picker** — one oracle pinned per duel, shortest viable
-> expiry, ≥ 90 s headroom for a 60 s swipe phase. The locked PRD direction
-> (see `docs/prd.md`) replaces this with a **per-card oracle model**:
->
-> - Each duel deck is **5 cards = 5 different oracles**, picked as the 5 nearest oracle resolutions strictly **>10 minutes out**.
-> - Cards in one deck can settle at **different times** because the oracles have different expiries. `duel::settle_duel` only runs once all 5 have resolved.
-> - The "single shortest viable" picker described below applies to the legacy single-oracle Duel; the new card-generation API in `apps/server` selects 5 oracles instead.
-> - The `ORACLE_MIN_HEADROOM_MS = 90_000` constant — sized for a 60 s swipe phase — is also legacy. The new spec gives the swipe phase **up to 10 minutes**, so the headroom floor and the 5-oracle selection floor merge into a single rule: each card's oracle expiry > `now + 10 min`.
->
-> The DeepBook background sections (oracle pool, 2-tier 15-min cron, ~7–8 s settle latency, 1-in-6 10-min outliers, `settlement_price: Option<u64>` flip) all carry forward unchanged — they describe DeepBook's behavior, not Flicky's selection strategy.
+> **Reading guide.** The **current model is `6-24` `ExpiryMarket`s**,
+> described in the first three sections below. The old
+> `OracleSVI` / `findLatestOracleSvi` / `ORACLE_MIN_HEADROOM_MS` write-up —
+> a single oracle pinned per duel, 15-min oracle cron, 2h/5h tiers — is the
+> **removed `4-16` path**, preserved as an appendix for its DeepBook
+> operator-behavior background. Where the two disagree on cadence or object
+> model, the `6-24` sections win.
+
+---
+
+## Current model — `6-24` `ExpiryMarket` cadence
+
+In `6-24` there is **no single per-duel oracle**. Each duel deck is N cards
+(default `[3, 5]`), and each card pins to a DeepBook Predict
+**`ExpiryMarket`** — one shared object per `(underlying, expiry)`. Flicky
+discovers live BTC markets from the **predict indexer**
+(`GET /markets?limit=500`), not from an on-chain `OracleCreated` event
+scan. The old web-side `OracleSVI` picker is gone; selection now lives
+server-side in `apps/server/src/deckmaster.ts`.
+
+**Cadence on `6-24` testnet is NOT the old 15-min cron.** The upstream BTC
+market maker mints a fresh short-lived market roughly **every ~1 minute**
+in the near term, then jumps to **hourly** markets further out. There is
+essentially **nothing in the ~15–55 min band**. Live snapshot
+(`bun --filter server run check:cadence`, 2026-07-19 11:12 UTC):
+
+```
+  ttl(min)  expiry(UTC)  status
+       0.1  11:13        live · below 10m headroom
+       1.1  11:14        live · below 10m headroom
+       2.1  11:15        live · below 10m headroom
+       7.1  11:20        live · below 10m headroom
+      12.1  11:25        ◆ ELIGIBLE — deck can pick
+      47.1  12:00        ◆ ELIGIBLE — deck can pick
+     107.1  13:00        ◆ ELIGIBLE — deck can pick
+     167.1  14:00        ◆ ELIGIBLE — deck can pick
+
+  live markets (expiry > now):     8
+  Flicky-eligible (10m < ttl ≤ 3h): 4   ⚠ fewer than a 5-card deck
+```
+
+The consequence that matters: the dense sub-10-min markets are filtered
+out by the headroom floor, and what clears it is a **wide, sparse expiry
+ladder** (12m, 47m, 107m, 167m). Because a deck grabs the _nearest_
+eligible markets across that whole ladder, one deck can hold a card that
+settles in 12 minutes and another that settles in ~2h47m.
+
+---
+
+## How Flicky picks markets — `selectMarketRows`
+
+The picker is `selectMarketRows` in `apps/server/src/deckmaster.ts`
+(wrapped by `findDeckMarkets`). It is a pure filter/sort/slice:
+
+```text
+rows      ← GET {predictIndexerUrl}/markets?limit=500
+eligible  ← rows where
+              propbook_underlying_id === 1          (BTC)
+              AND kind === "market_created"
+              AND (expiry − now) >  DECK_CARD_MIN_HEADROOM_MS   (10 min)
+              AND (expiry − now) ≤  DECK_CARD_MAX_HORIZON_MS     (3 h)
+sorted    ← eligible sorted by expiry ASCENDING     (soonest-settling first)
+pick      ← sorted.slice(0, count)                  (nearest `count` markets)
+```
+
+So **cards are already sorted by settle time, soonest-first** — that part
+is done. `buildDeck` / `buildSviDeck` then round-robins `deckSize` cards
+across whatever markets survive (`markets[i % markets.length]`), each with
+a distinct strike, so a deck needs only **≥ 1 live market**
+(`decideDeckSize` floor). When fewer than `deckSize` markets are eligible
+(the common case above), several cards share a market with different
+strikes rather than failing the match.
+
+**The finalize gate is the whole story for wall-clock.**
+`duel::finalize` verifies **every** card is settled before it pays out
+(`apps/contracts/sources/duel.move`, `cards_settled` all-true). A card can
+only settle once its `ExpiryMarket` expires _and_ DeepBook writes the
+settlement price. So a duel's total time is gated by its
+**latest-expiring card**, not its soonest — pick a 167-min card into the
+deck and the match stays open ~2h47m even though four other cards settled
+long ago.
+
+---
+
+## Tiered selection + per-card deadlines (`DECK_TIER_ENABLED`)
+
+The flat picker above bounds the duel with a single horizon knob, but the
+`6-24` cadence has three lifetime **tiers** (created→expiry): **short ~3 min**
+(minted every ~1 min), **mid ~15 min** (every ~5 min), **long ~180 min**
+(hourly). The tiered path composes a deck **across** tiers so cards settle at
+**staggered** times (short cards resolve ~3 min in for early drama, mid cards
+~6–15 min) while the whole duel still finishes in **≤ ~15 min**.
+
+**Selection** — `selectTieredMarkets` (`apps/server/src/deckmaster.ts`), used
+by `findTieredDeckMarkets` when `env.deckTierEnabled`:
+
+- classify each live BTC market by `lifetime = expiry − checkpoint_timestamp_ms`
+  (`classifyTier`: ≤5 min short, ≤60 min mid, else long);
+- take `DECK_SHORT_COUNT` (2) **freshest** shorts + `DECK_MID_COUNT` (3)
+  **soonest-settling** mids that clear their per-tier TTL floor
+  (`DECK_SHORT_TTL_FLOOR_MS` 90 s / `DECK_MID_TTL_FLOOR_MS` 5.5 min);
+- return them **sorted by expiry ascending** (short-first). Since swipes are
+  in-order on chain, card 0 = the soonest-settling short and each later card
+  has a later deadline (monotonic countdowns). `buildDeck` round-robins
+  `deckSize` cards across whatever the selector returns; when fewer than 3
+  safe mids are live (common — the mid tier's oldest rung is under the floor),
+  the deck simply has fewer distinct markets. Empty result → matchmaking
+  falls back to the flat `findDeckMarkets`.
+
+**Why the short tier is usable at all** — the on-chain 5-min swipe window
+(`duel.move` `SWIPE_WINDOW_MS` / `ESwipeTimeout`) is a **ceiling, not a
+floor**. The web enforces a stricter **per-card deadline** = `card.expiry −
+CARD_SWIPE_BUFFER_MS` (20 s, covers sign + sponsor + execute), so a 3-min
+market is swiped well before it expires — no contract change. See
+`apps/web/src/lib/swipe-window.ts::cardSwipeRemainingMs` and the swipe
+countdown / auto-swipe in `routes/game/active-duel.tsx`.
+
+**Missing a deadline** — swipes are in-order (`EOutOfTurn`) with no skip, so
+a card the player can't reach would forfeit _everything after it_. To avoid
+that, when a card's per-card countdown hits 0 (but its market is still live
+within the buffer) the client **auto-swipes the favored side** — the
+guaranteed-mintable one, within the player's pre-funded budget — so the deck
+advances. If even that can't land, the remaining cards forfeit at settlement
+(`score_staked_card` returns 0 for an un-swiped card — the contract already
+tolerates partial decks). `mint-probe.ts::premiumClearsFloor` projects each
+card's premium to `min(now+5min, expiry−buffer)` so short cards aren't
+spuriously ATM-forced.
+
+> **Prod note (Railway).** `DECK_TIER_ENABLED` is **opt-in** (default off) —
+> set it plus the tier vars on `flicky-server` before merging to `main`
+> (which auto-deploys). Prod also runs `DECK_PROBE_MINTABLE=false` (the
+> on-chain mint probe is a no-op there; the off-chain `premiumClearsFloor`
+> in `buildProbedDeck` still runs) and `DECK_CARD_MIN_HEADROOM_MS=300000`.
+> See the `check:cadence` "Tiered preview" block for a live dry-run.
+
+---
+
+## Tuning the settle window — making duels "fun-fast"
+
+Two env levers (`apps/server/src/env.ts`) bound the eligible band:
+
+| Env                         | Default  | Effect                                                                                                                                                        | Trade-off                                                                                                                                               |
+| --------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DECK_CARD_MAX_HORIZON_MS`  | `3h`     | Upper expiry bound. **This is why duels can drag to ~3h** — it admits the hourly markets. Lower it (e.g. `20–30 min`) to bound the whole duel to that window. | Supply is thin in the short band — a tight horizon often leaves only 1–2 markets, so all cards round-robin onto them (playable, but less deck variety). |
+| `DECK_CARD_MIN_HEADROOM_MS` | `10 min` | Lower expiry bound — the swipe/finalize safety margin. Lowering it (e.g. `5–7 min`) taps the dense ~1-min-cadence markets.                                    | Higher risk of `EOracleNotLive` / market-expires-mid-match (report §8.2 S2) and of the long-shot side dropping under the `$1` premium floor (S1).       |
+
+**Structural reality:** because `6-24` testnet offers no markets in the
+~15–55 min band, you cannot get 5 _distinct_ markets that all settle
+within ~20 minutes. A snappy duel therefore means **accepting a deck
+concentrated on 1–2 near-term markets** (tight horizon + round-robin
+strikes), not five independent short oracles. That's a supply constraint
+upstream, not a Flicky bug.
+
+**Inspect the live pool any time:**
+
+```bash
+bun --filter server run check:cadence
+# → src/scripts/check-market-cadence.ts
+# prints the live ttl ladder with per-market tier, the flat-picker eligible
+# set + its wall-clock floor, AND a "Tiered preview" dry-run of
+# selectTieredMarkets (2 short + 3 mid) with each card's settle time and
+# per-card swipe deadline.
+```
+
+---
+
+# Appendix — Legacy `4-16` `OracleSVI` model (historical)
+
+> **Removed in the `6-24` migration.** The `OracleSVI` shared object, the
+> web-side `findLatestOracleSvi` picker, and the `ORACLE_MIN_HEADROOM_MS`
+> constant described below **no longer exist** in the codebase (see
+> `docs/report/2026-07-11-predict-6-24-update.md`). The sections are kept
+> for their DeepBook operator-behavior background (settlement latency,
+> `settlement_price` flip) and for historical context on the single-oracle
+> picker. Do not treat the `4-16` cadence (15-min cron, 2h/5h tiers) as
+> current — see the `6-24` sections above.
 
 ---
 
@@ -50,11 +215,11 @@ expiry**.
 
 Wall-clock breakdown of a duel:
 
-| Stage                                    | Latency               |
-|------------------------------------------|-----------------------|
-| Create + join + reveal + 5 swipes        | ~30–90 s              |
-| **Lockup (wait for `now > expiry`)**     | **1.5–120 min**       |
-| Settle phase (settlement_price + keeper) | ~10–20 s              |
+| Stage                                    | Latency         |
+| ---------------------------------------- | --------------- |
+| Create + join + reveal + 5 swipes        | ~30–90 s        |
+| **Lockup (wait for `now > expiry`)**     | **1.5–120 min** |
+| Settle phase (settlement_price + keeper) | ~10–20 s        |
 
 The lockup is the dominant cost, which is exactly what the picker
 optimises. Everything below is the long form.
@@ -86,12 +251,12 @@ DeepBook publishes a **rolling pool of ~13 BTC `OracleSVI` objects
 simultaneously** on a strict quarter-hour cron, organised into two
 tiers:
 
-| Cron slot   | Tier  | Lifetime | Typical use                  |
-|-------------|-------|----------|------------------------------|
-| `HH:00`     | long  | 5 hours  | dated forwards               |
-| `HH:15`     | short | 2 hours  | swipe-PvP, scalping binaries |
-| `HH:30`     | short | 2 hours  | swipe-PvP, scalping binaries |
-| `HH:45`     | short | 2 hours  | swipe-PvP, scalping binaries |
+| Cron slot | Tier  | Lifetime | Typical use                  |
+| --------- | ----- | -------- | ---------------------------- |
+| `HH:00`   | long  | 5 hours  | dated forwards               |
+| `HH:15`   | short | 2 hours  | swipe-PvP, scalping binaries |
+| `HH:30`   | short | 2 hours  | swipe-PvP, scalping binaries |
+| `HH:45`   | short | 2 hours  | swipe-PvP, scalping binaries |
 
 DeepBook never mints a long oracle on `:15/:30/:45` and never mints a
 short oracle on `:00`. The schedule is mechanical.
@@ -154,7 +319,7 @@ Two failure paths under the two-tier cron design above:
 2. **Pre-activation latency on short-tier ticks.** On `:15/:30/:45` a
    2-hour short oracle is minted but DeepBook needs a few seconds to
    activate it + push first prices. During that window the previous
-   long oracle is the newest *active* candidate — same outcome, pinned
+   long oracle is the newest _active_ candidate — same outcome, pinned
    to a multi-hour wait.
 
 Concrete reproduction from testnet (captured 2026-05-20 18:36 UTC):
@@ -175,7 +340,7 @@ for a forwards-trading product, fatal for a swipe-PvP demo.
 
 ---
 
-## Current strategy — shortest viable expiry
+## Legacy strategy — shortest viable expiry (`4-16`, removed)
 
 The picker is now in `apps/web/src/lib/flicky.ts::findLatestOracleSvi`.
 Pseudocode:
@@ -197,7 +362,7 @@ fallback  ← CONFIG.fallbackOracleSviId  if no eligible
 Key constant:
 
 ```ts
-const ORACLE_MIN_HEADROOM_MS = 90_000n  // 90 seconds
+const ORACLE_MIN_HEADROOM_MS = 90_000n // 90 seconds
 ```
 
 This is the floor — the picker refuses to pin an oracle whose
@@ -288,7 +453,8 @@ newest-first. The picker walks the top 10 and picks the smallest
 `OracleSVI.settlement_price` flips from `None` to `Some(u64)` in a
 single DeepBook-operator transaction some time **after** the
 `expiry` cron tick. Empirical measurement on testnet (5 normal cases
-+ 1 outlier captured 2026-05-20):
+
+- 1 outlier captured 2026-05-20):
 
 ```
 expiry=18:30:00  settleTx=18:30:08.046  Δ=  8.0s
@@ -311,13 +477,13 @@ fine; it just polls `settlement_price` and acts when it appears.
 So the **full settle phase** from `now > expiry` to `duel.status =
 COMPLETE` is:
 
-| Stage                              | Latency        |
-|------------------------------------|----------------|
-| Oracle stops price updates         | expiry − ~5 s  |
-| DeepBook writes `settlement_price` | expiry + ~8 s  |
-| Keeper poll sees the new state     | ≤ `KEEPER_POLL_INTERVAL_MS` (default 10 s) |
-| Keeper PTB lands (settle×5 + redeems + finalize) | + 1–3 s |
-| **Total settle phase**             | **~10–20 s after expiry** |
+| Stage                                            | Latency                                    |
+| ------------------------------------------------ | ------------------------------------------ |
+| Oracle stops price updates                       | expiry − ~5 s                              |
+| DeepBook writes `settlement_price`               | expiry + ~8 s                              |
+| Keeper poll sees the new state                   | ≤ `KEEPER_POLL_INTERVAL_MS` (default 10 s) |
+| Keeper PTB lands (settle×5 + redeems + finalize) | + 1–3 s                                    |
+| **Total settle phase**                           | **~10–20 s after expiry**                  |
 
 The dominant cost in a duel's total wall-clock time is therefore
 **lockup latency** — the gap between everyone finishing their swipes
