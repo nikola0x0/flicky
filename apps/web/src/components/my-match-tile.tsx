@@ -56,6 +56,9 @@ interface Tick {
   expiryMs?: number
   /** Market settled on-chain — lands before the indexer mirrors it. */
   settled?: boolean
+  /** The settled market's final price — locks the chart's mark for this
+   *  card (see `tickCardPnl` in lib/pnl.ts). */
+  settlementPrice?: string
 }
 
 const POLL_INTERVAL_MS = 5_000
@@ -206,6 +209,7 @@ export function MyMatchTile() {
           spot: msg.spot,
           expiryMs: Number(msg.expiry),
           settled: msg.settlementPrice != null,
+          settlementPrice: msg.settlementPrice ?? undefined,
         },
       }))
     })

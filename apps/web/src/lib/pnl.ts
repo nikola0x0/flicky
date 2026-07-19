@@ -133,6 +133,38 @@ export function markCardPnl(
   return BigInt(Math.round(q * (2 * pIn - 1)))
 }
 
+/** The tick fields the mark helpers need — both the duel-view and chart
+ *  tick shapes structurally satisfy it. */
+export interface TickLite {
+  spot: string
+  expiryMs?: number
+  /** Present once the market settled — the price the contract scores
+   *  against (`actual_up = settlement > strike`). */
+  settlementPrice?: string
+}
+
+/**
+ * Mark for one swipe given the latest oracle tick. A settled market LOCKS
+ * to the binary outcome at its `settlementPrice` — the live spot must not
+ * move it again (the spot re-crossing the strike after expiry would
+ * otherwise flip a card that already resolved; the settlement price is
+ * what `settle_card` will score against). Unsettled markets keep the
+ * continuous Black-Scholes mark from the live spot.
+ */
+export function tickCardPnl(
+  swipe: SwipeLite | null,
+  strike: string | undefined,
+  tick: TickLite | undefined,
+  nowMs: number
+): bigint | null {
+  if (tick?.settlementPrice != null) {
+    // `expiryMs: undefined` collapses the probability to the pure binary
+    // outcome of settlementPrice-vs-strike (see `upProbability`).
+    return markCardPnl(swipe, strike, tick.settlementPrice, undefined, nowMs)
+  }
+  return markCardPnl(swipe, strike, tick?.spot, tick?.expiryMs, nowMs)
+}
+
 /**
  * Format dUSDC micro-units (1e6) as a signed human string, e.g.
  *   +0.4200 dUSDC

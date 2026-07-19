@@ -3,7 +3,14 @@ import { Link, useParams } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { CONFIG } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
-import { fmtPnlPct, markCardPnl, type SwipeLite } from "@/lib/pnl"
+import { fmtPnlPct, tickCardPnl, type SwipeLite } from "@/lib/pnl"
+import { duelUnsettleable, missingSides } from "@/lib/duel-state"
+import {
+  buildRefundDuelTx,
+  refundEligibility,
+  REFUND_TIMEOUT_MS,
+} from "@/lib/flicky"
+import { useFlickySign } from "@/lib/use-flicky-sign"
 import { playSfx } from "@/lib/sound"
 import { PixelButton } from "@/components/pixel-button"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
@@ -30,6 +37,7 @@ const BLUE_BRAND_STYLE = {
 interface DuelLite {
   id: string
   status: "PENDING" | "ACTIVE" | "COMPLETE"
+  stakeCoinType?: string
   creator: string
   challenger: string
   cardsRevealed: boolean
@@ -75,6 +83,9 @@ interface Tick {
   /** Market has settled on-chain — final outcome is known even before
    *  the indexer records it into the duel's `cardOutcomes`. */
   settled?: boolean
+  /** The settled market's final price — what `settle_card` scores
+   *  against. Once present, PnL locks to it (live spot is ignored). */
+  settlementPrice?: string
 }
 
 /**
@@ -214,13 +225,7 @@ export default function DuelView() {
         const row = duel.swipes.find((s) => s.cardIdx === i)
         const swipe = (p0 ? row?.p0Swipe : row?.p1Swipe) ?? null
         pnl = swipe
-          ? markCardPnl(
-              toSwipeLite(swipe),
-              card.strike,
-              tick?.spot,
-              tick?.expiryMs,
-              nowMs
-            )
+          ? tickCardPnl(toSwipeLite(swipe), card.strike, tick, nowMs)
           : null
       }
       return pnl === null ? "pending" : pnl < 0n ? "loss" : "win"
@@ -257,6 +262,10 @@ export default function DuelView() {
   // arrow here would re-fire that effect (and replay the sfx) every
   // second while the modal is open.
   const closeResult = useCallback(() => setResultOpen(false), [])
+
+  // ── stuck-duel refund (same sponsored sign path as history.tsx) ──
+  const { mutateAsync: signRefund, isPending: refunding } = useFlickySign()
+  const [refunded, setRefunded] = useState(false)
   // Auto-open exactly once per duel per browser: the seen-key guard
   // means a refresh or revisit never re-pops it (the "share result"
   // button below reopens on demand). Demo mode never completes.
@@ -344,6 +353,7 @@ export default function DuelView() {
           spot: msg.spot,
           expiryMs: Number(msg.expiry),
           settled: msg.settlementPrice != null,
+          settlementPrice: msg.settlementPrice ?? undefined,
         },
       }))
     })
@@ -371,6 +381,53 @@ export default function DuelView() {
 
   const opponent = myIsP0 ? duel.challenger : duel.creator
   const isLive = duel.status === "ACTIVE"
+
+  // ── dead-duel detection ──────────────────────────────────────────
+  // A market that settled without both swipes in kills the deck for good
+  // (the keeper's bothDone gate never opens; expired markets can't be
+  // swiped) — stop pretending settlement is coming and surface the
+  // refund path instead.
+  const settledMarkets = new Set(
+    duel.cards
+      .filter((c) => ticks[c.expiry_market_id]?.settled === true)
+      .map((c) => c.expiry_market_id)
+  )
+  const dead = !demo && duelUnsettleable(duel, settledMarkets)
+  const sides = dead
+    ? missingSides(duel, settledMarkets)
+    : { p0: false, p1: false }
+  const oppMissing = myIsP0 ? sides.p1 : sides.p0
+  const youMissing = myIsP0 ? sides.p0 : sides.p1
+  const deadMsg =
+    oppMissing && !youMissing
+      ? "your opponent didn't finish their swipes"
+      : youMissing && !oppMissing
+        ? "you didn't finish your swipes"
+        : "not every swipe was made in time"
+  const refundKind =
+    dead && isParticipant && address && !refunded
+      ? refundEligibility(duel, address, nowMs)
+      : null
+  // refund_duel opens 1h after start (contract gate) — count it down.
+  const refundOpensInMs = Math.max(
+    0,
+    duel.startedAtMs + REFUND_TIMEOUT_MS - nowMs
+  )
+  const onRefund = async () => {
+    if (refunding) return
+    playSfx("click")
+    try {
+      await signRefund({
+        transaction: buildRefundDuelTx(
+          duel.id,
+          duel.stakeCoinType || CONFIG.stakeType
+        ),
+      })
+      setRefunded(true)
+    } catch {
+      // Leave the button up — next tap retries.
+    }
+  }
   // On-chain settlement lands before the indexer mirrors it, so the duel's
   // `settledCount` lags. Count oracles the tick stream reports as settled
   // and show whichever is further along — keeps "N/5 settled" honest.
@@ -485,7 +542,38 @@ export default function DuelView() {
         myIsP0={Boolean(myIsP0)}
         ticks={ticks}
         nowMs={nowMs}
+        dead={dead}
       />
+
+      {dead && isLive && isParticipant && (
+        <div className="flex flex-col gap-2 rounded bg-amber-900/30 px-3 py-2.5 text-sm text-amber-200/85">
+          {refunded ? (
+            <p className="tracking-[0.12em] text-emerald-300 uppercase">
+              refunded ✓ — stakes returned
+            </p>
+          ) : (
+            <>
+              <p>
+                {deadMsg} — this duel can no longer settle. stakes go back to
+                both players.
+              </p>
+              {refundKind ? (
+                <PixelButton
+                  onClick={onRefund}
+                  disabled={refunding}
+                  className="h-10 w-full text-base"
+                >
+                  {refunding ? "refunding…" : "claim refund"}
+                </PixelButton>
+              ) : (
+                <p className="tracking-[0.12em] text-white/60 uppercase tabular-nums">
+                  refund opens in {formatRemaining(refundOpensInMs)}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {!isParticipant && (
         <div className="rounded bg-amber-900/30 px-3 py-2 text-sm text-amber-200/85">
@@ -512,7 +600,9 @@ export default function DuelView() {
       {/* small queue-leave footer note */}
       <p className="text-center text-xs tracking-[0.18em] text-white/40 uppercase">
         {isLive
-          ? "settlement runs automatically — keeper handles the rest"
+          ? dead
+            ? "this duel can't settle — stakes are refundable"
+            : "settlement runs automatically — keeper handles the rest"
           : "this match is final"}
       </p>
 
@@ -604,11 +694,13 @@ function CardList({
   myIsP0,
   ticks,
   nowMs,
+  dead,
 }: {
   duel: DuelLite
   myIsP0: boolean
   ticks: Record<string, Tick>
   nowMs: number
+  dead: boolean
 }) {
   const slots = Math.max(duel.cardCount, duel.cards.length)
   return (
@@ -625,6 +717,7 @@ function CardList({
             myIsP0={myIsP0}
             ticks={ticks}
             nowMs={nowMs}
+            dead={dead}
           />
         ))}
       </div>
@@ -657,12 +750,14 @@ function CardTile({
   myIsP0,
   ticks,
   nowMs,
+  dead,
 }: {
   index: number
   duel: DuelLite
   myIsP0: boolean
   ticks: Record<string, Tick>
   nowMs: number
+  dead: boolean
 }) {
   const card = duel.cards[index]
   const outcome = duel.cardOutcomes.find((o) => o.cardIdx === index)
@@ -682,25 +777,20 @@ function CardTile({
     outcome && (myIsP0 ? outcome.p0Pnl : outcome.p1Pnl) !== null
       ? BigInt(myIsP0 ? outcome.p0Pnl! : outcome.p1Pnl!)
       : card && mySwipe
-        ? markCardPnl(
-            toSwipeLite(mySwipe),
-            card.strike,
-            tick?.spot,
-            tick?.expiryMs,
-            nowMs
-          )
+        ? tickCardPnl(toSwipeLite(mySwipe), card.strike, tick, nowMs)
         : null
 
   // A card is final (for COLOR purposes) once the indexer records its
   // outcome OR the oracle tick reports `settled` (which lands first — the
-  // on-chain settlement precedes the indexer mirror). Past expiry,
-  // `markCardPnl`'s probability collapses to exactly 0 or 1, so its
-  // direction (win/loss) is always right even before the indexer catches
-  // up — safe to color the tile from immediately. Its MAGNITUDE, though,
-  // is a symmetric ±quantity projection with no premium netted in, so it
-  // always reads exactly ±100% — only `outcome.p{0,1}Pnl` (the real,
-  // premium-netted figure) is trustworthy as a displayed number. See the
-  // `hasOutcome` branch below, which gates the TEXT (not the color) on it.
+  // on-chain settlement precedes the indexer mirror). Once the tick
+  // carries a `settlementPrice`, `tickCardPnl` locks the outcome to it —
+  // the same price `settle_card` scores against — so the direction
+  // (win/loss) is right even before the indexer catches up, and the live
+  // spot re-crossing the strike after expiry can't flip it back. Its
+  // MAGNITUDE, though, is a symmetric ±quantity projection with no
+  // premium netted in, so it always reads exactly ±100% — only
+  // `outcome.p{0,1}Pnl` (the real, premium-netted figure) is trustworthy
+  // as a final number. See the `hasOutcome` branch below.
   const settledNow = Boolean(outcome) || tick?.settled === true
   const hasOutcome = Boolean(outcome)
   const state: CardState =
@@ -779,7 +869,13 @@ function CardTile({
             signedPercent(myPnl, mySwipe)
           )
         ) : settledNow ? (
-          "settling…"
+          // Market settled; outcome locked to its settlement price
+          // (`tickCardPnl`). On a dead duel the keeper is never coming —
+          // "void", not an eternal "settling…".
+          <>
+            {livePnlText && <p>{livePnlText}</p>}
+            <p>{dead ? "void" : "settling…"}</p>
+          </>
         ) : livePnlText || timeText ? (
           <>
             {livePnlText && <p>{livePnlText}</p>}
