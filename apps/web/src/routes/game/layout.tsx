@@ -198,7 +198,7 @@ function WelcomeTourTrigger() {
 function SignedOutPrompt({ onSignIn }: { onSignIn: () => void }) {
   const [artFailed, setArtFailed] = useState(false)
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-8 px-6 pb-32 text-center">
+    <div className="flex h-full flex-col items-center justify-between gap-8 px-6 pb-32 text-center">
       <div className="flex flex-col items-center gap-0">
         {!artFailed && (
           <img
@@ -312,13 +312,12 @@ function FrameHeader({
 
   return (
     <header
-      className={`flex justify-center gap-2 px-3 py-3 min-[400px]:justify-between ${
-        isShop
+      className={`flex justify-center gap-2 px-3 py-3 min-[400px]:justify-between ${isShop
           ? "min-h-[128px] items-start bg-[url('/decorations/top-decor.png')] bg-[length:auto_100%] bg-repeat-x [image-rendering:pixelated]"
           : isHome
             ? "items-center bg-[#151837]"
             : "items-center"
-      } `}
+        } `}
     >
       {account ? (
         <div className="flex min-w-0 items-center gap-2.5 min-[400px]:gap-4">
@@ -335,7 +334,7 @@ function FrameHeader({
           {/* avatar | balance | menu stay one horizontal row at every width;
               below 400px the two balance chips stack into two rows so the
               balance column is narrow enough for all three to fit. */}
-          <div className="flex min-w-0 flex-col gap-1.5 min-[400px]:flex-row min-[400px]:items-center min-[400px]:gap-4">
+          <div className="pl-4 flex min-w-0 flex-col gap-1.5 min-[400px]:flex-row min-[400px]:items-center min-[400px]:gap-4">
             <BalanceChip
               id="balance-wallet"
               icon="/tokens/usdc-icon.png"
@@ -414,8 +413,7 @@ function NavTab({
       aria-label={label}
       onClick={() => playSfx("click")}
       className={({ isActive }) =>
-        `relative flex flex-1 items-center justify-center px-1 py-2 transition-opacity ${
-          isActive ? "opacity-100" : "opacity-55 hover:opacity-85"
+        `relative flex flex-1 items-center justify-center px-1 py-2 transition-opacity ${isActive ? "opacity-100" : "opacity-55 hover:opacity-85"
         }`
       }
     >
@@ -430,9 +428,8 @@ function NavTab({
           <img
             src={icon}
             alt={label}
-            className={`size-12 transition-transform duration-100 [image-rendering:pixelated] ${
-              isActive ? "-translate-y-1" : ""
-            }`}
+            className={`size-12 transition-transform duration-100 [image-rendering:pixelated] ${isActive ? "-translate-y-1" : ""
+              }`}
           />
         </>
       )}
