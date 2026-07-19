@@ -195,12 +195,22 @@ export const env = {
   // these are targets, not hard requirements (2 short + 3 mid = 5 markets).
   deckShortCount: Number(process.env.DECK_SHORT_COUNT ?? 2),
   deckMidCount: Number(process.env.DECK_MID_COUNT ?? 3),
-  // Per-tier TTL floor at selection time. Short cards are swiped FIRST (in
-  // the opening seconds) so a small floor suffices (~90s covers create+join
-  // latency + the first swipe). Mid cards are swiped later, up to the 5-min
-  // on-chain swipe window, so their floor must clear 5 min with margin.
+  // Max deck size for the tiered path: take up to this many DISTINCT markets
+  // (soonest-first, one card each). We never pad/duplicate a market to hit a
+  // fixed size — that would repeat the same question + settle time. So the
+  // card count floats between 2 (the min gate in matchmaking) and this cap.
+  deckTierSize: Number(process.env.DECK_TIER_SIZE ?? 4),
+  // Per-tier TTL floor at selection time — the market must live at least this
+  // long to be swipeable. Cards are ordered soonest-expiry-first and swiped
+  // in that order, so a market only needs to outlast the moment IT is reached
+  // (reveal latency + its swipe-order position), not the full 5-min window.
+  // Short: ~90s (covers create+join+reveal + the first swipe). Mid: 2 min —
+  // NOT 5.5 min: the old floor assumed the pre-per-card-deadline model where
+  // any card could be swiped at t=5min; now mids are ordered after shorts and
+  // swiped early, so 2 min is safe AND admits the ~4-min-TTL mid rung that
+  // 5.5 min wrongly filtered — giving ~4 distinct markets instead of 3.
   deckShortTtlFloorMs: Number(process.env.DECK_SHORT_TTL_FLOOR_MS ?? 90_000),
-  deckMidTtlFloorMs: Number(process.env.DECK_MID_TTL_FLOOR_MS ?? 330_000),
+  deckMidTtlFloorMs: Number(process.env.DECK_MID_TTL_FLOOR_MS ?? 120_000),
   // Per-card swipe-deadline buffer the UI subtracts from a card's market
   // expiry (card deadline = expiry − buffer). Must cover zkLogin sign +
   // sponsor round-trip + build + execute (longest measured ~12s); 20s is
