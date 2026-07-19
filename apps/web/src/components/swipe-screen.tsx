@@ -135,6 +135,14 @@ export function SwipeScreen({
 
   const doSwipe = async (isUp: boolean) => {
     if (disabled) return
+    // Block the long-shot side whose premium can't clear the $1 floor — the
+    // swipe would abort on-chain (code 4). Covers keyboard + button + drag
+    // (all route through here). yesPlaceable/noPlaceable are computed below.
+    if ((isUp && !yesPlaceable) || (!isUp && !noPlaceable)) {
+      setError(UNPLACEABLE_HINT)
+      setDrag({ x: 0, active: false, flying: null })
+      return
+    }
     playSfx(isUp ? "swipe-up" : "swipe-down")
     setBusy(true)
     setError(null)
@@ -165,12 +173,17 @@ export function SwipeScreen({
     if (!drag.active) return
     const ww = cardWidth.current || 320
     const threshold = ww * DRAG_COMMIT_FRACTION
-    if (drag.x > threshold) {
+    if (drag.x > threshold && yesPlaceable) {
       setDrag({ x: drag.x, active: false, flying: "up" })
       void doSwipe(true)
-    } else if (drag.x < -threshold) {
+    } else if (drag.x < -threshold && noPlaceable) {
       setDrag({ x: drag.x, active: false, flying: "down" })
       void doSwipe(false)
+    } else if (drag.x > threshold || drag.x < -threshold) {
+      // Dragged onto the long-shot side that can't be placed — snap back and
+      // hint instead of flying the card off into an on-chain abort.
+      setDrag({ x: 0, active: false, flying: null })
+      setError(UNPLACEABLE_HINT)
     } else {
       setDrag({ x: 0, active: false, flying: null })
     }
@@ -212,6 +225,18 @@ export function SwipeScreen({
       : null
   const yesPct = upProb === null ? null : Math.round(upProb * 100)
   const noPct = yesPct === null ? null : 100 - yesPct
+  // A swipe mints on the chosen side; its premium is `P × SWIPE_QUANTITY`, and
+  // the protocol rejects premiums under the $1 min_net_premium. So the
+  // long-shot side (win prob under ~50%) can't be placed on this card — dim it
+  // and block the swipe instead of letting it abort on-chain (code 4). Unknown
+  // odds (no tick yet) → both sides allowed.
+  const MIN_NET_PREMIUM = 1_000_000
+  const swipeQty = Number(SWIPE_QUANTITY)
+  const yesPlaceable = upProb === null || upProb * swipeQty >= MIN_NET_PREMIUM
+  const noPlaceable =
+    upProb === null || (1 - upProb) * swipeQty >= MIN_NET_PREMIUM
+  const UNPLACEABLE_HINT =
+    "That side's premium is below the $1 minimum on this card — swipe the favored side."
   const countdownColor =
     remainingMs === null
       ? "text-white/50"
@@ -407,7 +432,12 @@ export function SwipeScreen({
 
           {/* yes / no action chips — with estimated per-side win odds */}
           <div id="yes-no-chips" className="grid grid-cols-2 gap-2">
-            <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#3a1620] px-2 py-2">
+            <div
+              title={noPlaceable ? undefined : UNPLACEABLE_HINT}
+              className={`pixel-tile flex items-center justify-center gap-1.5 bg-[#3a1620] px-2 py-2 ${
+                noPlaceable ? "" : "opacity-35 grayscale"
+              }`}
+            >
               <img
                 src="/icons/arrow_left.png"
                 alt=""
@@ -419,17 +449,22 @@ export function SwipeScreen({
               </span>
               {noPct !== null && (
                 <span className="font-pixel text-sm text-rose-300/70 tabular-nums">
-                  {noPct}%
+                  {noPlaceable ? `${noPct}%` : "locked"}
                 </span>
               )}
             </div>
-            <div className="pixel-tile flex items-center justify-center gap-1.5 bg-[#163a26] px-2 py-2">
+            <div
+              title={yesPlaceable ? undefined : UNPLACEABLE_HINT}
+              className={`pixel-tile flex items-center justify-center gap-1.5 bg-[#163a26] px-2 py-2 ${
+                yesPlaceable ? "" : "opacity-35 grayscale"
+              }`}
+            >
               <span className="font-pixel text-lg text-emerald-300 uppercase">
                 yes
               </span>
               {yesPct !== null && (
                 <span className="font-pixel text-sm text-emerald-300/70 tabular-nums">
-                  {yesPct}%
+                  {yesPlaceable ? `${yesPct}%` : "locked"}
                 </span>
               )}
               <img

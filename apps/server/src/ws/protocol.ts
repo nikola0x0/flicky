@@ -54,14 +54,21 @@ export type ServerMsg =
       role: "creator" | "challenger"
       opponent: string
       /**
-       * sha2_256 hash of the 5-card deck the server pre-generated for
-       * this match. The plaintext stays server-side until reveal_deck
-       * lands on chain — the creator commits THIS hash in `create_duel`,
-       * the keeper reveals later. "0x"-prefixed hex string. Empty only
-       * if deck generation degraded gracefully (shouldn't happen in
-       * practice).
+       * sha2_256 hash of the deck the server pre-generated for this match.
+       * The plaintext stays server-side until reveal_deck lands on chain —
+       * the creator commits THIS hash in `create_duel`, the keeper reveals
+       * later. "0x"-prefixed hex string. Empty only if deck generation
+       * degraded gracefully (shouldn't happen in practice).
        */
       deckHash: string
+      /**
+       * Number of cards the committed deck actually has — the creator MUST
+       * pass this as `deck_size` to `create_duel`, because `reveal_deck`
+       * asserts `revealed.length == deck_size` (duel.move). Dynamic under
+       * tiered selection (one card per live short/mid market, typically 4);
+       * the flat picker uses the fixed round-robin size.
+       */
+      deckSize: number
     }
   | {
       /**

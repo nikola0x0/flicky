@@ -7,6 +7,7 @@ import type { Unsubscribe } from "@/hooks/use-flicky-socket"
 import {
   buildCreateDuelDusdcTx,
   buildJoinDuelDusdcTx,
+  DEFAULT_DECK_SIZE,
   resolveCreatedDuelId,
 } from "@/lib/flicky"
 import {
@@ -75,6 +76,13 @@ interface Props {
    */
   deckHash?: string
   /**
+   * Number of cards in the committed deck, from `match_found`. The creator
+   * passes it as `deck_size` to `create_duel` — `reveal_deck` asserts the
+   * revealed count matches, so a wrong size aborts the reveal. Absent on
+   * resume (the on-chain Duel already carries its size).
+   */
+  deckSize?: number
+  /**
    * Resume mode: mount straight onto an existing duel by id (deep-link /
    * reload-safe). Skips create/join, subscribes to the room, and lets
    * `room_state` drive the phase. Mutually exclusive with `role`/`deckHash`.
@@ -110,6 +118,7 @@ export function ActiveDuel({
   tier,
   managerId,
   deckHash,
+  deckSize,
   resumeDuelId,
   onDuelReady,
   // wsOpen is in the Props for future status indicators but the player
@@ -269,7 +278,8 @@ export function ActiveDuel({
           account.address,
           deckHashBytes,
           STAKE_TIERS[tier],
-          DEEPBOOK.dusdcType
+          DEEPBOOK.dusdcType,
+          deckSize ?? DEFAULT_DECK_SIZE
         )
         const res = await sign.mutateAsync({ transaction: tx })
         // Sponsored-gas path returns only `{ digest }` — objectChanges
@@ -297,7 +307,7 @@ export function ActiveDuel({
         })
       }
     })()
-  }, [role, deckHash, account, client, sign, tier, send, onDuelReady])
+  }, [role, deckHash, deckSize, account, client, sign, tier, send, onDuelReady])
 
   // Challenger: wait for duel_assigned, then sign join_duel.
   useEffect(() => {
@@ -444,18 +454,27 @@ export function ActiveDuel({
       await sign.mutateAsync({ transaction: tx })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      const insufficient =
-        /withdraw_balance|EInsufficient|abort code: 1\b/.test(msg)
+      // Per-market LP backing gate (expiry_cash::assert_backing /
+      // EInsufficientCash, abort code 0). Backing flips within seconds on
+      // testnet, so a retry usually clears it — we throw (which resets the
+      // card, keeping the player on THIS card) rather than advancing. Check
+      // this BEFORE `insufficient`, whose old `EInsufficient` pattern also
+      // matched EInsufficientCash and mislabeled it as a balance problem.
+      const backingDropped =
+        /assert_backing|EInsufficientCash|abort code: 0\b/.test(msg)
+      const insufficient = /withdraw_balance|abort code: 1\b/.test(msg)
       const longShotUnavailable =
         /assert_mint_admission|ENetPremiumBelowMinimum|abort code: 4\b/.test(
           msg
         )
       throw new Error(
-        insufficient
-          ? "Your account ran out of dUSDC for this swipe's mint premium — top up your account and swipe again."
-          : longShotUnavailable
-            ? "That long-shot side is too unlikely to place on this market — swipe the other way (the favored call)."
-            : msg
+        backingDropped
+          ? "This market's liquidity backing dipped for a moment — swipe again (it usually clears within a few seconds)."
+          : insufficient
+            ? "Your account ran out of dUSDC for this swipe's mint premium — top up your account and swipe again."
+            : longShotUnavailable
+              ? "That long-shot side is too unlikely to place on this market — swipe the other way (the favored call)."
+              : msg
       )
     }
     setPhase((p) =>
@@ -525,13 +544,23 @@ export function ActiveDuel({
           Exit
         </button>
       </div>
-      {phase.kind === "SWIPING" && effectiveRemainingMs !== null ? (
-        <SwipeWindowBar
-          remainingMs={effectiveRemainingMs}
-          frac={windowFrac}
-          urgent={isWindowUrgent}
-          expired={isWindowExpired}
-        />
+      {phase.kind === "SWIPING" ? (
+        // Only show the countdown once THIS card's market expiry is known,
+        // so a short card shows its real (small) deadline from the first
+        // frame instead of flashing the 5-min window time and then jumping
+        // down when the tick arrives.
+        currentCardExpiryMs !== undefined && effectiveRemainingMs !== null ? (
+          <SwipeWindowBar
+            remainingMs={effectiveRemainingMs}
+            frac={windowFrac}
+            urgent={isWindowUrgent}
+            expired={isWindowExpired}
+          />
+        ) : (
+          <div className="text-base tracking-wider text-white/55 uppercase">
+            revealing card&hellip;
+          </div>
+        )
       ) : (
         <div className="text-base tracking-wider text-white/55 uppercase">
           {tier
