@@ -83,6 +83,13 @@ export default function GameLayout() {
   // The active-match screen gets a full-frame battle backdrop (behind the
   // header too), so the art isn't clipped to the <main> area below the bar.
   const isPlay = showOutlet && location.pathname.startsWith("/game/play")
+  // Swipe screens (active duel + practice) hide the bottom-nav tabs. The
+  // fixed-height swipe card needs the vertical room — without this the hero
+  // mascot art collapses and the YES/NO row clips off-screen on shorter
+  // phones. Tabbing away mid-swipe (real stake in play) is never wanted
+  // anyway; the in-screen Exit button is the intended way out.
+  const isSwipe =
+    isPlay || (showOutlet && location.pathname === "/game/practice")
 
   const outletContext: GameOutletContext = {
     openLogin: () => setLoginOpen(true),
@@ -133,7 +140,7 @@ export default function GameLayout() {
             <SignedOutPrompt onSignIn={() => setLoginOpen(true)} />
           )}
         </main>
-        <FrameBottomNav />
+        {!isSwipe && <FrameBottomNav />}
         <SpotlightOverlay />
       </DeviceFrame>
 

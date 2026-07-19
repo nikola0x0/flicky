@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { Link, useNavigate } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
@@ -11,7 +11,12 @@ import {
 } from "@/hooks/use-practice-session"
 import type { RoomState } from "@/lib/room-state"
 import { fmtDusdcSigned } from "@/lib/pnl"
-import { SwipeScreen, CardLedger, fmtUsd } from "@/components/swipe-screen"
+import {
+  SwipeScreen,
+  ChartChips,
+  CardLedger,
+  fmtUsd,
+} from "@/components/swipe-screen"
 import { BtcSpotChart, type StrikeLine } from "@/components/btc-spot-chart"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { PlayerAvatar } from "@/components/player-avatar"
@@ -30,26 +35,24 @@ export default function GamePractice() {
   const { phase } = practice
 
   return (
-    <div className="flex h-full flex-col gap-4 px-4 py-4 text-white">
+    <div className="flex h-full flex-col gap-3 px-4 py-3 text-white">
       <WsErrorBanner onMessage={onMessage} />
-      <div className="flex items-center justify-between">
-        <h2 className="text-3xl tracking-[0.2em] uppercase">Practice</h2>
-        <button
-          id="exit-button"
-          type="button"
-          onClick={() => navigate("/game/home")}
-          className="rounded border border-white/25 bg-black/40 px-3 py-1 text-lg backdrop-blur-md hover:bg-black/55"
-        >
-          Exit
-        </button>
-      </div>
-
-      {phase.kind !== "INTRO" && phase.kind !== "ERROR" && (
-        <BotStrip
-          botRevealed={practice.botRevealed}
-          total={practice.cards.length}
-        />
-      )}
+      <MatchBar
+        showOpponent={phase.kind !== "INTRO" && phase.kind !== "ERROR"}
+        botRevealed={practice.botRevealed}
+        total={practice.cards.length}
+        onExit={() => navigate("/game/home")}
+        actions={
+          phase.kind === "SWIPING" && practice.roomState && account ? (
+            <ChartChips
+              roomState={practice.roomState}
+              ticks={practice.ticks}
+              myAddress={account.address}
+              opponentAddress={BOT_ADDRESS}
+            />
+          ) : null
+        }
+      />
 
       {phase.kind === "INTRO" && (
         <IntroView
@@ -68,8 +71,6 @@ export default function GamePractice() {
           roomState={practice.roomState}
           cardIdx={phase.cardIdx}
           ticks={practice.ticks}
-          myAddress={account.address}
-          opponentAddress={BOT_ADDRESS}
           busyLabel="locking pick…"
           settleLabel={settleLabelFor(practice.cards, phase.cardIdx)}
           onSwipe={async (isUp) => practice.swipe(isUp)}
@@ -121,24 +122,52 @@ function settleLabelFor(cards: PracticeCard[], cardIdx: number): string {
   return `settles ${Math.round(offset / 1000)}s after lock`
 }
 
-/** Who you're playing: the bot, plus how many picks it has locked so far. */
-function BotStrip({
+/** Single top bar for the practice screen: opponent info (once the deck is
+ *  dealt) or a small "Practice" label, plus the chart chips (during swiping)
+ *  and Exit — all on one row so the card keeps the height a separate title
+ *  row used to eat. */
+function MatchBar({
+  showOpponent,
   botRevealed,
   total,
+  actions,
+  onExit,
 }: {
+  showOpponent: boolean
   botRevealed: boolean[]
   total: number
+  actions?: ReactNode
+  onExit: () => void
 }) {
   const locked = botRevealed.filter(Boolean).length
   return (
-    <div className="flex items-center gap-2.5 border-2 border-black/55 bg-[#1b2548] px-3 py-2">
-      <PlayerAvatar address={BOT_ADDRESS} size={28} />
-      <span className="font-pixel text-sm tracking-[0.18em] text-white/80 uppercase">
-        {BOT_NAME}
-      </span>
-      <span className="ml-auto font-pixel text-xs tracking-[0.18em] text-white/45 uppercase tabular-nums">
-        {total > 0 ? `bot locked ${locked}/${total}` : "warming up"}
-      </span>
+    <div className="flex items-center gap-2.5">
+      {showOpponent ? (
+        <>
+          <PlayerAvatar address={BOT_ADDRESS} size={24} />
+          <span className="min-w-0 truncate font-pixel text-sm tracking-[0.18em] text-white/80 uppercase">
+            {BOT_NAME}
+          </span>
+          <span className="shrink-0 font-pixel text-xs tracking-[0.18em] text-white/45 uppercase tabular-nums">
+            {total > 0 ? `${locked}/${total}` : "…"}
+          </span>
+        </>
+      ) : (
+        <span className="font-pixel text-lg tracking-[0.2em] text-white/80 uppercase">
+          Practice
+        </span>
+      )}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+        {actions}
+        <button
+          id="exit-button"
+          type="button"
+          onClick={onExit}
+          className="rounded border border-white/25 bg-black/40 px-2.5 py-1 text-sm backdrop-blur-md hover:bg-black/55"
+        >
+          Exit
+        </button>
+      </div>
     </div>
   )
 }

@@ -63,8 +63,6 @@ export function SwipeScreen({
   roomState,
   cardIdx,
   ticks,
-  myAddress,
-  opponentAddress,
   disabled = false,
   busyLabel = "minting position…",
   settleLabel,
@@ -74,8 +72,6 @@ export function SwipeScreen({
   roomState: RoomState
   cardIdx: number
   ticks: Record<string, { spot: string; expiry: string }>
-  myAddress: string
-  opponentAddress?: string
   disabled?: boolean
   busyLabel?: string
   settleLabel?: string
@@ -87,7 +83,6 @@ export function SwipeScreen({
   const expiry = tick ? BigInt(tick.expiry) : undefined
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [chartModal, setChartModal] = useState<null | "btc" | "pnl">(null)
 
   // 1 Hz wall-clock so the "settles in …" countdown ticks.
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -109,17 +104,6 @@ export function SwipeScreen({
   useEffect(() => {
     setDrag({ x: 0, active: false, flying: null })
   }, [cardIdx])
-
-  const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
-  const opponent =
-    opponentAddress ?? (myIsP0 ? roomState.challenger : roomState.creator)
-  const chartDuel = {
-    id: roomState.duelId,
-    settledCount: roomState.settledCount,
-    cards: roomState.cards,
-    swipes: roomState.swipes,
-    cardOutcomes: roomState.cardOutcomes,
-  }
 
   // All of my cards are swiped (cardIdx past the deck) — hand off to the
   // result/home rather than showing a dead-end settlement screen.
@@ -258,38 +242,27 @@ export function SwipeScreen({
 
   return (
     <div className="flex flex-1 flex-col">
-      {/* top bar — card count + chart toggles (charts live in modals so the
-          card owns the screen) */}
-      <div className="flex items-center justify-between pb-2">
-        <span className="font-pixel text-base tracking-[0.2em] text-white/55 uppercase">
-          card {cardIdx + 1} / {roomState.cards.length}
-        </span>
-        <div className="flex gap-2">
-          <ChartChip
-            id="chart-btc"
-            label="btc"
-            icon="/icons/coins.png"
-            onClick={() => setChartModal("btc")}
-          />
-          <ChartChip
-            id="chart-pnl"
-            label="pnl"
-            icon="/icons/arrow_up_down.png"
-            onClick={() => setChartModal("pnl")}
-          />
-        </div>
-      </div>
-
       {/* big, centered swipe card — fills the screen; next card peeks behind */}
       <div
         className="relative flex-1 select-none"
         style={{ touchAction: "none" }}
       >
         {hasNext && (
+          // Peeking next card-back. Plain contained image (no dark box / frame)
+          // so on tall phones the whole card-back floats on the play background
+          // at its natural proportions. It scales up + rises toward full size as
+          // you drag the current card away, so the next card "comes forward" as
+          // the top one leaves (`progress` runs 0→1 toward the commit
+          // threshold). Follows the finger while dragging; eases back on release.
           <div
             aria-hidden
-            className="pixel-tile no-hover absolute inset-x-4 top-6 bottom-3 bg-[#141d3a] bg-cover bg-center [image-rendering:pixelated]"
-            style={{ backgroundImage: "url(/assets/cards/card-back.png)" }}
+            className={`pointer-events-none absolute inset-x-4 top-6 bottom-3 bg-contain bg-center bg-no-repeat [image-rendering:pixelated] ${
+              drag.active ? "" : "transition-transform duration-300 ease-out"
+            }`}
+            style={{
+              backgroundImage: "url(/assets/cards/card-back.png)",
+              transform: `translateY(${(1 - progress) * 8}px) scale(${0.92 + progress * 0.08})`,
+            }}
           />
         )}
         <div
@@ -343,7 +316,7 @@ export function SwipeScreen({
           </div>
 
           {/* art window — pixel mascot reacts to the swipe direction */}
-          <div className="crt-screen relative flex flex-1 items-center justify-center overflow-hidden border-2 border-black/55 bg-gradient-to-b from-[#243169] to-[#10183a] shadow-[inset_0_3px_0_rgba(255,255,255,0.05),inset_0_-3px_0_rgba(0,0,0,0.5)]">
+          <div className="crt-screen relative flex min-h-0 flex-1 items-center justify-center overflow-hidden border-2 border-black/55 bg-gradient-to-b from-[#243169] to-[#10183a] shadow-[inset_0_3px_0_rgba(255,255,255,0.05),inset_0_-3px_0_rgba(0,0,0,0.5)]">
             <span className="absolute top-1 left-1 size-1.5 bg-black/50" />
             <span className="absolute top-1 right-1 size-1.5 bg-black/50" />
             <span className="absolute bottom-1 left-1 size-1.5 bg-black/50" />
@@ -484,7 +457,57 @@ export function SwipeScreen({
       <p className="pt-2 text-center font-pixel text-[11px] tracking-[0.25em] text-white/40 uppercase">
         {busy ? busyLabel : "swipe → yes · ← no"}
       </p>
+    </div>
+  )
+}
 
+/**
+ * The BTC / PnL chart toggles + their portal modals, lifted out of the card
+ * so the swipe-screen header can place them inline next to the opponent /
+ * timer strip (saves a whole row on mobile — the card's own banner already
+ * shows the card number). Owns the open/close state; the charts stay mounted
+ * so they keep accumulating oracle-tick history for the whole match.
+ */
+export function ChartChips({
+  roomState,
+  ticks,
+  myAddress,
+  opponentAddress,
+  className = "",
+}: {
+  roomState: RoomState
+  ticks: Record<string, { spot: string; expiry: string }>
+  myAddress: string
+  opponentAddress?: string
+  className?: string
+}) {
+  const [chartModal, setChartModal] = useState<null | "btc" | "pnl">(null)
+  const myIsP0 = myAddress.toLowerCase() === roomState.creator.toLowerCase()
+  const opponent =
+    opponentAddress ?? (myIsP0 ? roomState.challenger : roomState.creator)
+  const chartDuel = {
+    id: roomState.duelId,
+    settledCount: roomState.settledCount,
+    cards: roomState.cards,
+    swipes: roomState.swipes,
+    cardOutcomes: roomState.cardOutcomes,
+  }
+  return (
+    <>
+      <div className={`flex shrink-0 gap-2 ${className}`}>
+        <ChartChip
+          id="chart-btc"
+          label="btc"
+          icon="/icons/coins.png"
+          onClick={() => setChartModal("btc")}
+        />
+        <ChartChip
+          id="chart-pnl"
+          label="pnl"
+          icon="/icons/arrow_up_down.png"
+          onClick={() => setChartModal("pnl")}
+        />
+      </div>
       {/* Charts stay mounted (open toggles visibility) so they accumulate
           oracle-tick history for the whole match — warm on open, no reset. */}
       <ChartModal
@@ -510,7 +533,7 @@ export function SwipeScreen({
           <CardLedger roomState={roomState} myIsP0={myIsP0} ticks={ticks} />
         </div>
       </ChartModal>
-    </div>
+    </>
   )
 }
 
@@ -532,13 +555,13 @@ function ChartChip({
       id={id}
       type="button"
       onClick={onClick}
-      className="pixel-tile flex items-center gap-1.5 bg-[#3a4d8a] px-3 py-2 font-pixel text-base tracking-[0.15em] text-white uppercase hover:bg-[#46599e]"
+      className="pixel-tile flex shrink-0 items-center gap-1 bg-[#3a4d8a] px-2 py-1.5 font-pixel text-sm tracking-[0.1em] text-white uppercase hover:bg-[#46599e]"
     >
       <img
         src={icon}
         alt=""
         aria-hidden
-        className="size-5 [image-rendering:pixelated]"
+        className="size-4 [image-rendering:pixelated]"
       />
       {label}
     </button>

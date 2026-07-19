@@ -29,6 +29,7 @@ import { playSfx } from "@/lib/sound"
 import { WsErrorBanner } from "@/components/ws-error-banner"
 import {
   SwipeScreen,
+  ChartChips,
   CardLedger,
   fmtCountdown,
 } from "@/components/swipe-screen"
@@ -548,42 +549,60 @@ export function ActiveDuel({
   ])
 
   return (
-    <div className="flex h-full flex-col gap-4 px-4 py-4 text-white">
+    <div className="flex h-full flex-col gap-3 px-4 py-3 text-white">
       <WsErrorBanner onMessage={onMessage} />
-      <div className="flex items-center justify-between">
-        <h2 className="text-3xl tracking-[0.2em] uppercase">Active Match</h2>
+      {/* One-bar top: phase status / timer + chips on the left, Exit on the
+          right. The big "Active Match" title was dropped to give the card more
+          height on small phones — the card itself makes the context obvious. */}
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          {phase.kind === "SWIPING" ? (
+            // Only show the countdown once THIS card's market expiry is known,
+            // so a short card shows its real (small) deadline from the first
+            // frame instead of flashing the 5-min window time and then jumping
+            // down when the tick arrives.
+            currentCardExpiryMs !== undefined &&
+            effectiveRemainingMs !== null ? (
+              // Timer bar + chart chips share this row (the chips used to own a
+              // whole row; the card's banner already shows N/M).
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <SwipeWindowBar
+                    remainingMs={effectiveRemainingMs}
+                    frac={windowFrac}
+                    urgent={isWindowUrgent}
+                    expired={isWindowExpired}
+                  />
+                </div>
+                {roomState && account && (
+                  <ChartChips
+                    roomState={roomState}
+                    ticks={ticks}
+                    myAddress={account.address}
+                  />
+                )}
+              </div>
+            ) : (
+              <div className="text-base tracking-wider text-white/55 uppercase">
+                revealing card&hellip;
+              </div>
+            )
+          ) : (
+            <div className="text-base tracking-wider text-white/55 uppercase">
+              {tier
+                ? `stake ${Number(STAKE_TIERS[tier]) / 1e6} dUSDC`
+                : "staked duel"}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           onClick={onExit}
-          className="rounded border border-white/25 bg-black/40 px-3 py-1 text-lg backdrop-blur-md hover:bg-black/55"
+          className="shrink-0 rounded border border-white/25 bg-black/40 px-2.5 py-1 text-sm backdrop-blur-md hover:bg-black/55"
         >
           Exit
         </button>
       </div>
-      {phase.kind === "SWIPING" ? (
-        // Only show the countdown once THIS card's market expiry is known,
-        // so a short card shows its real (small) deadline from the first
-        // frame instead of flashing the 5-min window time and then jumping
-        // down when the tick arrives.
-        currentCardExpiryMs !== undefined && effectiveRemainingMs !== null ? (
-          <SwipeWindowBar
-            remainingMs={effectiveRemainingMs}
-            frac={windowFrac}
-            urgent={isWindowUrgent}
-            expired={isWindowExpired}
-          />
-        ) : (
-          <div className="text-base tracking-wider text-white/55 uppercase">
-            revealing card&hellip;
-          </div>
-        )
-      ) : (
-        <div className="text-base tracking-wider text-white/55 uppercase">
-          {tier
-            ? `stake ${Number(STAKE_TIERS[tier]) / 1e6} dUSDC`
-            : "staked duel"}
-        </div>
-      )}
 
       {phase.kind === "ENTRY" && <PhaseEntry reason={phase.reason} />}
       {phase.kind === "AWAIT_REVEAL" && (
@@ -594,7 +613,6 @@ export function ActiveDuel({
           roomState={roomState}
           cardIdx={phase.cardIdx}
           ticks={ticks}
-          myAddress={account.address}
           disabled={isWindowExpired}
           onSwipe={pvpSwipe}
           deckExhausted={<SettlingHandoff duelId={phase.duelId} />}
