@@ -616,7 +616,10 @@ function CardList({
       <h3 className="text-xs tracking-[0.2em] text-white/55 uppercase">
         cards
       </h3>
-      <div className="grid grid-cols-5 gap-1.5">
+      <div
+        className="grid gap-1.5"
+        style={{ gridTemplateColumns: `repeat(${slots}, minmax(0, 1fr))` }}
+      >
         {Array.from({ length: slots }).map((_, i) => (
           <CardTile
             key={i}
@@ -786,7 +789,10 @@ function CardTile({
             {timeText && <p>{timeText}</p>}
           </>
         ) : (
-          "—"
+          // Live card whose oracle tick (and thus its settle time) hasn't
+          // arrived yet — show a loading state, not a frozen dash, until the
+          // stream delivers `expiryMs` and the countdown starts running.
+          "…"
         )}
       </div>
     </div>
