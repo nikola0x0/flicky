@@ -16,7 +16,7 @@ export function MenuButton({ className = "" }: { className?: string }) {
         variant="bordered"
         aria-label="menu"
         onClick={() => setOpen(true)}
-        className={`size-10 !p-0 ${className}`}
+        className={`size-10 shrink-0 !p-0 ${className}`}
       >
         <img
           src="/icons/gear.png"
