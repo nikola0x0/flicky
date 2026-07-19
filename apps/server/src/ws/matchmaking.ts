@@ -51,7 +51,7 @@ import { STAKE_TIERS } from "./protocol"
 type DeckHashProvider = (opts: {
   tier: Tier
   creatorAddr: string | undefined
-}) => Promise<string>
+}) => Promise<{ deckHash: string; deckSize: number }>
 
 // Internal deck-gen retry: per-market LP backing (EInsufficientCash) flips
 // within seconds, so a momentary "0 mintable markets" is usually gone a beat
@@ -65,14 +65,17 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
   let markets: Awaited<ReturnType<typeof filterMintableMarkets>> = []
   let spot = 0n
   let decision = decideDeckSize(0, resolveDeckBounds({}))
+  let usedTiered = false
   for (let attempt = 1; attempt <= DECK_GEN_ATTEMPTS; attempt++) {
     // Tiered selection (2 short + 3 mid, short-first) when enabled — staggered
     // settle times, ≤~15-min duel. Falls back to the flat horizon picker if
     // no safe short/mid markets are live so matchmaking never dead-ends.
     let rawMarkets: MarketSnapshot[] = []
+    usedTiered = false
     if (env.deckTierEnabled) {
       rawMarkets = await findTieredDeckMarkets()
-      if (rawMarkets.length === 0) {
+      usedTiered = rawMarkets.length > 0
+      if (!usedTiered) {
         log.info(
           "tiered selection empty — falling back to flat findDeckMarkets"
         )
@@ -109,19 +112,19 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
     timestampMs: Date.now(),
     nonceHex,
   })
-  const cards = await buildProbedDeck(
-    markets,
-    spot,
-    seed,
-    decision.deckSize,
-    Date.now()
-  )
+  // Tiered decks pin ONE card per distinct market (no round-robin), so the
+  // deck is exactly the number of live short+mid markets (~4) and cards come
+  // out sorted by expiry ascending — soonest-timeout first, no short market
+  // wrapped to the deck tail where the in-order swipe reaches it after it has
+  // expired. The flat fallback keeps its round-robin `decision.deckSize`.
+  const deckSize = usedTiered ? markets.length : decision.deckSize
+  const cards = await buildProbedDeck(markets, spot, seed, deckSize, Date.now())
   const deck = commitDeck(cards)
   await rememberDeck(deck.hash, deck.cards, seed)
   // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields
   // `0x0x…` which decodes to 33 bytes and trips create_duel's 32-byte
   // assert.
-  return deck.hashHex
+  return { deckHash: deck.hashHex, deckSize }
 }
 
 export function setDeckHashProvider(fn: DeckHashProvider): void {
@@ -313,9 +316,9 @@ async function matchPair(
   // creator gets only the hash (commits it in create_duel); the
   // plaintext stays cached against the hash and is later read by the
   // keeper for reveal_deck.
-  let deckHashHex: string
+  let deck: { deckHash: string; deckSize: number }
   try {
-    deckHashHex = await deckHashProvider({
+    deck = await deckHashProvider({
       tier,
       creatorAddr: creatorAddr ?? undefined,
     })
@@ -349,14 +352,16 @@ async function matchPair(
     tier,
     role: "creator",
     opponent: challengerAddr ?? "",
-    deckHash: deckHashHex,
+    deckHash: deck.deckHash,
+    deckSize: deck.deckSize,
   })
   send(challenger, {
     type: "match_found",
     tier,
     role: "challenger",
     opponent: creatorAddr ?? "",
-    deckHash: deckHashHex,
+    deckHash: deck.deckHash,
+    deckSize: deck.deckSize,
   })
   if (creatorAddr && challengerAddr) {
     armHandshakeTimeout(creator, challenger, creatorAddr)

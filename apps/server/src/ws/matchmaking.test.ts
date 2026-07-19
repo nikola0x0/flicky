@@ -31,7 +31,10 @@ import {
 // Bypass real deck generation in queue tests — the matchmaking layer is
 // what's under test here, not Deckmaster. Tests that DO care about
 // deck-gen should override this stub locally.
-setDeckHashProvider(async () => "0x" + "a".repeat(64))
+setDeckHashProvider(async () => ({
+  deckHash: "0x" + "a".repeat(64),
+  deckSize: 5,
+}))
 
 // `joinQueue` now reads player ratings from Postgres for MMR pairing, so
 // the queue-mechanics suites need a TEST_DATABASE_URL (see test-preload.ts)

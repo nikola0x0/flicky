@@ -56,6 +56,7 @@ export default function GamePvp() {
     role: "creator" | "challenger"
     opponent: string
     deckHash: string
+    deckSize: number
   } | null>(null)
 
   const tier: Tier =
@@ -77,6 +78,7 @@ export default function GamePvp() {
           role: msg.role,
           opponent: msg.opponent,
           deckHash: msg.deckHash,
+          deckSize: msg.deckSize,
         })
       }
     })
@@ -114,6 +116,7 @@ export default function GamePvp() {
         tier={tier}
         managerId={managerId}
         deckHash={matched.deckHash}
+        deckSize={matched.deckSize}
         wsOpen={wsOpen}
         send={send}
         onMessage={onMessage}

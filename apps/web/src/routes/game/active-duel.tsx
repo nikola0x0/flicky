@@ -7,6 +7,7 @@ import type { Unsubscribe } from "@/hooks/use-flicky-socket"
 import {
   buildCreateDuelDusdcTx,
   buildJoinDuelDusdcTx,
+  DEFAULT_DECK_SIZE,
   resolveCreatedDuelId,
 } from "@/lib/flicky"
 import {
@@ -75,6 +76,13 @@ interface Props {
    */
   deckHash?: string
   /**
+   * Number of cards in the committed deck, from `match_found`. The creator
+   * passes it as `deck_size` to `create_duel` — `reveal_deck` asserts the
+   * revealed count matches, so a wrong size aborts the reveal. Absent on
+   * resume (the on-chain Duel already carries its size).
+   */
+  deckSize?: number
+  /**
    * Resume mode: mount straight onto an existing duel by id (deep-link /
    * reload-safe). Skips create/join, subscribes to the room, and lets
    * `room_state` drive the phase. Mutually exclusive with `role`/`deckHash`.
@@ -110,6 +118,7 @@ export function ActiveDuel({
   tier,
   managerId,
   deckHash,
+  deckSize,
   resumeDuelId,
   onDuelReady,
   // wsOpen is in the Props for future status indicators but the player
@@ -269,7 +278,8 @@ export function ActiveDuel({
           account.address,
           deckHashBytes,
           STAKE_TIERS[tier],
-          DEEPBOOK.dusdcType
+          DEEPBOOK.dusdcType,
+          deckSize ?? DEFAULT_DECK_SIZE
         )
         const res = await sign.mutateAsync({ transaction: tx })
         // Sponsored-gas path returns only `{ digest }` — objectChanges
@@ -297,7 +307,7 @@ export function ActiveDuel({
         })
       }
     })()
-  }, [role, deckHash, account, client, sign, tier, send, onDuelReady])
+  }, [role, deckHash, deckSize, account, client, sign, tier, send, onDuelReady])
 
   // Challenger: wait for duel_assigned, then sign join_duel.
   useEffect(() => {
@@ -525,13 +535,23 @@ export function ActiveDuel({
           Exit
         </button>
       </div>
-      {phase.kind === "SWIPING" && effectiveRemainingMs !== null ? (
-        <SwipeWindowBar
-          remainingMs={effectiveRemainingMs}
-          frac={windowFrac}
-          urgent={isWindowUrgent}
-          expired={isWindowExpired}
-        />
+      {phase.kind === "SWIPING" ? (
+        // Only show the countdown once THIS card's market expiry is known,
+        // so a short card shows its real (small) deadline from the first
+        // frame instead of flashing the 5-min window time and then jumping
+        // down when the tick arrives.
+        currentCardExpiryMs !== undefined && effectiveRemainingMs !== null ? (
+          <SwipeWindowBar
+            remainingMs={effectiveRemainingMs}
+            frac={windowFrac}
+            urgent={isWindowUrgent}
+            expired={isWindowExpired}
+          />
+        ) : (
+          <div className="text-base tracking-wider text-white/55 uppercase">
+            revealing card&hellip;
+          </div>
+        )
       ) : (
         <div className="text-base tracking-wider text-white/55 uppercase">
           {tier
