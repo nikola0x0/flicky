@@ -75,6 +75,11 @@ export interface MarketRow {
   tick_size: string
   admission_tick_size: string
   kind: string
+  /** Creation time of the market (`market_created` event checkpoint). Used
+   *  to derive `lifetime = expiry − created` for tier classification.
+   *  Absent on hand-built fixtures — tier logic falls back to treating
+   *  such rows as `long` (never a short/mid). */
+  checkpoint_timestamp_ms?: number
 }
 
 /** Normalized, chain-agnostic view of a live `ExpiryMarket` — the input
@@ -126,6 +131,114 @@ export function selectMarketRows(
   return out.slice(0, count)
 }
 
+// ─── Tiered selection (6-24 cadence: short 3′ / mid 15′ / long 3h) ───────────
+//
+// The upstream 6-24 BTC market maker mints markets in three lifetime tiers
+// (created→expiry): ~3 min (every ~1 min), ~15 min (every ~5 min), and
+// ~180 min (hourly). See docs/oracle-selection.md. `selectTieredMarkets`
+// composes a deck's markets across tiers so cards settle at STAGGERED times
+// (short cards resolve ~3 min in for early drama, mid cards ~6–15 min) while
+// the whole duel still finishes in ≤ ~15 min.
+//
+// Load-bearing constraint: `record_swipe` is bounded by an ON-CHAIN 5-min
+// swipe window (`duel.move` SWIPE_WINDOW_MS / ESwipeTimeout), and each swipe
+// mints on the card's market — which aborts if the market has expired. So a
+// card's market must outlive the moment it's swiped. The 5-min window is a
+// CEILING; the UI enforces a stricter PER-CARD deadline (card.expiry −
+// txBuffer) so short (3-min) markets are usable without a contract change.
+// Selection therefore only needs a per-tier TTL floor big enough that the
+// card survives until it's swiped:
+//   - short cards are ordered FIRST (swiped in the opening seconds), so a
+//     small floor (~their own remaining life) suffices.
+//   - mid cards are swiped later, up to the 5-min ceiling, so they need a
+//     floor comfortably above 5 min.
+
+export type MarketTier = "short" | "mid" | "long"
+
+/** Lifetime (`expiry − created`) upper bounds per tier, ms. A market with no
+ *  known creation time classifies as `long` (safe: never treated as short). */
+export const SHORT_LIFETIME_MAX_MS = 5 * 60 * 1000 // ≤ 5 min → short (3′ tier)
+export const MID_LIFETIME_MAX_MS = 60 * 60 * 1000 // ≤ 60 min → mid (15′ tier)
+
+export function classifyTier(lifetimeMs: number | undefined): MarketTier {
+  if (lifetimeMs === undefined || lifetimeMs > MID_LIFETIME_MAX_MS)
+    return "long"
+  if (lifetimeMs <= SHORT_LIFETIME_MAX_MS) return "short"
+  return "mid"
+}
+
+export interface TieredSelectOpts {
+  now: number
+  /** How many short-tier markets to pick (ordered first in the deck). */
+  shortCount: number
+  /** How many mid-tier markets to pick. */
+  midCount: number
+  /** A short market must have at least this much TTL left to be picked. */
+  shortTtlFloorMs: number
+  /** A mid market must have at least this much TTL left (> 5-min window). */
+  midTtlFloorMs: number
+  /** Ignore any market expiring beyond `now + maxHorizonMs`. */
+  maxHorizonMs: number
+}
+
+/**
+ * Pick a tiered set of live BTC `ExpiryMarket`s from indexer rows:
+ * `shortCount` freshest short-tier markets + `midCount` soonest-settling
+ * mid-tier markets that clear their TTL floor. Returns them **sorted by
+ * expiry ascending** (short-first) so, since swipes are in-order on chain,
+ * each successive card faces a later per-card deadline (monotonic
+ * countdowns) and the deck's settle times are naturally staggered.
+ *
+ * Returns only what is safely available (≤ shortCount + midCount distinct
+ * markets) — it does NOT pad with long-tier markets (that would blow the
+ * ≤15-min duel target) and it does NOT force `deckSize`. `buildDeck`
+ * round-robins `deckSize` cards across whatever markets are returned. When
+ * the result is empty, the caller should fall back (e.g. `selectMarketRows`).
+ */
+export function selectTieredMarkets(
+  rows: MarketRow[],
+  opts: TieredSelectOpts
+): MarketSnapshot[] {
+  const { now, shortCount, midCount, shortTtlFloorMs, midTtlFloorMs } = opts
+  const maxExpiry = now + opts.maxHorizonMs
+  const seen = new Set<string>()
+  const shorts: Array<MarketSnapshot & { ttl: number }> = []
+  const mids: Array<MarketSnapshot & { ttl: number }> = []
+
+  for (const r of rows) {
+    if (r.propbook_underlying_id !== 1 || r.kind !== "market_created") continue
+    const id = normalizeSuiObjectId(r.expiry_market_id)
+    if (seen.has(id)) continue
+    seen.add(id)
+    const expiry = Number(r.expiry)
+    const ttl = expiry - now
+    if (ttl <= 0 || expiry > maxExpiry) continue
+    const lifetime =
+      r.checkpoint_timestamp_ms === undefined
+        ? undefined
+        : expiry - r.checkpoint_timestamp_ms
+    const tier = classifyTier(lifetime)
+    const snap: MarketSnapshot & { ttl: number } = {
+      expiryMarketId: id,
+      expiry,
+      tickSize: BigInt(r.tick_size),
+      admissionTickSize: BigInt(r.admission_tick_size),
+      ttl,
+    }
+    if (tier === "short" && ttl >= shortTtlFloorMs) shorts.push(snap)
+    else if (tier === "mid" && ttl >= midTtlFloorMs) mids.push(snap)
+  }
+
+  // shorts: freshest first (max swipe margin); mids: soonest-settling first
+  // (spreads the settle drama earlier in the lockup).
+  shorts.sort((a, b) => b.ttl - a.ttl)
+  mids.sort((a, b) => a.ttl - b.ttl)
+
+  const picked = [...shorts.slice(0, shortCount), ...mids.slice(0, midCount)]
+  picked.sort((a, b) => a.expiry - b.expiry)
+  return picked.map(({ ttl: _ttl, ...m }) => m)
+}
+
 /**
  * Fetch the `count` nearest live BTC `ExpiryMarket`s from the predict
  * indexer, i.e. those whose expiry clears `now + minHeadroomMs` but falls
@@ -146,6 +259,30 @@ export async function findDeckMarkets(
     minHeadroomMs,
     maxHorizonMs,
     count,
+  })
+}
+
+/**
+ * Tiered variant of `findDeckMarkets`: fetches the indexer once and returns
+ * `selectTieredMarkets` composed from env config (`deckShortCount` short +
+ * `deckMidCount` mid markets, short-first by expiry). Returns `[]` when no
+ * safe short/mid markets are live — the caller falls back to
+ * `findDeckMarkets`. See deckmaster.ts tier section + docs/oracle-selection.md.
+ */
+export async function findTieredDeckMarkets(
+  opts: Partial<TieredSelectOpts> = {}
+): Promise<MarketSnapshot[]> {
+  const res = await fetch(`${env.predictIndexerUrl}/markets`)
+  if (!res.ok) throw new Error(`predict indexer /markets ${res.status}`)
+  const rows = (await res.json()) as MarketRow[]
+  return selectTieredMarkets(rows, {
+    now: Date.now(),
+    shortCount: env.deckShortCount,
+    midCount: env.deckMidCount,
+    shortTtlFloorMs: env.deckShortTtlFloorMs,
+    midTtlFloorMs: env.deckMidTtlFloorMs,
+    maxHorizonMs: env.deckCardMaxHorizonMs,
+    ...opts,
   })
 }
 

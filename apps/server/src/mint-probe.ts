@@ -122,8 +122,17 @@ function premiumClearsFloor(
   nowMs: number,
   quantity: number
 ): boolean {
-  // Project to end of swipe window — the latest a player can swipe.
-  const worstCaseSwipeMs = nowMs + SWIPE_WINDOW_MS
+  // Worst-case swipe time = the latest a player can swipe THIS card. Bounded
+  // by the on-chain 5-min window, but for a short-lived market the UI's
+  // per-card deadline (`expiry − txBuffer`) is tighter — projecting all the
+  // way to `now + 5min` would read a POST-expiry probability (rounds to 0/1),
+  // spuriously zeroing the long-shot premium and ATM-falling every short card.
+  // For mid/long markets (ttl > 5min) `expiry − buffer > now + 5min`, so the
+  // min() is `now + 5min` and behavior is unchanged.
+  const worstCaseSwipeMs = Math.min(
+    nowMs + SWIPE_WINDOW_MS,
+    expiryMs - env.deckTxBufferMs
+  )
   const pUp = digitalBsProbability(spot, strike, expiryMs, worstCaseSwipeMs)
   const pLong = Math.min(pUp, 1 - pUp) // the weaker side's probability
   const longPremium = pLong * quantity

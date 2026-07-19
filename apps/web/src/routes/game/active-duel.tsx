@@ -17,8 +17,12 @@ import {
   fmtDusdc,
 } from "@/lib/deepbook"
 import { useFlickySign } from "@/lib/use-flicky-sign"
-import { fmtPnlPct } from "@/lib/pnl"
-import { SWIPE_WINDOW_MS, swipeWindowRemainingMs } from "@/lib/swipe-window"
+import { fmtPnlPct, upProbability } from "@/lib/pnl"
+import {
+  cardSwipeRemainingMs,
+  SWIPE_WINDOW_MS,
+  swipeWindowRemainingMs,
+} from "@/lib/swipe-window"
 import { SWIPE_QUANTITY } from "@/lib/funding"
 import { playSfx } from "@/lib/sound"
 import { WsErrorBanner } from "@/components/ws-error-banner"
@@ -369,15 +373,38 @@ export function ActiveDuel({
           nowMs,
         })
       : null
-  const isWindowExpired = windowRemainingMs !== null && windowRemainingMs <= 0
+  // Per-card deadline. With the tiered deck a short (3-min) card settles well
+  // before the 5-min match window, so the BINDING deadline is the tighter of
+  // (this card's market expiry − tx buffer) and the match window. Swiping past
+  // it would abort on-chain (the mint needs a live market), so the deck locks
+  // and the auto-swipe-favored fallback fires (see the deadline effect below).
+  const currentCard =
+    phase.kind === "SWIPING" ? roomState?.cards[phase.cardIdx] : undefined
+  const currentCardExpiryMs = currentCard
+    ? ticks[currentCard.expiry_market_id]?.expiry
+      ? Number(ticks[currentCard.expiry_market_id].expiry)
+      : undefined
+    : undefined
+  const cardRemainingMs = cardSwipeRemainingMs({
+    cardExpiryMs: currentCardExpiryMs,
+    serverClockOffsetMs,
+    nowMs,
+  })
+  // Effective = the sooner of the per-card deadline and the match window.
+  const effectiveRemainingMs =
+    cardRemainingMs !== null && windowRemainingMs !== null
+      ? Math.min(cardRemainingMs, windowRemainingMs)
+      : (cardRemainingMs ?? windowRemainingMs)
+  const isWindowExpired =
+    effectiveRemainingMs !== null && effectiveRemainingMs <= 0
   const isWindowUrgent =
-    windowRemainingMs !== null &&
-    windowRemainingMs > 0 &&
-    windowRemainingMs <= 60_000
+    effectiveRemainingMs !== null &&
+    effectiveRemainingMs > 0 &&
+    effectiveRemainingMs <= 30_000
   const windowFrac =
-    windowRemainingMs === null
+    effectiveRemainingMs === null
       ? 0
-      : Math.max(0, Math.min(1, windowRemainingMs / SWIPE_WINDOW_MS))
+      : Math.max(0, Math.min(1, effectiveRemainingMs / SWIPE_WINDOW_MS))
 
   // PvP swipe: pre-flight the account balance, build + sign the staked-swipe
   // PTB, translate opaque on-chain aborts, then advance the deck. Drag/busy/
@@ -438,6 +465,53 @@ export function ActiveDuel({
     )
   }
 
+  // Auto-swipe the favored side when a card's per-card deadline passes. The
+  // tiered deck front-loads short (3-min) cards; if the player stalls past a
+  // card's deadline while its market is still live (within the tx buffer), we
+  // fire a real swipe on the favored — guaranteed-mintable — side so the deck
+  // advances and the player stays in-game within their pre-funded budget.
+  // Fires at most once per card. If it can't land (backing dropped, account
+  // drained) the swipe throws and we forfeit the rest: un-swiped cards score 0
+  // at settlement (duel.move) and the opponent takes them. Swipes are in-order
+  // on chain (EOutOfTurn), so a stuck card forfeits everything after it —
+  // hence auto-swipe rather than a plain forfeit.
+  const autoSwipeRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (phase.kind !== "SWIPING" || !roomState || !account) return
+    if (cardRemainingMs === null || cardRemainingMs > 0) return
+    if (windowRemainingMs !== null && windowRemainingMs <= 0) return
+    const serverNow = nowMs + serverClockOffsetMs
+    if (currentCardExpiryMs === undefined || serverNow >= currentCardExpiryMs)
+      return
+    const key = `${phase.duelId}:${phase.cardIdx}`
+    if (autoSwipeRef.current === key) return
+    autoSwipeRef.current = key
+    const t = currentCard ? ticks[currentCard.expiry_market_id] : undefined
+    const pUp = upProbability(
+      currentCard?.strike,
+      t?.spot,
+      currentCardExpiryMs,
+      serverNow
+    )
+    const favoredIsUp = pUp === null ? true : pUp >= 0.5
+    void pvpSwipe(favoredIsUp).catch(() => {})
+    // pvpSwipe is a fresh closure each render, intentionally omitted from deps:
+    // the effect re-runs on the 1 Hz nowMs tick so it always calls current
+    // state, and the autoSwipeRef guard makes it idempotent per card.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    phase,
+    roomState,
+    account,
+    cardRemainingMs,
+    windowRemainingMs,
+    currentCardExpiryMs,
+    currentCard,
+    ticks,
+    nowMs,
+    serverClockOffsetMs,
+  ])
+
   return (
     <div className="flex h-full flex-col gap-4 px-4 py-4 text-white">
       <WsErrorBanner onMessage={onMessage} />
@@ -451,9 +525,9 @@ export function ActiveDuel({
           Exit
         </button>
       </div>
-      {phase.kind === "SWIPING" && windowRemainingMs !== null ? (
+      {phase.kind === "SWIPING" && effectiveRemainingMs !== null ? (
         <SwipeWindowBar
-          remainingMs={windowRemainingMs}
+          remainingMs={effectiveRemainingMs}
           frac={windowFrac}
           urgent={isWindowUrgent}
           expired={isWindowExpired}

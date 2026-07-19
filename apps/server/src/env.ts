@@ -180,6 +180,34 @@ export const env = {
   // to the sponsor/keeper key's own (deterministic) wrapper — devInspect never
   // charges it, so it only needs to exist and hold a little dUSDC.
   probeWrapperId: process.env.PROBE_WRAPPER_ID,
+
+  // ─── Tiered deck selection (staggered settle drama, ≤~15-min duel) ────────
+  // When enabled, deck-gen uses `selectTieredMarkets` instead of the flat
+  // `findDeckMarkets` horizon picker: it composes the deck from the 6-24
+  // cadence's short (3′) + mid (15′) market tiers so cards settle at
+  // staggered times while the whole duel finishes in ≤~15 min. See
+  // deckmaster.ts + docs/oracle-selection.md. OPT-IN (default off) so
+  // merging to main is a no-op until the Railway vars below are set — prod
+  // currently runs the flat picker with DECK_CARD_MIN_HEADROOM_MS=300000.
+  deckTierEnabled: (process.env.DECK_TIER_ENABLED ?? "false") !== "false",
+  // How many markets of each tier to compose the deck from. `buildDeck`
+  // round-robins `deckSize` cards across whatever the selector returns, so
+  // these are targets, not hard requirements (2 short + 3 mid = 5 markets).
+  deckShortCount: Number(process.env.DECK_SHORT_COUNT ?? 2),
+  deckMidCount: Number(process.env.DECK_MID_COUNT ?? 3),
+  // Per-tier TTL floor at selection time. Short cards are swiped FIRST (in
+  // the opening seconds) so a small floor suffices (~90s covers create+join
+  // latency + the first swipe). Mid cards are swiped later, up to the 5-min
+  // on-chain swipe window, so their floor must clear 5 min with margin.
+  deckShortTtlFloorMs: Number(process.env.DECK_SHORT_TTL_FLOOR_MS ?? 90_000),
+  deckMidTtlFloorMs: Number(process.env.DECK_MID_TTL_FLOOR_MS ?? 330_000),
+  // Per-card swipe-deadline buffer the UI subtracts from a card's market
+  // expiry (card deadline = expiry − buffer). Must cover zkLogin sign +
+  // sponsor round-trip + build + execute (longest measured ~12s); 20s is
+  // generous. Also consumed by the check:cadence diagnostic. The web reads
+  // its own copy from config.ts — keep the two in sync.
+  deckTxBufferMs: Number(process.env.DECK_TX_BUFFER_MS ?? 20_000),
+
   // Postgres (Bun.sql). All persistence — indexer cursors, the duel
   // mirror, chat, player ratings, and the deckmaster plaintext store —
   // lives here. On Railway the deployed service reads the private

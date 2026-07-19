@@ -14,11 +14,15 @@ import {
   fetchDeck,
   hashToHex,
   knownHashCount,
+  classifyTier,
+  MID_LIFETIME_MAX_MS,
   POS_INF_TICK,
   PRACTICE_EXPIRY_OFFSETS_MS,
   rememberDeck,
   resolveDeckBounds,
   selectMarketRows,
+  selectTieredMarkets,
+  SHORT_LIFETIME_MAX_MS,
   snapToAdmissionTick,
   type DeckCardOut,
   type MarketRow,
@@ -847,5 +851,136 @@ describe("buildPracticeDeck", () => {
 
   test("rejects non-positive spot", () => {
     expect(() => buildPracticeDeck(0n, SEED_A)).toThrow()
+  })
+})
+
+describe("classifyTier", () => {
+  test("short at and below SHORT_LIFETIME_MAX_MS, mid above", () => {
+    expect(classifyTier(3 * 60 * 1000)).toBe("short")
+    expect(classifyTier(SHORT_LIFETIME_MAX_MS)).toBe("short")
+    expect(classifyTier(SHORT_LIFETIME_MAX_MS + 1)).toBe("mid")
+  })
+
+  test("mid at and below MID_LIFETIME_MAX_MS, long above", () => {
+    expect(classifyTier(15 * 60 * 1000)).toBe("mid")
+    expect(classifyTier(MID_LIFETIME_MAX_MS)).toBe("mid")
+    expect(classifyTier(MID_LIFETIME_MAX_MS + 1)).toBe("long")
+  })
+
+  test("unknown lifetime (no creation time) classifies as long", () => {
+    expect(classifyTier(undefined)).toBe("long")
+  })
+})
+
+describe("selectTieredMarkets (2 short + 3 mid, short-first)", () => {
+  const now = 10_000_000
+  const SHORT_LIFE = 3 * 60 * 1000 // 180_000
+  const MID_LIFE = 15 * 60 * 1000 // 900_000
+  const LONG_LIFE = 180 * 60 * 1000
+  const opts = {
+    now,
+    shortCount: 2,
+    midCount: 3,
+    shortTtlFloorMs: 90_000,
+    midTtlFloorMs: 330_000,
+    maxHorizonMs: 3 * 60 * 60 * 1000,
+  }
+
+  /** Row expiring `ttlMs` from now with `lifetimeMs` from creation to expiry. */
+  function row(id: string, ttlMs: number, lifetimeMs: number): MarketRow {
+    const expiry = now + ttlMs
+    return {
+      expiry_market_id: addr(id),
+      propbook_underlying_id: 1,
+      expiry,
+      tick_size: "1",
+      admission_tick_size: "1",
+      kind: "market_created",
+      checkpoint_timestamp_ms: expiry - lifetimeMs,
+    }
+  }
+
+  test("composes shorts + mids, returned sorted by expiry ascending", () => {
+    const rows = [
+      row("m1", 600_000, MID_LIFE),
+      row("s1", 170_000, SHORT_LIFE),
+      row("m2", 400_000, MID_LIFE),
+      row("s2", 150_000, SHORT_LIFE),
+      row("m3", 800_000, MID_LIFE),
+    ]
+    const out = selectTieredMarkets(rows, opts)
+    expect(out.map((m) => m.expiry)).toEqual([
+      now + 150_000, // s2
+      now + 170_000, // s1
+      now + 400_000, // m2
+      now + 600_000, // m1
+      now + 800_000, // m3
+    ])
+  })
+
+  test("drops shorts below the short TTL floor and mids below the mid floor", () => {
+    const rows = [
+      row("s_ok", 150_000, SHORT_LIFE),
+      row("s_low", 50_000, SHORT_LIFE), // < 90s floor
+      row("m_ok", 400_000, MID_LIFE),
+      row("m_low", 200_000, MID_LIFE), // < 330s floor
+    ]
+    const out = selectTieredMarkets(rows, opts)
+    expect(out.map((m) => m.expiryMarketId)).toEqual([
+      addr("s_ok"),
+      addr("m_ok"),
+    ])
+  })
+
+  test("caps each tier at its requested count, freshest shorts / soonest mids", () => {
+    const rows = [
+      row("s1", 120_000, SHORT_LIFE),
+      row("s2", 160_000, SHORT_LIFE),
+      row("s3", 175_000, SHORT_LIFE), // 3 shorts, only 2 wanted → freshest 2 (s3,s2)
+      row("m1", 400_000, MID_LIFE),
+      row("m2", 500_000, MID_LIFE),
+      row("m3", 600_000, MID_LIFE),
+      row("m4", 700_000, MID_LIFE), // 4 mids, only 3 wanted → soonest 3 (m1,m2,m3)
+    ]
+    const out = selectTieredMarkets(rows, opts).map((m) => m.expiryMarketId)
+    expect(out).not.toContain(addr("s1")) // stalest short dropped
+    expect(out).not.toContain(addr("m4")) // latest mid dropped
+    expect(out).toEqual([
+      addr("s2"),
+      addr("s3"),
+      addr("m1"),
+      addr("m2"),
+      addr("m3"),
+    ])
+  })
+
+  test("rows with no creation time are long-tier → never picked as short/mid", () => {
+    const noCreate: MarketRow = {
+      expiry_market_id: addr("nc"),
+      propbook_underlying_id: 1,
+      expiry: now + 150_000,
+      tick_size: "1",
+      admission_tick_size: "1",
+      kind: "market_created",
+    }
+    expect(selectTieredMarkets([noCreate], opts)).toEqual([])
+  })
+
+  test("excludes non-BTC, wrong kind, expired, and beyond-horizon rows", () => {
+    const rows: MarketRow[] = [
+      { ...row("btc", 150_000, SHORT_LIFE) },
+      { ...row("eth", 150_000, SHORT_LIFE), propbook_underlying_id: 2 },
+      { ...row("wrong", 150_000, SHORT_LIFE), kind: "market_settled" },
+      { ...row("expired", -1000, SHORT_LIFE) },
+      { ...row("far", opts.maxHorizonMs + 1000, LONG_LIFE) },
+    ]
+    expect(
+      selectTieredMarkets(rows, opts).map((m) => m.expiryMarketId)
+    ).toEqual([addr("btc")])
+  })
+
+  test("returns [] when no safe short/mid markets are live", () => {
+    const rows = [row("long", 60 * 60 * 1000, LONG_LIFE)]
+    expect(selectTieredMarkets(rows, opts)).toEqual([])
   })
 })

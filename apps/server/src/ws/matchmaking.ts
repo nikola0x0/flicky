@@ -28,7 +28,9 @@ import {
   decideDeckSize,
   deriveSeed,
   findDeckMarkets,
+  findTieredDeckMarkets,
   hashToHex,
+  type MarketSnapshot,
   readBtcSpot,
   rememberDeck,
   resolveDeckBounds,
@@ -64,7 +66,19 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
   let spot = 0n
   let decision = decideDeckSize(0, resolveDeckBounds({}))
   for (let attempt = 1; attempt <= DECK_GEN_ATTEMPTS; attempt++) {
-    const rawMarkets = await findDeckMarkets(5)
+    // Tiered selection (2 short + 3 mid, short-first) when enabled — staggered
+    // settle times, ≤~15-min duel. Falls back to the flat horizon picker if
+    // no safe short/mid markets are live so matchmaking never dead-ends.
+    let rawMarkets: MarketSnapshot[] = []
+    if (env.deckTierEnabled) {
+      rawMarkets = await findTieredDeckMarkets()
+      if (rawMarkets.length === 0) {
+        log.info(
+          "tiered selection empty — falling back to flat findDeckMarkets"
+        )
+      }
+    }
+    if (rawMarkets.length === 0) rawMarkets = await findDeckMarkets(5)
     spot = await readBtcSpot()
     // Drop markets whose mint currently aborts on the volatile per-market LP
     // backing gate (EInsufficientCash) — otherwise cards round-robined onto a
