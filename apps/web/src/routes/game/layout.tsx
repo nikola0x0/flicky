@@ -310,29 +310,6 @@ function FrameHeader({
   const isShop = !signedOut && location.pathname === "/game/shop"
   const isHome = location.pathname === "/game/home"
 
-  // The two balance chips. Rendered twice — inline next to the avatar at
-  // ≥400px, and as their own full-width row below 400px — so a narrow phone
-  // stacks avatar+menu over the chips instead of cramming them onto one line
-  // (where the menu button overlapped the chips).
-  const chips = (className: string) => (
-    <div className={`items-center gap-2 min-[400px]:gap-4 ${className}`}>
-      <BalanceChip
-        id="balance-wallet"
-        icon="/tokens/usdc-icon.png"
-        amount={(dusdc ?? 0).toFixed(2)}
-        label="wallet"
-        onClick={onAddClick}
-      />
-      <BalanceChip
-        id="balance-manager"
-        icon="/tokens/manager-usdc.png"
-        amount={managerBalance.toFixed(2)}
-        label="manager"
-        onClick={onAddClick}
-      />
-    </div>
-  )
-
   return (
     <header
       className={`flex justify-between gap-2 px-3 py-3 ${
@@ -344,37 +321,36 @@ function FrameHeader({
       } `}
     >
       {account ? (
-        <div className="flex min-w-0 flex-1 flex-col items-center gap-2 min-[400px]:flex-row min-[400px]:justify-between">
-          {/* Narrow: row 1 = avatar + menu, centered. Wide: avatar + inline chips (left). */}
-          <div className="flex items-center justify-center gap-3 min-[400px]:justify-start min-[400px]:gap-5">
-            <div className="flex items-center gap-2.5 min-[400px]:gap-5">
-              <Link
-                id="header-avatar"
-                to="/profile"
-                aria-label="open profile"
-                state={{ from: location.pathname }}
-                onClick={() => playSfx("click")}
-                className="shrink-0 transition-opacity hover:opacity-85"
-              >
-                <PlayerAvatar
-                  address={account.address}
-                  size={48}
-                  className="min-[400px]:hidden"
-                />
-                <PlayerAvatar
-                  address={account.address}
-                  size={56}
-                  className="hidden min-[400px]:block"
-                />
-              </Link>
-              {chips("hidden min-[400px]:flex")}
-            </div>
-            {!isShop && <MenuButton className="min-[400px]:hidden" />}
+        <div className="flex min-w-0 items-center gap-2.5 min-[400px]:gap-4">
+          <Link
+            id="header-avatar"
+            to="/profile"
+            aria-label="open profile"
+            state={{ from: location.pathname }}
+            onClick={() => playSfx("click")}
+            className="shrink-0 transition-opacity hover:opacity-85"
+          >
+            <PlayerAvatar address={account.address} size={56} />
+          </Link>
+          {/* avatar | balance | menu stay one horizontal row at every width;
+              below 400px the two balance chips stack into two rows so the
+              balance column is narrow enough for all three to fit. */}
+          <div className="flex min-w-0 flex-col gap-1.5 min-[400px]:flex-row min-[400px]:items-center min-[400px]:gap-4">
+            <BalanceChip
+              id="balance-wallet"
+              icon="/tokens/usdc-icon.png"
+              amount={(dusdc ?? 0).toFixed(2)}
+              label="wallet"
+              onClick={onAddClick}
+            />
+            <BalanceChip
+              id="balance-manager"
+              icon="/tokens/manager-usdc.png"
+              amount={managerBalance.toFixed(2)}
+              label="manager"
+              onClick={onAddClick}
+            />
           </div>
-          {/* Narrow: row 2 = the balance chips, centered on their own line. */}
-          {chips("flex justify-center min-[400px]:hidden")}
-          {/* Wide: menu at the far right of the header row. */}
-          {!isShop && <MenuButton className="hidden min-[400px]:block" />}
         </div>
       ) : (
         <PixelButton
@@ -393,6 +369,7 @@ function FrameHeader({
           </span>
         </PixelButton>
       )}
+      {!isShop && account && <MenuButton />}
     </header>
   )
 }
