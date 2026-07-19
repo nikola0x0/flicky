@@ -440,18 +440,34 @@ export function ActiveDuel({
           )} of dUSDC in your account for the mint premium — top up your account, then swipe again.`
         )
       }
-      const tx = buildStakedSwipeTx({
-        duelId,
-        wrapperId: managerId,
-        marketId: card.expiry_market_id,
-        strike: BigInt(card.strike),
-        tickSize,
-        cardIdx,
-        isUp,
-        quantity: SWIPE_QUANTITY,
-        stakeCoinType: roomState.stakeCoinType,
-      })
-      await sign.mutateAsync({ transaction: tx })
+      // The per-market LP backing gate (expiry_cash::assert_backing /
+      // EInsufficientCash, abort code 0) flips back within seconds on testnet.
+      // Retry a couple of times (fresh PTB each time) before surfacing it, so a
+      // transient LP dip doesn't dead-end the swipe. `busy` stays set across
+      // the retries, so the card just reads as "processing".
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const tx = buildStakedSwipeTx({
+            duelId,
+            wrapperId: managerId,
+            marketId: card.expiry_market_id,
+            strike: BigInt(card.strike),
+            tickSize,
+            cardIdx,
+            isUp,
+            quantity: SWIPE_QUANTITY,
+            stakeCoinType: roomState.stakeCoinType,
+          })
+          await sign.mutateAsync({ transaction: tx })
+          break
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err)
+          const transientBacking =
+            /assert_backing|EInsufficientCash|abort code: 0\b/.test(m)
+          if (!transientBacking || attempt >= 2) throw err
+          await new Promise((r) => setTimeout(r, 1500))
+        }
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       // Per-market LP backing gate (expiry_cash::assert_backing /
