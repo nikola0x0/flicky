@@ -301,11 +301,37 @@ function FrameHeader({
 }) {
   const account = useCurrentAccount()
   const location = useLocation()
+  const { data: dusdc } = useDusdcBalance()
+  const { data: managerInfo } = useManagerBalance()
+  const managerBalance = managerInfo?.balance ?? 0
   // When signed out we render the unified empty-state prompt in <main>,
   // so suppress the shop's tall decor header (it'd push the prompt
   // around route-to-route).
   const isShop = !signedOut && location.pathname === "/game/shop"
   const isHome = location.pathname === "/game/home"
+
+  // The two balance chips. Rendered twice — inline next to the avatar at
+  // ≥400px, and as their own full-width row below 400px — so a narrow phone
+  // stacks avatar+menu over the chips instead of cramming them onto one line
+  // (where the menu button overlapped the chips).
+  const chips = (className: string) => (
+    <div className={`items-center gap-2 min-[400px]:gap-4 ${className}`}>
+      <BalanceChip
+        id="balance-wallet"
+        icon="/tokens/usdc-icon.png"
+        amount={(dusdc ?? 0).toFixed(2)}
+        label="wallet"
+        onClick={onAddClick}
+      />
+      <BalanceChip
+        id="balance-manager"
+        icon="/tokens/manager-usdc.png"
+        amount={managerBalance.toFixed(2)}
+        label="manager"
+        onClick={onAddClick}
+      />
+    </div>
+  )
 
   return (
     <header
@@ -318,7 +344,38 @@ function FrameHeader({
       } `}
     >
       {account ? (
-        <HeaderBalances address={account.address} onAddClick={onAddClick} />
+        <div className="flex min-w-0 flex-1 flex-col gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between">
+          {/* Narrow: row 1 = avatar + menu. Wide: avatar + inline chips (left). */}
+          <div className="flex items-center justify-between gap-2 min-[400px]:justify-start min-[400px]:gap-5">
+            <div className="flex items-center gap-2.5 min-[400px]:gap-5">
+              <Link
+                id="header-avatar"
+                to="/profile"
+                aria-label="open profile"
+                state={{ from: location.pathname }}
+                onClick={() => playSfx("click")}
+                className="shrink-0 transition-opacity hover:opacity-85"
+              >
+                <PlayerAvatar
+                  address={account.address}
+                  size={48}
+                  className="min-[400px]:hidden"
+                />
+                <PlayerAvatar
+                  address={account.address}
+                  size={56}
+                  className="hidden min-[400px]:block"
+                />
+              </Link>
+              {chips("hidden min-[400px]:flex")}
+            </div>
+            {!isShop && <MenuButton className="min-[400px]:hidden" />}
+          </div>
+          {/* Narrow: row 2 = the balance chips on their own line. */}
+          {chips("flex min-[400px]:hidden")}
+          {/* Wide: menu at the far right of the header row. */}
+          {!isShop && <MenuButton className="hidden min-[400px]:block" />}
+        </div>
       ) : (
         <PixelButton
           onClick={onSignInClick}
@@ -336,60 +393,7 @@ function FrameHeader({
           </span>
         </PixelButton>
       )}
-      {!isShop && account && <MenuButton />}
     </header>
-  )
-}
-
-function HeaderBalances({
-  address,
-  onAddClick,
-}: {
-  address: string
-  onAddClick: () => void
-}) {
-  const { data: dusdc } = useDusdcBalance()
-  const { data: managerInfo } = useManagerBalance()
-  const managerBalance = managerInfo?.balance ?? 0
-  const location = useLocation()
-  return (
-    <div className="flex min-w-0 items-center gap-2.5 overflow-x-auto [scrollbar-width:none] min-[400px]:gap-5 [&::-webkit-scrollbar]:hidden">
-      <Link
-        id="header-avatar"
-        to="/profile"
-        aria-label="open profile"
-        state={{ from: location.pathname }}
-        onClick={() => playSfx("click")}
-        className="shrink-0 transition-opacity hover:opacity-85"
-      >
-        <PlayerAvatar
-          address={address}
-          size={48}
-          className="min-[400px]:hidden"
-        />
-        <PlayerAvatar
-          address={address}
-          size={56}
-          className="hidden min-[400px]:block"
-        />
-      </Link>
-      <div className="flex min-w-0 items-center gap-2 min-[400px]:gap-4">
-        <BalanceChip
-          id="balance-wallet"
-          icon="/tokens/usdc-icon.png"
-          amount={(dusdc ?? 0).toFixed(2)}
-          label="wallet"
-          onClick={onAddClick}
-        />
-        <BalanceChip
-          id="balance-manager"
-          icon="/tokens/manager-usdc.png"
-          amount={managerBalance.toFixed(2)}
-          label="manager"
-          onClick={onAddClick}
-        />
-      </div>
-    </div>
   )
 }
 
