@@ -201,6 +201,18 @@ export const env = {
   sponsorMaxGasBudget: BigInt(
     process.env.SPONSOR_MAX_GAS_BUDGET ?? 100_000_000
   ),
+  // Sponsor address-balance monitor. Sponsored gas is paid from the sponsor
+  // key's on-chain address balance (empty gas payment), which drains with use
+  // and, when empty, makes every POST /sponsor fail with an opaque "Invalid
+  // withdraw reservation" — a silent outage. The monitor polls the balance and
+  // WARNs below the threshold so it can be topped up (fund:sponsor) first.
+  // Default warn floor 0.5 SUI; check every 5 min.
+  sponsorMinBalanceWarnMist: BigInt(
+    process.env.SPONSOR_MIN_BALANCE_WARN_MIST ?? 500_000_000
+  ),
+  sponsorBalanceCheckIntervalMs: Number(
+    process.env.SPONSOR_BALANCE_CHECK_INTERVAL_MS ?? 5 * 60 * 1000
+  ),
   allowedOrigin: process.env.ALLOWED_ORIGIN, // unset/"" → *
 
   // Matchmaking: sync-only PvP. No bot-fill — Practice Mode covers
