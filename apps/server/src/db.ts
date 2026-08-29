@@ -153,7 +153,7 @@ async function ensureSchema(): Promise<void> {
   //
   // The PRIMARY KEY is still `address` alone. Widening it to (address,
   // network) is a live-data migration that also has to rewrite
-  // `upsertRating`'s ON CONFLICT target, and nothing writes a non-testnet
+  // `upsertPlayerRating`'s ON CONFLICT target, and nothing writes a non-testnet
   // rating yet, so it's deliberately left for whoever turns mainnet duels on
   // — see docs/network-switching.md.
   await sql`ALTER TABLE player_rating ADD COLUMN IF NOT EXISTS

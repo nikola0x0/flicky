@@ -128,7 +128,7 @@ balance surfaces as an opaque `Invalid withdraw reservation` on every request.
      alone, so with two live networks a testnet player could be matched with a
      mainnet one.
    - Widen `player_rating`'s PRIMARY KEY from `address` to
-     `(address, network)` and update `upsertRating`'s `ON CONFLICT` target. The
+     `(address, network)` and update `upsertPlayerRating`'s `ON CONFLICT` target. The
      `network` column already exists and reads are already scoped; only the key
      is outstanding, and it's a live-data migration.
 
