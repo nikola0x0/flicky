@@ -33,7 +33,6 @@ import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"
 import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
-import { NetworkSwitcher } from "@/components/network-switcher"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { useDusdcBalance, useManagerBalance } from "@/hooks/use-wallet-balances"
@@ -307,7 +306,6 @@ function FrameHeader({
   onAddClick: () => void
   signedOut: boolean
 }) {
-  const [networkOpen, setNetworkOpen] = useState(false)
   const account = useCurrentAccount()
   const location = useLocation()
   const { data: dusdc } = useDusdcBalance()
@@ -378,14 +376,7 @@ function FrameHeader({
           </span>
         </PixelButton>
       )}
-      <div className="flex shrink-0 items-center gap-2">
-        <NetworkSwitcher
-          open={networkOpen}
-          onOpen={() => setNetworkOpen(true)}
-          onClose={() => setNetworkOpen(false)}
-        />
-        {!isShop && account && <MenuButton />}
-      </div>
+      {!isShop && account && <MenuButton />}
     </header>
   )
 }

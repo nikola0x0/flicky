@@ -2,6 +2,7 @@ import { useEffect } from "react"
 import { createPortal } from "react-dom"
 import { useDAppKit } from "@mysten/dapp-kit-react"
 
+import { NetworkSetting } from "@/components/network-setting"
 import { PixelButton } from "@/components/pixel-button"
 import {
   setBgmVolume,
@@ -12,9 +13,10 @@ import {
 } from "@/lib/sound"
 
 /**
- * Burger-menu popup. Hosts the sound settings (sfx/music volume) and the
- * logout action — wire additional menu items into the button column below
- * as the game grows (inventory, referrals, how-to-play, language, etc.).
+ * Burger-menu popup. Hosts the sound settings (sfx/music volume), the
+ * network picker, and the logout action — wire additional menu items into
+ * the button column below as the game grows (inventory, referrals,
+ * how-to-play, language, etc.).
  *
  * Portal-mounted so it dims the mobile frame AND the outer checker
  * background, identical pattern to <LoginModal>.
@@ -92,6 +94,8 @@ export function MenuModal({ open, onClose }: MenuModalProps) {
               onChange={setBgmVolume}
             />
           </div>
+
+          <NetworkSetting />
 
           <PixelButton onClick={handleLogout} className="h-12">
             <span className="flex w-full items-center justify-center gap-2 text-2xl">
