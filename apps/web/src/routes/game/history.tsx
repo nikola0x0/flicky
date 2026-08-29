@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
-import { CONFIG } from "@/lib/config"
+import { CONFIG, apiUrl } from "@/lib/config"
 import { buildRefundDuelTx, refundEligibility } from "@/lib/flicky"
 import { useFlickySign } from "@/lib/use-flicky-sign"
 import { fmtPnlPct } from "@/lib/pnl"
@@ -65,9 +65,11 @@ export default function GameHistory() {
     const tick = async () => {
       try {
         const res = await fetch(
-          `${CONFIG.serverHttpUrl}/duels/recent?player=${encodeURIComponent(
-            address
-          )}&limit=${FETCH_LIMIT}`
+          apiUrl(
+            `/duels/recent?player=${encodeURIComponent(
+              address
+            )}&limit=${FETCH_LIMIT}`
+          )
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { duels: DuelRow[] }

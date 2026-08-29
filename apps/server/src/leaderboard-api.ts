@@ -11,19 +11,24 @@
 import { topLeaderboard } from "./mmr"
 import { playerRank, stakedDuelCounts } from "./db"
 import { env } from "./env"
-import { json } from "./lib/http"
+import { json, resolveNetworkParam } from "./lib/http"
 
 export async function handleLeaderboardRequest(
   req: Request,
   url: URL
 ): Promise<Response | null> {
   if (url.pathname !== "/leaderboard" || req.method !== "GET") return null
+  const resolved = resolveNetworkParam(url)
+  if ("error" in resolved) return resolved.error
+  const { network } = resolved
   const limitRaw = url.searchParams.get("limit")
   const limit = Math.min(100, Math.max(1, Number(limitRaw ?? 20)))
   try {
+    // Ratings are per-chain — a network with no completed duels ranks empty
+    // rather than borrowing another network's board.
     const [players, staked] = await Promise.all([
-      topLeaderboard(limit),
-      stakedDuelCounts(),
+      topLeaderboard(limit, network),
+      stakedDuelCounts(network),
     ])
     const minStaked = env.seasonMinStakedDuels
     return json({
@@ -63,14 +68,17 @@ export async function handleMyRankRequest(
   url: URL
 ): Promise<Response | null> {
   if (url.pathname !== "/leaderboard/me" || req.method !== "GET") return null
+  const resolved = resolveNetworkParam(url)
+  if ("error" in resolved) return resolved.error
+  const { network } = resolved
   const address = url.searchParams.get("address")?.toLowerCase()
   if (!address || !/^0x[0-9a-f]+$/.test(address)) {
     return json({ error: "address query param required (0x…)" }, 400)
   }
   try {
     const [info, staked] = await Promise.all([
-      playerRank(address),
-      stakedDuelCounts(),
+      playerRank(address, network),
+      stakedDuelCounts(network),
     ])
     if (!info) return json({ ranked: false })
     const stakedDuels = staked.get(address) ?? 0

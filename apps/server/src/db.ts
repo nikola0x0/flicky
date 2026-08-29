@@ -23,6 +23,7 @@
  */
 import { SQL } from "bun"
 import { env } from "./env"
+import { networkEnv, type Network } from "./network-env"
 import { makeLogger } from "./log"
 
 const log = makeLogger("db")
@@ -118,6 +119,14 @@ async function ensureSchema(): Promise<void> {
             ON duel (status, last_updated_ms DESC)`
   await sql`CREATE INDEX IF NOT EXISTS duel_creator
             ON duel (creator, last_updated_ms DESC)`
+  // One database serves every network this process runs (there is no second
+  // Railway environment), so chain-scoped rows carry the network they belong
+  // to. Every pre-existing row is testnet, hence the default — that makes
+  // this a pure add with no backfill.
+  await sql`ALTER TABLE duel ADD COLUMN IF NOT EXISTS
+            network TEXT NOT NULL DEFAULT 'testnet'`
+  await sql`CREATE INDEX IF NOT EXISTS duel_network_updated
+            ON duel (network, last_updated_ms DESC)`
   await sql`
     CREATE TABLE IF NOT EXISTS chat_message (
       id           BIGSERIAL PRIMARY KEY,
@@ -139,8 +148,18 @@ async function ensureSchema(): Promise<void> {
       last_updated_ms BIGINT  NOT NULL
     )
   `
+  // Ratings must never pool across chains — a mainnet win and a testnet win
+  // are not the same achievement, so reads scope to one network.
+  //
+  // The PRIMARY KEY is still `address` alone. Widening it to (address,
+  // network) is a live-data migration that also has to rewrite
+  // `upsertRating`'s ON CONFLICT target, and nothing writes a non-testnet
+  // rating yet, so it's deliberately left for whoever turns mainnet duels on
+  // — see docs/network-switching.md.
+  await sql`ALTER TABLE player_rating ADD COLUMN IF NOT EXISTS
+            network TEXT NOT NULL DEFAULT 'testnet'`
   await sql`CREATE INDEX IF NOT EXISTS player_rating_lb
-            ON player_rating (rating DESC)`
+            ON player_rating (network, rating DESC)`
   await sql`
     CREATE TABLE IF NOT EXISTS deck (
       hash_hex   TEXT PRIMARY KEY,   -- lowercased 0x… sha2-256 commitment
@@ -354,12 +373,23 @@ export interface DuelRow {
 
 export interface PendingSwipe {
   cardIdx: number
-  p0Swipe: { isUp: boolean; quantity: string; orderId: string; premium?: string } | null
-  p1Swipe: { isUp: boolean; quantity: string; orderId: string; premium?: string } | null
+  p0Swipe: {
+    isUp: boolean
+    quantity: string
+    orderId: string
+    premium?: string
+  } | null
+  p1Swipe: {
+    isUp: boolean
+    quantity: string
+    orderId: string
+    premium?: string
+  } | null
 }
 
 export async function upsertDuel(
-  d: Omit<DuelRow, "lastUpdatedMs">
+  d: Omit<DuelRow, "lastUpdatedMs">,
+  network: Network = env.network
 ): Promise<void> {
   await ready()
   const sql = getSql()
@@ -369,13 +399,13 @@ export async function upsertDuel(
                         cards_revealed, card_count, settled_count,
                         p0_payout, p0_premium, p1_payout, p1_premium,
                         started_at_ms, card_outcomes, swipes, cards,
-                        last_updated_ms)
+                        network, last_updated_ms)
       VALUES (${d.id}, ${d.status}, ${d.stakeCoinType}, ${d.creator},
               ${d.challenger}, ${d.cardsRevealed}, ${d.cardCount},
               ${d.settledCount}, ${d.p0Payout}, ${d.p0Premium},
               ${d.p1Payout}, ${d.p1Premium}, ${d.startedAtMs},
               ${JSON.stringify(d.cardOutcomes)}, ${JSON.stringify(d.swipes)},
-              ${JSON.stringify(d.cards)}, ${Date.now()})
+              ${JSON.stringify(d.cards)}, ${network}, ${Date.now()})
       ON CONFLICT (id) DO UPDATE SET
         status          = EXCLUDED.status,
         stake_coin_type = EXCLUDED.stake_coin_type,
@@ -394,6 +424,9 @@ export async function upsertDuel(
         cards           = EXCLUDED.cards,
         last_updated_ms = EXCLUDED.last_updated_ms
     `
+    // NOTE: `network` is intentionally absent from the UPDATE set — a duel
+    // object lives on exactly one chain, so the value written at insert is
+    // the only correct one.
   } catch (e) {
     log.error(`upsertDuel(${d.id}): ${describeError(e)}`)
     throw e
@@ -525,26 +558,37 @@ function rowToDuel(r: DuelRowRaw): DuelRow {
   }
 }
 
-export async function getDuel(id: string): Promise<DuelRow | null> {
+export async function getDuel(
+  id: string,
+  network: Network = env.network
+): Promise<DuelRow | null> {
   await ready()
   const sql = getSql()
-  const rows = (await sql`SELECT * FROM duel WHERE id = ${id}`) as DuelRowRaw[]
+  const rows = (await sql`
+    SELECT * FROM duel WHERE id = ${id} AND network = ${network}
+  `) as DuelRowRaw[]
   return rows[0] ? rowToDuel(rows[0]) : null
 }
 
 export async function listRecentDuels(
   limit: number,
   status?: DuelRow["status"],
-  player?: string
+  player?: string,
+  network: Network = env.network
 ): Promise<DuelRow[]> {
   await ready()
   const sql = getSql()
-  // Build the WHERE clause dynamically — both filters are optional and
+  // Build the WHERE clause dynamically — status/player are optional and
   // composable. `player` matches either side (creator OR challenger).
   // `sql.unsafe` takes positional ($1…) params; values are still bound,
   // never interpolated, so this stays injection-safe.
+  //
+  // `network` is NOT optional: a listing must never mix chains, or a client
+  // on one network sees duels it can't open.
   const where: string[] = []
   const params: Array<string | number> = []
+  params.push(network)
+  where.push(`network = $${params.length}`)
   if (status) {
     params.push(status)
     where.push(`status = $${params.length}`)
@@ -710,13 +754,16 @@ export async function upsertPlayerRating(r: PlayerRating): Promise<void> {
   `
 }
 
-export async function leaderboard(limit: number): Promise<PlayerRating[]> {
+export async function leaderboard(
+  limit: number,
+  network: Network = env.network
+): Promise<PlayerRating[]> {
   await ready()
   const sql = getSql()
   const rows = (await sql`
     SELECT address, rating, games_played, wins, losses, ties, last_updated_ms
     FROM player_rating
-    WHERE games_played > 0
+    WHERE games_played > 0 AND network = ${network}
     ORDER BY rating DESC LIMIT ${limit}
   `) as PlayerRatingRaw[]
   return rows.map(rowToRating)
@@ -736,7 +783,8 @@ export interface PlayerRankInfo extends PlayerRating {
  * top-N slice, without pulling the whole board.
  */
 export async function playerRank(
-  address: string
+  address: string,
+  network: Network = env.network
 ): Promise<PlayerRankInfo | null> {
   await ready()
   const sql = getSql()
@@ -744,9 +792,11 @@ export async function playerRank(
     SELECT pr.address, pr.rating, pr.games_played, pr.wins, pr.losses, pr.ties,
            pr.last_updated_ms,
            (SELECT COUNT(*)::int FROM player_rating o
-              WHERE o.games_played > 0 AND o.rating > pr.rating) + 1 AS rank
+              WHERE o.games_played > 0 AND o.rating > pr.rating
+                AND o.network = ${network}) + 1 AS rank
     FROM player_rating pr
     WHERE pr.address = ${address} AND pr.games_played > 0
+      AND pr.network = ${network}
   `) as Array<PlayerRatingRaw & { rank: number }>
   const r = rows[0]
   if (!r) return null
@@ -765,17 +815,24 @@ export async function playerRank(
  * one query covers any leaderboard slice; scope to specific addresses if the
  * mirror ever grows large.
  */
-export async function stakedDuelCounts(): Promise<Map<string, number>> {
+export async function stakedDuelCounts(
+  network: Network = env.network
+): Promise<Map<string, number>> {
   await ready()
   const sql = getSql()
+  // The staked marker is the stake coin type, which differs per network —
+  // read it from that network's config rather than the default's.
+  const dusdc = networkEnv(network).dusdcCoinType
   const rows = (await sql`
     SELECT addr, COUNT(*)::int AS staked
     FROM (
       SELECT creator AS addr FROM duel
-        WHERE status = 'COMPLETE' AND stake_coin_type = ${env.dusdcCoinType}
+        WHERE status = 'COMPLETE' AND network = ${network}
+          AND stake_coin_type = ${dusdc}
       UNION ALL
       SELECT challenger AS addr FROM duel
-        WHERE status = 'COMPLETE' AND stake_coin_type = ${env.dusdcCoinType}
+        WHERE status = 'COMPLETE' AND network = ${network}
+          AND stake_coin_type = ${dusdc}
     ) t
     GROUP BY addr
   `) as Array<{ addr: string; staked: number }>

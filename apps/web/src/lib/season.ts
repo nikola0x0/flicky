@@ -2,7 +2,7 @@
  * Season 0 leaderboard-prize config from the server's `GET /season`.
  * Display-only — payout is manual ops at season end (no escrow contract).
  */
-import { CONFIG } from "./config"
+import { CONFIG, apiUrl } from "./config"
 
 /** Ranks `rankStart..rankEnd` (inclusive, 1-based) each pay `amount`. */
 export interface PrizeTier {
@@ -52,9 +52,7 @@ export interface MyRank {
  */
 export async function fetchMyRank(address: string): Promise<MyRank | null> {
   try {
-    const res = await fetch(
-      `${CONFIG.serverHttpUrl}/leaderboard/me?address=${address}`
-    )
+    const res = await fetch(apiUrl(`/leaderboard/me?address=${address}`))
     if (!res.ok) return null
     const body = (await res.json()) as
       | { ranked: false }

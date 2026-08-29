@@ -5,27 +5,50 @@
  * Convention: vars used by HTTP/WS at boot are required at startup;
  * vars used only by the settle keeper (signer keys, package ids) fail
  * lazily when that subsystem actually tries to run.
+ *
+ * Chain-scoped values (package ids, shared objects, oracle feeds, indexer
+ * URLs, signer keys) live in `./network-env`, which resolves them per
+ * network. `env` spreads the DEFAULT network's slice so the many existing
+ * `env.accountRegistryId`-style call sites keep working unchanged; code that
+ * must serve a specific network calls `networkEnv(net)` directly.
  */
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { networkEnv, isNetwork, type Network } from "./network-env"
 
-export type Network = "mainnet" | "testnet" | "devnet" | "localnet"
+export type { Network }
 
-interface DeployedJson {
-  network?: string
-  packageId: string | null
-}
-
-function loadFlickyPackageId(): string | null {
-  const override = process.env.FLICKY_PACKAGE_ID
-  if (override) return override
-  try {
-    const path = resolve(import.meta.dir, "../../contracts/deployed.json")
-    const deployed = JSON.parse(readFileSync(path, "utf-8")) as DeployedJson
-    return deployed.packageId ?? null
-  } catch {
-    return null
+/** The network everything defaults to when a request doesn't say otherwise. */
+const defaultNetwork: Network = (() => {
+  const raw = process.env.SUI_NETWORK ?? "testnet"
+  if (!isNetwork(raw)) {
+    throw new Error(
+      `Bad SUI_NETWORK "${raw}" — want mainnet | testnet | devnet | localnet.`
+    )
   }
+  return raw
+})()
+
+/**
+ * Networks this process will serve, from `SUI_NETWORKS` (comma-separated).
+ * Defaults to just the default network, so adding mainnet is an explicit
+ * opt-in on the deploy rather than something that switches on by accident.
+ * The default network is always included.
+ */
+function loadEnabledNetworks(): Network[] {
+  const raw = process.env.SUI_NETWORKS
+  if (!raw) return [defaultNetwork]
+  const parsed = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+  for (const n of parsed) {
+    if (!isNetwork(n)) {
+      throw new Error(
+        `Bad SUI_NETWORKS entry "${n}" — want mainnet | testnet | devnet | localnet.`
+      )
+    }
+  }
+  const nets = parsed.filter(isNetwork)
+  return nets.includes(defaultNetwork) ? nets : [defaultNetwork, ...nets]
 }
 
 /** A Season prize tier: ranks `rankStart..rankEnd` (inclusive, 1-based) each pay `amount`. */
@@ -68,76 +91,23 @@ function loadSeasonPrizeSplit(): PrizeTier[] {
 export const env = {
   port: Number(process.env.PORT ?? 3001),
 
-  network: (process.env.SUI_NETWORK ?? "testnet") as Network,
-  rpcUrl: process.env.SUI_RPC_URL,
+  // Chain-scoped config for the DEFAULT network (SUI_NETWORK, default
+  // testnet). Supplies `network` itself plus flickyPackageId,
+  // deepbookPredictPackageId, accountRegistryId, predictIndexerUrl,
+  // keeperSecretKey, sponsorSecretKey, … — see ./network-env.ts. Code that
+  // must serve a specific network calls `networkEnv(net)` instead.
+  ...networkEnv(defaultNetwork),
 
-  // Flicky package (from deployed.json unless overridden).
-  flickyPackageId: loadFlickyPackageId(),
+  // Every network this process serves. Adding mainnet is an explicit opt-in
+  // on the deploy (SUI_NETWORKS=testnet,mainnet), never implicit.
+  enabledNetworks: loadEnabledNetworks(),
 
-  // DeepBook Predict (testnet defaults — 6-24).
-  deepbookPredictPackageId:
-    process.env.DEEPBOOK_PREDICT_PACKAGE_ID ??
-    "0xdb3ef5a5129920e59c9b2ae25a77eddb48acd0e1c6307b97073f0e076016446e",
-  deepbookPredictObjectId:
-    process.env.DEEPBOOK_PREDICT_OBJECT_ID ??
-    "0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a",
-  protocolConfigId:
-    process.env.PROTOCOL_CONFIG_ID ??
-    "0x2325224629b4bd96d1f1d7ee937e07f8a06f861018a130bbb26db09cb0394cb6",
-  poolVaultId:
-    process.env.POOL_VAULT_ID ??
-    "0xfde98c636eb8a7aba59c3a238cfee6b576b7118d1e5ffa2952876c4b270a3a2a",
-  predictRegistryId:
-    process.env.PREDICT_REGISTRY_ID ??
-    "0x54afbf245caf42466cedb5756ed7816f34f544afdfa13579a862eccf3afa21ca",
-  accountPackageId:
-    process.env.ACCOUNT_PACKAGE_ID ??
-    "0xb9389eac8d59170ffd1427c1a66e5c8306263464fcc6615e825c1f5b3e15da3b",
-  accountRegistryId:
-    process.env.ACCOUNT_REGISTRY_ID ??
-    "0x3c54d5b8b6bca376fc289121838ad02f8a5b3843242b9ad7e8f8245720e685a2",
-  propbookPackageId:
-    process.env.PROPBOOK_PACKAGE_ID ??
-    "0x8eb2adde1c91f8b7c9ba5e9b0a32bfb804510c342939c5f77458fd8143f9755b",
-  oracleRegistryId:
-    process.env.ORACLE_REGISTRY_ID ??
-    "0xf3deaff68cbd081a35ec21653af6f671d2ad5f012f3b4d817d81752843374136",
-  pythFeedId:
-    process.env.BTC_PYTH_FEED_ID ??
-    "0xc78d7de16217d46d21b92ae475da799448be30b71a758dc6d7bb3ac2f1c35afb",
-  bsSpotFeedId:
-    process.env.BTC_BS_SPOT_FEED_ID ??
-    "0xcdc5fa7364e60fd2504aa96f65b707dc0734e507a919b1a7d7d63164fd67b745",
-  bsForwardFeedId:
-    process.env.BTC_BS_FWD_FEED_ID ??
-    "0xe72c734ea8d8dcbc9183d9d8f96f51aaa1fb5034d5ed33ac60d67d261e15b48a",
-  bsSviFeedId:
-    process.env.BTC_BS_SVI_FEED_ID ??
-    "0xdc2f8270676bd05fb28491e8d4a41a495722fda7a454926dd66dbba256a21c69",
-  accumulatorRootId: process.env.ACCUMULATOR_ROOT_ID ?? "0xacc",
-  predictIndexerUrl:
-    process.env.PREDICT_INDEXER_URL ??
-    "https://predict-server-beta.testnet.mystenlabs.com",
-  propbookIndexerUrl:
-    process.env.PROPBOOK_INDEXER_URL ??
-    "https://propbook.api.testnet.mystenlabs.com",
   predictSettlementMode: (Bun.env.PREDICT_SETTLEMENT_MODE === "onchain"
     ? "onchain"
     : "keeper") as "keeper" | "onchain",
   deckStrikeMode: (Bun.env.DECK_STRIKE_MODE === "svi_quote"
     ? "svi_quote"
     : "price_offset") as "price_offset" | "svi_quote",
-  dusdcCoinType:
-    process.env.DUSDC_COIN_TYPE ??
-    "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC",
-
-  // SUI ↔ dUSDC AMM swap module (separate package from flicky duel —
-  // published from apps/contracts/swap/). Sponsor allowlists the two
-  // player-facing AMM functions (swap_x_for_y / swap_y_for_x); the
-  // pool / liquidity admin functions are NOT sponsored.
-  swapPackageId:
-    process.env.SWAP_PACKAGE_ID ??
-    "0x51ea0f29321f3c25f8b2f530ecd3ed3dec569d954c8832d318de7e203653a936",
 
   // Deckmaster: minimum headroom each card's oracle must clear at the
   // moment of duel creation. PRD says >10 min. On testnet the upstream
@@ -176,11 +146,6 @@ export const env = {
   // deck creation, off the hot swipe path. Set `DECK_PROBE_MINTABLE=false` to
   // disable (deck then uses the raw headroom-filtered market set).
   deckProbeMintable: (process.env.DECK_PROBE_MINTABLE ?? "true") !== "false",
-  // Optional override for the AccountWrapper the probe mints against. Defaults
-  // to the sponsor/keeper key's own (deterministic) wrapper — devInspect never
-  // charges it, so it only needs to exist and hold a little dUSDC.
-  probeWrapperId: process.env.PROBE_WRAPPER_ID,
-
   // ─── Tiered deck selection (staggered settle drama, ≤~15-min duel) ────────
   // When enabled, deck-gen uses `selectTieredMarkets` instead of the flat
   // `findDeckMarkets` horizon picker: it composes the deck from the 6-24
@@ -233,7 +198,6 @@ export const env = {
   // suiprivkey1… key whose address holds SUI in its on-chain address balance
   // (fund once via src/scripts/fund-sponsor.ts). Unset → POST /sponsor 503s
   // and the web client falls back to wallet-paid gas.
-  sponsorSecretKey: process.env.SPONSOR_SECRET_KEY,
   // Max gas (MIST) the sponsor will cover per transaction — a defensive cap
   // enforced by the `gasBudget` validator (default 0.1 SUI).
   sponsorMaxGasBudget: BigInt(
@@ -298,19 +262,11 @@ export const env = {
   seasonMinStakedDuels: Number(process.env.SEASON_MIN_STAKED_DUELS ?? 1),
   seasonEligibilityNote:
     process.env.SEASON_ELIGIBILITY_NOTE ?? "Final prizes at team discretion.",
-  // On-chain prize escrow (season::prize_pool, apps/contracts/season). Set
-  // after publishing; `seasonPoolId` is filled once `create_pool` runs. When
-  // set, GET /season surfaces them so the UI can show "prizes escrowed
-  // on-chain". Not read by any hot path — the escrow is admin-operated.
-  seasonPackageId: process.env.SEASON_PACKAGE_ID,
-  seasonPoolId: process.env.SEASON_POOL_ID,
-  // AdminCap object id for the prize pool — required only by the admin payout
-  // scripts (season:deposit is permissionless; season:distribute /
-  // withdraw_remainder need it). Held by the SPONSOR_SECRET_KEY address.
-  seasonAdminCapId: process.env.SEASON_ADMIN_CAP_ID,
+  // NOTE: the on-chain prize escrow ids (seasonPackageId / seasonPoolId /
+  // seasonAdminCapId) are chain-scoped and now live in ./network-env.ts —
+  // they arrive here via the spread above.
 
   // Keeper (background settle/redeem/finalize).
-  keeperSecretKey: process.env.KEEPER_SECRET_KEY ?? process.env.BOT_SECRET_KEY,
   keeperPollIntervalMs: Number(process.env.KEEPER_POLL_INTERVAL_MS ?? 10_000),
   keeperEnabled: process.env.KEEPER_ENABLED !== "false",
 

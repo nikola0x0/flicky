@@ -11,17 +11,20 @@
  * read it via `useCurrentClient()` so network switching keeps working.
  *
  * gRPC + GraphQL share the same testnet host that 404s JSON-RPC (different
- * protocol on `:443`). Override per-deploy via `VITE_SUI_GRPC_URL`.
+ * protocol on `:443`). Override per network via `VITE_SUI_GRPC_URL` /
+ * `VITE_SUI_GRPC_URL_MAINNET`.
+ *
+ * `defaultNetwork` is the network this page load is pinned to (see
+ * `lib/network.ts`) — switching networks persists the choice and reloads, so
+ * dApp Kit boots straight onto the right chain instead of switching under a
+ * live wallet session.
  */
 import { createDAppKit } from "@mysten/dapp-kit-react"
 import { SuiGrpcClient } from "@mysten/sui/grpc"
 import { enokiWalletsInitializer } from "@mysten/enoki"
 
-const GRPC_URLS: Record<string, string> = {
-  testnet:
-    import.meta.env.VITE_SUI_GRPC_URL ?? "https://fullnode.testnet.sui.io:443",
-  mainnet: "https://fullnode.mainnet.sui.io:443",
-}
+import { ACTIVE_NETWORK } from "@/lib/network"
+import { GRPC_URLS } from "@/lib/config"
 
 // Register the Enoki zkLogin wallets (Google, …) as a dApp Kit wallet
 // initializer — NOT in a post-mount useEffect. Initializers run as part of
@@ -52,7 +55,7 @@ const walletInitializers =
 
 export const dAppKit = createDAppKit({
   networks: ["testnet", "mainnet"],
-  defaultNetwork: "testnet",
+  defaultNetwork: ACTIVE_NETWORK,
   autoConnect: true,
   walletInitializers,
   createClient: (network) =>

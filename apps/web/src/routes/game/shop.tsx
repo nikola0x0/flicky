@@ -27,6 +27,8 @@ import {
   type PoolReserves,
   type SwapDirection,
 } from "@/lib/swap"
+import { NetworkGate } from "@/components/network-gate"
+import { DUELS_ENABLED } from "@/lib/config"
 
 const BLUE_BRAND_STYLE = {
   "--btn-bg": "#4094fb",
@@ -62,7 +64,24 @@ const DUSDC_TOKEN: TokenMeta = {
  * faucet, so this screen is the bridge. Constant-product pricing,
  * reserves live-read on mount and after each swap.
  */
+/**
+ * Route entry. Networks without the contracts this screen needs render the
+ * gate instead — `DUELS_ENABLED` is a module-level constant resolved once at
+ * boot, so this branch is stable for the life of the page and the inner
+ * component's hooks are never conditionally skipped.
+ */
 export default function GameShop() {
+  if (!DUELS_ENABLED)
+    return (
+      <NetworkGate
+        what="the shop"
+        reason="the sui/dusdc swap contract is only deployed on testnet."
+      />
+    )
+  return <GameShopInner />
+}
+
+function GameShopInner() {
   const account = useCurrentAccount()
   const client = useCurrentClient()
   const dAppKit = useDAppKit()
@@ -123,7 +142,9 @@ export default function GameShop() {
         inputRaw,
         minOutRaw
       )
-      const result = await dAppKit.signAndExecuteTransaction({ transaction: tx })
+      const result = await dAppKit.signAndExecuteTransaction({
+        transaction: tx,
+      })
       if (result.$kind !== "Transaction") {
         throw new Error("swap failed")
       }

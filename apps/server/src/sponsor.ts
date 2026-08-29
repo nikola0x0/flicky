@@ -48,6 +48,7 @@ import {
 import { Transaction } from "@mysten/sui/transactions"
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
+import { networkEnv, UNSET_ID } from "./network-env"
 import { decodeKeypair, getSuiClient } from "./lib/sui"
 import { makeLogger } from "./log"
 import { clientIp, consume } from "./ratelimit"
@@ -122,52 +123,49 @@ const DEEPBOOK_PREDICT_FNS = [
 export type SponsorNetwork = "testnet" | "mainnet"
 
 /**
- * DeepBook Predict package ids per network. Testnet defaults to what
- * `env.ts` exposes; mainnet is intentionally not baked in — set
- * `DEEPBOOK_PREDICT_PACKAGE_MAINNET` (or the legacy single-name
- * `DEEPBOOK_PREDICT_PACKAGE_ID` if you only target one network) at
- * deploy time so a typo can't silently approve an attacker's package.
+ * Package ids the allowlist is built from, resolved per network by
+ * `networkEnv` (`FOO` / `FOO_TESTNET` on testnet, `FOO_MAINNET` on mainnet —
+ * mainnet NEVER falls back to a testnet value).
+ *
+ * Every resolver below throws rather than substituting a default when a
+ * network's package isn't configured. That is deliberate and load-bearing:
+ * this allowlist is the only thing standing between the public POST /sponsor
+ * route and an attacker draining the sponsor's balance through unrelated
+ * MoveCalls, so a missing id must fail the request, never widen it.
  */
 function resolveDeepbookPackage(network: SponsorNetwork): string {
-  if (network === "testnet") return env.deepbookPredictPackageId
-  // network === "mainnet"
-  const mainnet =
-    process.env.DEEPBOOK_PREDICT_PACKAGE_MAINNET ??
-    (network === ("mainnet" as SponsorNetwork) ? null : null)
-  if (mainnet) return mainnet
+  const pkg = networkEnv(network).deepbookPredictPackageId
+  if (pkg !== UNSET_ID) return pkg
   throw new Error(
-    "DeepBook Predict mainnet package not configured. Set DEEPBOOK_PREDICT_PACKAGE_MAINNET " +
-      "in apps/server/.env before serving sponsored mainnet transactions.",
+    `DeepBook Predict package not configured for ${network}. Set ` +
+      `DEEPBOOK_PREDICT_PACKAGE_${network.toUpperCase()} in apps/server/.env ` +
+      `before serving sponsored ${network} transactions.`
   )
 }
 
 function resolveFlickyPackage(network: SponsorNetwork): string {
-  const override = process.env[`FLICKY_PACKAGE_${network.toUpperCase()}`]
-  if (override) return override
-  if (network === "testnet" && env.flickyPackageId) return env.flickyPackageId
+  const pkg = networkEnv(network).flickyPackageId
+  if (pkg) return pkg
   throw new Error(
     `Cannot resolve flicky package for ${network} — set FLICKY_PACKAGE_${network.toUpperCase()} ` +
-      `(or publish via apps/contracts on testnet to populate deployed.json).`,
+      `(or publish via apps/contracts on testnet to populate deployed.json).`
   )
 }
 
 function resolveAccountPackage(network: SponsorNetwork): string {
-  const override = process.env[`ACCOUNT_PACKAGE_${network.toUpperCase()}`]
-  if (override) return override
-  if (network === "testnet" && env.accountPackageId) return env.accountPackageId
+  const pkg = networkEnv(network).accountPackageId
+  if (pkg !== UNSET_ID) return pkg
   throw new Error(
     `Cannot resolve account package for ${network} — set ACCOUNT_PACKAGE_${network.toUpperCase()} ` +
-      `(or publish via apps/contracts on testnet to populate deployed.json).`,
+      `(or publish via apps/contracts on testnet to populate deployed.json).`
   )
 }
 
 function resolveSwapPackage(network: SponsorNetwork): string | null {
-  const override = process.env[`SWAP_PACKAGE_${network.toUpperCase()}`]
-  if (override) return override
-  if (network === "testnet") return env.swapPackageId
-  // Mainnet swap pkg not configured yet — return null and just skip
-  // allowlisting swap so a typo can't approve a wrong package.
-  return null
+  const pkg = networkEnv(network).swapPackageId
+  // Unconfigured → skip allowlisting swap entirely rather than guess. The
+  // shop is gated client-side on the same condition.
+  return pkg === UNSET_ID ? null : pkg
 }
 
 export function buildAllowedTargets(network: SponsorNetwork): string[] {
@@ -226,13 +224,13 @@ const SYSTEM_FRAMEWORK_PKGS = new Set([
  */
 export function assertSelfSponsorTargetsAllowed(
   tx: Transaction,
-  network: SponsorNetwork,
+  network: SponsorNetwork
 ): void {
   const allowed = new Set(
     buildAllowedTargets(network).map((t) => {
       const [pkg, mod, fn] = t.split("::")
       return `${normalizeSuiObjectId(pkg)}::${mod}::${fn}`
-    }),
+    })
   )
   const targets = moveCallTargets(tx)
   for (const target of targets) {
@@ -240,7 +238,7 @@ export function assertSelfSponsorTargetsAllowed(
     if (SYSTEM_FRAMEWORK_PKGS.has(pkg)) continue
     if (!allowed.has(target)) {
       throw new Error(
-        `sponsor: MoveCall target not allowlisted: ${target} (all targets: ${targets.join(", ")})`,
+        `sponsor: MoveCall target not allowlisted: ${target} (all targets: ${targets.join(", ")})`
       )
     }
   }
@@ -256,7 +254,7 @@ function allowedTargets(network: SponsorNetwork) {
     buildAllowedTargets(network).map((t) => {
       const [pkg, mod, fn] = t.split("::")
       return `${normalizeSuiObjectId(pkg)}::${mod}::${fn}`
-    }),
+    })
   )
   return createAnalyzer({
     dependencies: { data: analyzers.data },
@@ -265,7 +263,7 @@ function allowedTargets(network: SponsorNetwork) {
       ({ data }) => {
         const issues = data.commands
           .flatMap((command) =>
-            command.$kind === "MoveCall" ? [command.MoveCall] : [],
+            command.$kind === "MoveCall" ? [command.MoveCall] : []
           )
           .filter((mc) => {
             const pkg = normalizeSuiObjectId(mc.package)
@@ -283,7 +281,9 @@ function allowedTargets(network: SponsorNetwork) {
 
 // ─── CORS ───────────────────────────────────────────────────────────────────
 
-export function sponsorCorsHeaders(reqOrigin: string | null): Record<string, string> {
+export function sponsorCorsHeaders(
+  reqOrigin: string | null
+): Record<string, string> {
   const raw = env.allowedOrigin?.trim()
   if (!raw || raw === "*") {
     return {
@@ -298,7 +298,8 @@ export function sponsorCorsHeaders(reqOrigin: string | null): Record<string, str
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean)
-  const match = reqOrigin && allowed.includes(reqOrigin) ? reqOrigin : allowed[0]
+  const match =
+    reqOrigin && allowed.includes(reqOrigin) ? reqOrigin : allowed[0]
   return {
     "Access-Control-Allow-Origin": match,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -321,40 +322,71 @@ export function isSponsorOriginAllowed(reqOrigin: string | null): boolean {
 
 // ─── Sponsor instance ────────────────────────────────────────────────────────
 
-/**
- * The sponsor is bound to a single network (`env.network`) and client — its
- * funded address balance and allowlist only make sense there. The web client
- * reads the network back from `GET /sponsor`; per-request `network` overrides
- * are intentionally ignored (a mismatched network would just fail the dry-run).
- */
-function sponsorNetwork(): SponsorNetwork {
+/** The network used when a request doesn't name one (`SUI_NETWORK`). */
+function defaultSponsorNetwork(): SponsorNetwork {
   return env.network === "mainnet" ? "mainnet" : "testnet"
 }
 
-let _sponsor: Sponsor | null = null
-function getSponsor(): Sponsor | null {
-  if (_sponsor) return _sponsor
-  if (!env.sponsorSecretKey) return null
-  const signer = decodeKeypair(env.sponsorSecretKey)
-  _sponsor = createSponsor({
-    signer,
-    client: getSuiClient(),
+/**
+ * Networks this process will actually sponsor for. A network the deploy
+ * hasn't enabled is rejected outright rather than attempted — see
+ * `env.enabledNetworks` (SUI_NETWORKS).
+ */
+function isSponsorableNetwork(v: string): v is SponsorNetwork {
+  if (v !== "testnet" && v !== "mainnet") return false
+  return (env.enabledNetworks as readonly string[]).includes(v)
+}
+
+/**
+ * One sponsor per network. Each is bound to that network's client, key, and
+ * allowlist — a sponsor built for testnet must never co-sign mainnet bytes,
+ * so these are never shared.
+ *
+ * The signing key may well be the same bech32 key on both networks, but its
+ * ADDRESS BALANCE has to be funded separately on each chain: on mainnet that
+ * is real SUI. An unfunded balance surfaces as an opaque "Invalid withdraw
+ * reservation" on every request, so fund before enabling (`fund:sponsor`).
+ */
+const sponsors = new Map<SponsorNetwork, Sponsor | null>()
+
+function getSponsor(network: SponsorNetwork): Sponsor | null {
+  const hit = sponsors.get(network)
+  if (hit !== undefined) return hit
+
+  const secret = networkEnv(network).sponsorSecretKey
+  if (!secret) {
+    sponsors.set(network, null)
+    return null
+  }
+  const sponsor = createSponsor({
+    signer: decodeKeypair(secret),
+    client: getSuiClient(network),
     validate: [
       defaults(),
       userSignatureMatchesSender(),
       gasBudget({ max: env.sponsorMaxGasBudget }),
-      allowedTargets(sponsorNetwork()),
+      // Throws if the network's packages aren't configured — that propagates
+      // to a 503 rather than producing a sponsor with an empty allowlist.
+      allowedTargets(network),
     ],
   })
-  return _sponsor
+  sponsors.set(network, sponsor)
+  return sponsor
 }
 
 // ─── Handler ────────────────────────────────────────────────────────────────
 
-function jsonRes(body: unknown, status: number, origin: string | null): Response {
+function jsonRes(
+  body: unknown,
+  status: number,
+  origin: string | null
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json", ...sponsorCorsHeaders(origin) },
+    headers: {
+      "content-type": "application/json",
+      ...sponsorCorsHeaders(origin),
+    },
   })
 }
 
@@ -362,27 +394,72 @@ function jsonRes(body: unknown, status: number, origin: string | null): Response
  * Handle a /sponsor request. Returns null if the path isn't sponsor-related so
  * the caller can fall through to other handlers.
  */
-export async function handleSponsorRequest(req: Request): Promise<Response | null> {
+export async function handleSponsorRequest(
+  req: Request
+): Promise<Response | null> {
   const url = new URL(req.url)
   if (url.pathname !== "/sponsor") return null
 
   const origin = req.headers.get("origin")
 
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: sponsorCorsHeaders(origin) })
+    return new Response(null, {
+      status: 204,
+      headers: sponsorCorsHeaders(origin),
+    })
   }
   if (!isSponsorOriginAllowed(origin)) {
     return jsonRes({ error: "Origin not allowed" }, 403, origin)
   }
 
-  const sponsor = getSponsor()
-  if (!sponsor) {
-    return jsonRes({ error: "SPONSOR_SECRET_KEY not configured" }, 503, origin)
-  }
-
   // GET /sponsor — config: the gas owner + network the client builds against.
+  // `networks` lists every sponsorable network with its own gas owner; the
+  // flat `sponsor`/`network` pair is the default network's, kept for clients
+  // built before this route was multi-network.
   if (req.method === "GET") {
-    return jsonRes({ sponsor: sponsor.address, network: sponsorNetwork() }, 200, origin)
+    const requested = url.searchParams.get("network")
+    if (requested && !isSponsorableNetwork(requested)) {
+      return jsonRes(
+        { error: `network not enabled: ${requested}` },
+        400,
+        origin
+      )
+    }
+    const target =
+      (requested as SponsorNetwork | null) ?? defaultSponsorNetwork()
+
+    const networks: Record<string, { sponsor: string | null; ready: boolean }> =
+      {}
+    for (const net of env.enabledNetworks) {
+      if (net !== "testnet" && net !== "mainnet") continue
+      let address: string | null = null
+      let ready = false
+      try {
+        const s = getSponsor(net)
+        address = s?.address ?? null
+        // Building the allowlist is what proves the network's packages are
+        // configured — it throws otherwise, and that's the honest "not ready".
+        if (s) {
+          buildAllowedTargets(net)
+          ready = true
+        }
+      } catch {
+        ready = false
+      }
+      networks[net] = { sponsor: address, ready }
+    }
+
+    const active = networks[target]
+    return jsonRes(
+      {
+        sponsor: active?.sponsor ?? null,
+        network: target,
+        ready: active?.ready ?? false,
+        networks,
+      },
+      200,
+      origin
+    )
   }
   if (req.method !== "POST") {
     return jsonRes({ error: "GET or POST only" }, 405, origin)
@@ -390,7 +467,11 @@ export async function handleSponsorRequest(req: Request): Promise<Response | nul
 
   const gate = consume("sponsor", clientIp(req, null))
   if (!gate.ok) {
-    return jsonRes({ error: "rate limited", retryMs: gate.retryMs }, 429, origin)
+    return jsonRes(
+      { error: "rate limited", retryMs: gate.retryMs },
+      429,
+      origin
+    )
   }
 
   let body: Record<string, unknown>
@@ -403,14 +484,58 @@ export async function handleSponsorRequest(req: Request): Promise<Response | nul
   const transaction = body.transaction as string | undefined
   const userSignature = body.userSignature as string | string[] | undefined
   if (!transaction || !userSignature) {
-    return jsonRes({ error: "Missing transaction or userSignature" }, 400, origin)
+    return jsonRes(
+      { error: "Missing transaction or userSignature" },
+      400,
+      origin
+    )
+  }
+
+  // Which chain these bytes are for. Unlike the previous single-network
+  // service, this is honoured rather than ignored — but only for networks the
+  // deploy enabled, and each resolves its own sponsor + allowlist.
+  const requestedNetwork = body.network as string | undefined
+  if (requestedNetwork && !isSponsorableNetwork(requestedNetwork)) {
+    return jsonRes(
+      { error: `network not enabled: ${requestedNetwork}` },
+      400,
+      origin
+    )
+  }
+  const network =
+    (requestedNetwork as SponsorNetwork | undefined) ?? defaultSponsorNetwork()
+
+  let sponsor: Sponsor | null
+  try {
+    sponsor = getSponsor(network)
+  } catch (err) {
+    // Allowlist construction failed — the network's packages aren't
+    // configured. Refusing is the safe outcome; never fall through to a
+    // sponsor with a partial allowlist.
+    const message = err instanceof Error ? err.message : String(err)
+    log.warn(`sponsor unavailable for ${network}: ${message}`)
+    return jsonRes(
+      { error: "Sponsor not available", detail: message },
+      503,
+      origin
+    )
+  }
+  if (!sponsor) {
+    return jsonRes(
+      { error: `SPONSOR_SECRET_KEY not configured for ${network}` },
+      503,
+      origin
+    )
   }
 
   try {
     // signAndExecuteTransaction validates the policy, co-signs, and executes.
     // A policy decline is RETURNED ($kind: 'Rejected'), not thrown — only
     // genuine errors (network, malformed bytes) reach the catch below.
-    const result = await sponsor.signAndExecuteTransaction({ transaction, userSignature })
+    const result = await sponsor.signAndExecuteTransaction({
+      transaction,
+      userSignature,
+    })
 
     switch (result.$kind) {
       case "Rejected":
@@ -421,7 +546,7 @@ export async function handleSponsorRequest(req: Request): Promise<Response | nul
             issues: result.issues,
           },
           403,
-          origin,
+          origin
         )
       case "FailedTransaction":
         // Executed on-chain but aborted — the sponsor's gas is spent either way.
@@ -431,18 +556,26 @@ export async function handleSponsorRequest(req: Request): Promise<Response | nul
             digest: result.FailedTransaction.digest,
           },
           502,
-          origin,
+          origin
         )
       case "Transaction":
         return jsonRes({ digest: result.Transaction.digest }, 200, origin)
       default: {
         const exhaustive: never = result
-        return jsonRes({ error: "Unexpected sponsor result", detail: exhaustive }, 500, origin)
+        return jsonRes(
+          { error: "Unexpected sponsor result", detail: exhaustive },
+          500,
+          origin
+        )
       }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     log.warn(`sponsor call failed: ${message}`)
-    return jsonRes({ error: "Sponsor call failed", detail: message }, 502, origin)
+    return jsonRes(
+      { error: "Sponsor call failed", detail: message },
+      502,
+      origin
+    )
   }
 }

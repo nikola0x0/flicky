@@ -3,6 +3,7 @@ import { useCurrentAccount, useCurrentClient } from "@mysten/dapp-kit-react"
 
 import { DUSDC_COIN_TYPE, SUI_COIN_TYPE, fetchCoinBalance } from "@/lib/swap"
 import { fetchAccountState } from "@/lib/deepbook"
+import { DUELS_ENABLED } from "@/lib/config"
 
 const BALANCE_ROOT_KEY = "wallet-balance"
 const MANAGER_BALANCE_KEY = "manager-balance"
@@ -14,16 +15,16 @@ const MANAGER_BALANCE_KEY = "manager-balance"
  * stay in sync. Call useInvalidateWalletBalances() after any action
  * that should produce an immediate refresh (deposit, swap, etc.).
  */
-export function useWalletBalance(coinType: string) {
+export function useWalletBalance(coinType: string | null) {
   const account = useCurrentAccount()
   const client = useCurrentClient()
   return useQuery({
     queryKey: [BALANCE_ROOT_KEY, account?.address ?? null, coinType],
     queryFn: async () => {
-      if (!account) return 0
+      if (!account || !coinType) return 0
       return fetchCoinBalance(client, account.address, coinType)
     },
-    enabled: !!account,
+    enabled: !!account && !!coinType,
     refetchInterval: 5_000,
     staleTime: 2_000,
   })
@@ -33,8 +34,13 @@ export function useSuiBalance() {
   return useWalletBalance(SUI_COIN_TYPE)
 }
 
+/**
+ * dUSDC balance. Networks without a dUSDC deployment report 0 rather than
+ * querying a coin type that doesn't exist there — the header chip then
+ * renders a truthful 0.00 instead of an error state.
+ */
 export function useDusdcBalance() {
-  return useWalletBalance(DUSDC_COIN_TYPE)
+  return useWalletBalance(DUELS_ENABLED ? DUSDC_COIN_TYPE : null)
 }
 
 export function useInvalidateWalletBalances() {
@@ -63,7 +69,8 @@ export function useManagerBalance() {
       const { wrapperId, balance } = await fetchAccountState(account.address)
       return { managerId: wrapperId, balance: Number(balance) / 1e6 }
     },
-    enabled: !!account,
+    // No Predict deployment → no AccountRegistry to derive a wrapper from.
+    enabled: !!account && DUELS_ENABLED,
     refetchInterval: 5_000,
     staleTime: 2_000,
   })

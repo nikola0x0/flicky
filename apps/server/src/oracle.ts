@@ -16,7 +16,8 @@
  */
 import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
-import { json } from "./lib/http"
+import { json, networkUnavailable, resolveNetworkParam } from "./lib/http"
+import { networkEnv } from "./network-env"
 import { makeLogger } from "./log"
 
 const log = makeLogger("oracle")
@@ -125,6 +126,16 @@ export async function handleOracleRequest(
   req: Request,
   url: URL
 ): Promise<Response | null> {
+  if (!url.pathname.startsWith("/oracle")) return null
+
+  // Every read here comes from the Predict indexer, so a network without a
+  // Predict deployment has nothing to answer with.
+  const resolved = resolveNetworkParam(url)
+  if ("error" in resolved) return resolved.error
+  if (!networkEnv(resolved.network).predictAvailable) {
+    return networkUnavailable(resolved.network)
+  }
+
   if (url.pathname === "/oracle/list" && req.method === "GET") {
     const asset = url.searchParams.get("asset") ?? "BTC"
     const minHeadroomRaw = url.searchParams.get("minHeadroomMs")

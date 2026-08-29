@@ -10,27 +10,21 @@
  * and would break `bun test src/lib`. This module only pulls in
  * `@mysten/sui/graphql`.
  *
- * Memoized — one client shared across the app. Override the endpoint via
- * `VITE_SUI_GRAPHQL_URL`.
+ * Memoized — one client shared across the app. The endpoint follows the
+ * active network (`CONFIG.graphqlUrl`), overridable per network via
+ * `VITE_SUI_GRAPHQL_URL` / `VITE_SUI_GRAPHQL_URL_MAINNET`.
  */
 import { SuiGraphQLClient } from "@mysten/sui/graphql"
 
-type Network = "testnet" | "mainnet"
-
-const NETWORK: Network = (import.meta.env.VITE_SUI_NETWORK ??
-  "testnet") as Network
-
-const GRAPHQL_URLS: Record<Network, string> = {
-  testnet:
-    import.meta.env.VITE_SUI_GRAPHQL_URL ??
-    "https://graphql.testnet.sui.io/graphql",
-  mainnet: "https://graphql.mainnet.sui.io/graphql",
-}
+import { CONFIG } from "@/lib/config"
 
 let _gql: SuiGraphQLClient | null = null
 
 export function getGraphQLClient(): SuiGraphQLClient {
   if (_gql) return _gql
-  _gql = new SuiGraphQLClient({ url: GRAPHQL_URLS[NETWORK], network: NETWORK })
+  _gql = new SuiGraphQLClient({
+    url: CONFIG.graphqlUrl,
+    network: CONFIG.network,
+  })
   return _gql
 }

@@ -25,6 +25,7 @@ import {
   type DuelRow,
 } from "./db"
 import { env } from "./env"
+import { type Network } from "./network-env"
 import { makeLogger, shortId } from "./log"
 
 const log = makeLogger("mmr")
@@ -41,7 +42,7 @@ export type DuelOutcome = "p0_win" | "p1_win" | "tie"
 export async function applyDuelOutcome(
   p0: string,
   p1: string,
-  outcome: DuelOutcome,
+  outcome: DuelOutcome
 ): Promise<{
   p0Before: number
   p0After: number
@@ -86,7 +87,7 @@ export async function applyDuelOutcome(
     lastUpdatedMs: now,
   })
   log.info(
-    `${shortId(p0)} ${a.rating}→${newA} vs ${shortId(p1)} ${b.rating}→${newB} (${outcome})`,
+    `${shortId(p0)} ${a.rating}→${newA} vs ${shortId(p1)} ${b.rating}→${newB} (${outcome})`
   )
   return {
     p0Before: a.rating,
@@ -154,7 +155,7 @@ export async function recomputeRatingsFromMirror(): Promise<{
     applied++
   }
   log.info(
-    `recompute: cleared ${cleared} row(s), applied ${applied} duel(s), skipped ${skipped}`,
+    `recompute: cleared ${cleared} row(s), applied ${applied} duel(s), skipped ${skipped}`
   )
   return { cleared, applied, skipped }
 }
@@ -180,7 +181,7 @@ export interface Candidate {
 export async function findClosestOpponent(
   myRating: number,
   myQueuedAtMs: number,
-  pool: Candidate[],
+  pool: Candidate[]
 ): Promise<Candidate | null> {
   if (pool.length === 0) return null
   const now = Date.now()
@@ -208,6 +209,6 @@ function matchWindow(waitMs: number): number {
 
 // ─── Leaderboard read ───────────────────────────────────────────────────────
 
-export async function topLeaderboard(limit: number) {
-  return leaderboard(limit)
+export async function topLeaderboard(limit: number, network?: Network) {
+  return leaderboard(limit, network)
 }

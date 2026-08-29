@@ -25,9 +25,13 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 type SuiClient = ClientWithCoreApi
 
 import * as duel from "@/sui/gen/flicky/duel"
-import { CONFIG } from "./config"
+import { CONFIG, apiUrl } from "./config"
 
-/** Hard-coded testnet object IDs / package ids for DeepBook Predict (6-24). */
+/**
+ * DeepBook Predict (6-24) object / package ids for the ACTIVE network — a
+ * flat re-export of the network slice in lib/config.ts, kept under this name
+ * so the PTB builders below read `DEEPBOOK.foo` unchanged.
+ */
 export const DEEPBOOK = {
   deepbookPredictPackageId: CONFIG.deepbookPredictPackageId,
   accountPackageId: CONFIG.accountPackageId,
@@ -40,9 +44,8 @@ export const DEEPBOOK = {
   bsSviFeedId: CONFIG.bsSviFeedId,
   accumulatorRootId: CONFIG.accumulatorRootId,
   predictIndexerUrl: CONFIG.predictIndexerUrl,
-  /** Canonical dUSDC coin type on testnet (1e6 decimals). */
-  dusdcType:
-    "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC",
+  /** dUSDC on testnet (1e6 decimals); native USDC on mainnet. */
+  dusdcType: CONFIG.dusdcCoinType,
 } as const
 
 // === Wrapper discovery ===
@@ -113,7 +116,7 @@ export async function resolveWrapper(
 
   try {
     const res = await fetch(
-      `${CONFIG.serverHttpUrl}/manager?owner=${encodeURIComponent(owner)}`
+      apiUrl(`/manager?owner=${encodeURIComponent(owner)}`)
     )
     if (!res.ok) return undefined
     const body = (await res.json()) as {
@@ -154,9 +157,7 @@ export async function getWalletDusdcBalance(
 export async function fetchAccountState(
   owner: string
 ): Promise<{ wrapperId: string | null; balance: bigint }> {
-  const res = await fetch(
-    `${CONFIG.serverHttpUrl}/manager?owner=${encodeURIComponent(owner)}`
-  )
+  const res = await fetch(apiUrl(`/manager?owner=${encodeURIComponent(owner)}`))
   if (!res.ok) {
     throw new Error(`fetchAccountState: /manager HTTP ${res.status}`)
   }

@@ -10,7 +10,7 @@
  * `getObject` directly; this is for listings / dashboards / share pages.
  */
 import { getDuel, listRecentDuels, type DuelRow } from "./db"
-import { json } from "./lib/http"
+import { json, resolveNetworkParam } from "./lib/http"
 
 function toWire(d: DuelRow) {
   return {
@@ -37,14 +37,25 @@ function toWire(d: DuelRow) {
 
 export async function handleDuelsRequest(
   req: Request,
-  url: URL,
+  url: URL
 ): Promise<Response | null> {
+  if (!url.pathname.startsWith("/duels")) return null
+
+  // A duel object lives on one chain, so both reads below are scoped to the
+  // requested network — otherwise a client on one network would be offered
+  // duels it can't open.
+  const resolved = resolveNetworkParam(url)
+  if ("error" in resolved) return resolved.error
+  const { network } = resolved
+
   if (url.pathname === "/duels/recent" && req.method === "GET") {
     const limitRaw = url.searchParams.get("limit")
     const limit = Math.min(100, Math.max(1, Number(limitRaw ?? 20)))
     const statusRaw = url.searchParams.get("status")
     const status =
-      statusRaw === "PENDING" || statusRaw === "ACTIVE" || statusRaw === "COMPLETE"
+      statusRaw === "PENDING" ||
+      statusRaw === "ACTIVE" ||
+      statusRaw === "COMPLETE"
         ? statusRaw
         : undefined
     // `player` returns only duels where the address is creator OR
@@ -54,12 +65,17 @@ export async function handleDuelsRequest(
     const player =
       playerRaw && playerRaw.startsWith("0x") ? playerRaw : undefined
     try {
-      const duels = (await listRecentDuels(limit, status, player)).map(toWire)
+      const duels = (await listRecentDuels(limit, status, player, network)).map(
+        toWire
+      )
       return json({ duels })
     } catch (e) {
       return json(
-        { error: "duels read failed", detail: e instanceof Error ? e.message : String(e) },
-        500,
+        {
+          error: "duels read failed",
+          detail: e instanceof Error ? e.message : String(e),
+        },
+        500
       )
     }
   }
@@ -68,13 +84,16 @@ export async function handleDuelsRequest(
     const id = decodeURIComponent(url.pathname.slice("/duels/".length))
     if (!id.startsWith("0x")) return json({ error: "bad duel id" }, 400)
     try {
-      const d = await getDuel(id)
+      const d = await getDuel(id, network)
       if (!d) return json({ error: "duel not mirrored yet" }, 404)
       return json(toWire(d))
     } catch (e) {
       return json(
-        { error: "duel read failed", detail: e instanceof Error ? e.message : String(e) },
-        500,
+        {
+          error: "duel read failed",
+          detail: e instanceof Error ? e.message : String(e),
+        },
+        500
       )
     }
   }

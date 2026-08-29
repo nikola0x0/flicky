@@ -12,7 +12,7 @@
  * with silent retries — the home tile keeps working even if one fails.
  */
 import { useEffect, useState } from "react"
-import { CONFIG } from "@/lib/config"
+import { apiUrl } from "@/lib/config"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { ratingToTier, TIER_STYLES } from "@/lib/rank-tier"
 import { playerDuelResult } from "@/lib/duel-result"
@@ -48,14 +48,12 @@ function usePlayerStats(address: string | undefined): LeaderboardEntry | null {
     let timer: ReturnType<typeof setTimeout> | null = null
     const tick = async () => {
       try {
-        const res = await fetch(
-          `${CONFIG.serverHttpUrl}/leaderboard?limit=500`,
-        )
+        const res = await fetch(apiUrl("/leaderboard?limit=500"))
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { players: LeaderboardEntry[] }
         const self =
           body.players.find(
-            (p) => p.address.toLowerCase() === address.toLowerCase(),
+            (p) => p.address.toLowerCase() === address.toLowerCase()
           ) ?? null
         if (!cancelled) setStats(self)
       } catch {
@@ -99,7 +97,9 @@ function usePlayerRecord(address: string | undefined): PlayerRecord | null {
     const tick = async () => {
       try {
         const res = await fetch(
-          `${CONFIG.serverHttpUrl}/duels/recent?player=${encodeURIComponent(address)}&limit=100&status=COMPLETE`,
+          apiUrl(
+            `/duels/recent?player=${encodeURIComponent(address)}&limit=100&status=COMPLETE`
+          )
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { duels: DuelLite[] }
@@ -158,7 +158,7 @@ export function PlayerHeroCard({ address }: { address: string }) {
             >
               {tierStyle.label}
             </span>
-            <span className="tabular-nums text-white/85">
+            <span className="text-white/85 tabular-nums">
               {stats?.rating ?? "—"}
             </span>
           </div>

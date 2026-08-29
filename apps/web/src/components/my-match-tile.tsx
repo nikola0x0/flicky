@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
-import { CONFIG } from "@/lib/config"
+import { apiUrl } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { playSfx } from "@/lib/sound"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
@@ -151,7 +151,7 @@ export function MyMatchTile() {
     const tick = async () => {
       try {
         const res = await fetch(
-          `${CONFIG.serverHttpUrl}/duels/recent?player=${encodeURIComponent(address)}&limit=20`
+          apiUrl(`/duels/recent?player=${encodeURIComponent(address)}&limit=20`)
         )
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { duels: DuelLite[] }

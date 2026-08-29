@@ -12,6 +12,8 @@ import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { ActiveDuel } from "./active-duel"
 import { STAKE_TIERS, type Tier } from "@/lib/protocol"
 import { playSfx } from "@/lib/sound"
+import { NetworkGate } from "@/components/network-gate"
+import { DUELS_ENABLED } from "@/lib/config"
 
 const STAKES = [1, 3, 5, 10] as const
 type Stake = (typeof STAKES)[number]
@@ -41,7 +43,18 @@ const TIER_LABEL: Record<Tier, string> = {
   high_roller: "high roller",
 }
 
+/**
+ * Route entry. Networks without the contracts this screen needs render the
+ * gate instead — `DUELS_ENABLED` is a module-level constant resolved once at
+ * boot, so this branch is stable for the life of the page and the inner
+ * component's hooks are never conditionally skipped.
+ */
 export default function GamePvp() {
+  if (!DUELS_ENABLED) return <NetworkGate what="duels" />
+  return <GamePvpInner />
+}
+
+function GamePvpInner() {
   const account = useCurrentAccount()
   const navigate = useNavigate()
   const [stake, setStake] = useState<Stake>(1)

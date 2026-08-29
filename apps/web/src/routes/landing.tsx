@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react"
 import { Link, useNavigate, type NavigateFunction } from "react-router"
 import { PixelButton } from "@/components/pixel-button"
-import { CONFIG } from "@/lib/config"
+import { CONFIG, explorerObjectUrl } from "@/lib/config"
 
 /**
  * Public homepage at `/`. A judge opens this first: it has to say "what is
@@ -40,7 +40,7 @@ function enterGameWithCrt(navigate: NavigateFunction) {
 
 const GITHUB_URL = "https://github.com/nikola0x0/flicky"
 const DEEPBOOK_URL = "https://deepbook.tech"
-const contractUrl = `https://suiscan.xyz/testnet/object/${CONFIG.packageId}/tx-blocks`
+const contractUrl = `${explorerObjectUrl(CONFIG.packageId)}/tx-blocks`
 
 // Bevelled pixel panel — hard black outline, top highlight + offset drop,
 // matching the in-game tile treatment.
@@ -103,7 +103,7 @@ function TopBar() {
       </Link>
       <div className="flex items-center gap-3 sm:gap-5 2xl:gap-8">
         <span className="bg-[#0f1430] px-2.5 py-1 text-[10px] tracking-[0.12em] text-[#8fb4ff] uppercase sm:text-xs 2xl:px-4 2xl:py-2 2xl:text-base">
-          Sui testnet
+          Sui {CONFIG.network}
         </span>
         <Link
           to="/game/home"
@@ -257,7 +257,7 @@ function HeroPreview() {
           tucked close on mobile (stacked layout only has the phone's own
           centering margin to bleed into) and grows/moves outward once the
           hero switches to a two-column layout at `md`. */}
-      <div className="pointer-events-none absolute -left-8 bottom-1 w-16 -rotate-6 sm:-left-12 sm:w-20 md:-left-14 md:w-24 lg:-left-24 lg:bottom-4 lg:w-44 2xl:-left-32 2xl:w-56">
+      <div className="pointer-events-none absolute bottom-1 -left-8 w-16 -rotate-6 sm:-left-12 sm:w-20 md:-left-14 md:w-24 lg:bottom-4 lg:-left-24 lg:w-44 2xl:-left-32 2xl:w-56">
         <AssetImage
           src="/mascot/hero.png"
           alt=""

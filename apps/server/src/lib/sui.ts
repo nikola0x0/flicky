@@ -11,7 +11,10 @@ import { SuiGraphQLClient } from "@mysten/sui/graphql"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography"
 
-export type Network = "mainnet" | "testnet" | "devnet" | "localnet"
+import { env } from "../env"
+import { networkEnv, type Network } from "../network-env"
+
+export type { Network }
 
 export function requireEnv(name: string): string {
   const v = process.env[name]
@@ -19,41 +22,34 @@ export function requireEnv(name: string): string {
   return v
 }
 
-const GRPC_DEFAULTS: Record<Network, string> = {
-  mainnet: "https://fullnode.mainnet.sui.io:443",
-  testnet: "https://fullnode.testnet.sui.io:443",
-  devnet: "https://fullnode.devnet.sui.io:443",
-  localnet: "http://127.0.0.1:9000",
-}
-const GRAPHQL_DEFAULTS: Record<Network, string> = {
-  mainnet: "https://graphql.mainnet.sui.io/graphql",
-  testnet: "https://graphql.testnet.sui.io/graphql",
-  devnet: "https://graphql.devnet.sui.io/graphql",
-  localnet: "http://127.0.0.1:9125/graphql",
-}
+// One client per network, not one per process — this server answers for
+// every network in `env.enabledNetworks`, and a client is bound to the
+// endpoint it was constructed with. Callers that don't care get the default
+// network, which is what every pre-multi-network call site meant.
+const grpcClients = new Map<Network, SuiGrpcClient>()
 
-function network(): Network {
-  return (process.env.SUI_NETWORK ?? "testnet") as Network
-}
-
-let _grpc: SuiGrpcClient | null = null
-
-export function getSuiClient(): SuiGrpcClient {
-  if (_grpc) return _grpc
-  const net = network()
-  const baseUrl = process.env.SUI_GRPC_URL ?? GRPC_DEFAULTS[net]
-  _grpc = new SuiGrpcClient({ network: net, baseUrl })
-  return _grpc
+export function getSuiClient(net: Network = env.network): SuiGrpcClient {
+  const hit = grpcClients.get(net)
+  if (hit) return hit
+  const client = new SuiGrpcClient({
+    network: net,
+    baseUrl: networkEnv(net).grpcUrl,
+  })
+  grpcClients.set(net, client)
+  return client
 }
 
-let _gql: SuiGraphQLClient | null = null
+const gqlClients = new Map<Network, SuiGraphQLClient>()
 
-export function getGraphQLClient(): SuiGraphQLClient {
-  if (_gql) return _gql
-  const net = network()
-  const url = process.env.SUI_GRAPHQL_URL ?? GRAPHQL_DEFAULTS[net]
-  _gql = new SuiGraphQLClient({ url, network: net })
-  return _gql
+export function getGraphQLClient(net: Network = env.network): SuiGraphQLClient {
+  const hit = gqlClients.get(net)
+  if (hit) return hit
+  const client = new SuiGraphQLClient({
+    url: networkEnv(net).graphqlUrl,
+    network: net,
+  })
+  gqlClients.set(net, client)
+  return client
 }
 
 export function getAdminKeypair(): Ed25519Keypair {

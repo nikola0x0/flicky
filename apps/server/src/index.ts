@@ -23,6 +23,7 @@ import { env } from "./env"
 import { makeLogger } from "./log"
 import { CORS_HEADERS, corsPreflight, json } from "./lib/http"
 import { getSuiClient, decodeKeypair } from "./lib/sui"
+import { networkEnv } from "./network-env"
 import { handleDeckmasterRequest, knownHashCount } from "./deckmaster"
 import { handleDocsRequest } from "./docs"
 import { handleAvatarRequest } from "./avatar-api"
@@ -97,6 +98,26 @@ const server = Bun.serve({
         ok: true,
         port: env.port,
         network: env.network,
+        // Per-network resolution, so a deploy can be checked without
+        // guessing which ids the `_MAINNET` vars actually produced.
+        networks: Object.fromEntries(
+          env.enabledNetworks.map((net) => {
+            const ne = networkEnv(net)
+            return [
+              net,
+              {
+                flickyPackageId: ne.flickyPackageId,
+                deepbookPredictPackageId: ne.deepbookPredictPackageId,
+                predictAvailable: ne.predictAvailable,
+                sponsor: ne.sponsorSecretKey ? "configured" : "unset",
+                keeper: ne.keeperSecretKey ? "configured" : "unset",
+                // Background services run on the default network only —
+                // see the boot section below.
+                services: net === env.network ? "active" : "read-only",
+              },
+            ]
+          })
+        ),
         flickyPackageId: env.flickyPackageId,
         decks,
         ws: {
@@ -165,6 +186,10 @@ const server = Bun.serve({
 })
 
 log.info(`listening on http://localhost:${server.port}`)
+log.info(
+  `  networks: ${env.enabledNetworks.join(", ")} (default ${env.network}; ` +
+    `background services run on the default only)`
+)
 log.info(`  GET  /health`)
 log.info(`  POST /deckmaster/generate`)
 log.info(`  GET  /deckmaster/reveal?hash=0x...`)
@@ -209,8 +234,18 @@ void ready()
     )
   )
 
+// The indexer, keeper, oracle stream, and matchmaking queues all run on the
+// DEFAULT network only. HTTP reads are already per-network, but running these
+// per-network needs more than a loop: separate event cursors, a funded keeper
+// key per chain, and network-partitioned queues so a testnet player can't be
+// matched with a mainnet one. Since DeepBook Predict is testnet-only there is
+// nothing on mainnet to index or settle yet, so that work lands with the
+// mainnet flip — see docs/network-switching.md.
 if (env.indexerEnabled && env.flickyPackageId) {
-  const indexer = new DuelIndexer(getSuiClient(), env.flickyPackageId)
+  const indexer = new DuelIndexer(
+    getSuiClient(env.network),
+    env.flickyPackageId
+  )
   void indexer.start()
 } else if (!env.flickyPackageId) {
   log.warn("indexer disabled — no flicky packageId")
@@ -224,7 +259,11 @@ startSponsorBalanceMonitor()
 if (env.keeperEnabled && env.keeperSecretKey && env.flickyPackageId) {
   try {
     const keypair = decodeKeypair(env.keeperSecretKey)
-    const keeper = new Keeper(getSuiClient(), keypair, env.flickyPackageId)
+    const keeper = new Keeper(
+      getSuiClient(env.network),
+      keypair,
+      env.flickyPackageId
+    )
     void keeper.start()
   } catch (e) {
     log.error(

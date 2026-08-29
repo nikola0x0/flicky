@@ -18,6 +18,8 @@ import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { resolveWrapper } from "@/lib/deepbook"
 import { fetchDuel } from "@/lib/flicky"
 import { ActiveDuel } from "./active-duel"
+import { NetworkGate } from "@/components/network-gate"
+import { DUELS_ENABLED } from "@/lib/config"
 
 type Load =
   | { kind: "loading" }
@@ -25,7 +27,18 @@ type Load =
   | { kind: "error"; message: string }
   | { kind: "ready"; managerId: string }
 
+/**
+ * Route entry. Networks without the contracts this screen needs render the
+ * gate instead — `DUELS_ENABLED` is a module-level constant resolved once at
+ * boot, so this branch is stable for the life of the page and the inner
+ * component's hooks are never conditionally skipped.
+ */
 export default function PlayDuel() {
+  if (!DUELS_ENABLED) return <NetworkGate what="duels" />
+  return <PlayDuelInner />
+}
+
+function PlayDuelInner() {
   const { duelId } = useParams<{ duelId: string }>()
   const navigate = useNavigate()
   const account = useCurrentAccount()

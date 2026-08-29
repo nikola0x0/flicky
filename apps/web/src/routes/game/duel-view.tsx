@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useParams } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
-import { CONFIG } from "@/lib/config"
+import { CONFIG, apiUrl } from "@/lib/config"
 import { useFlickySocket } from "@/hooks/use-flicky-socket"
 import { fmtPnlPct, tickCardPnl, type SwipeLite } from "@/lib/pnl"
 import { duelUnsettleable, missingSides } from "@/lib/duel-state"
@@ -294,9 +294,7 @@ export default function DuelView() {
     let timer: ReturnType<typeof setTimeout> | null = null
     const tick = async () => {
       try {
-        const res = await fetch(
-          `${CONFIG.serverHttpUrl}/duels/${encodeURIComponent(duelId)}`
-        )
+        const res = await fetch(apiUrl(`/duels/${encodeURIComponent(duelId)}`))
         if (res.status === 404) throw new Error("not_indexed")
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as DuelLite

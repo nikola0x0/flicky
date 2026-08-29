@@ -33,6 +33,7 @@ import { BalanceChip } from "@/components/balance-chip"
 import { DepositModal } from "@/components/deposit-modal"
 import { LoginModal } from "@/components/login-modal"
 import { MenuButton } from "@/components/menu-button"
+import { NetworkSwitcher } from "@/components/network-switcher"
 import { PixelButton } from "@/components/pixel-button"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { useDusdcBalance, useManagerBalance } from "@/hooks/use-wallet-balances"
@@ -306,6 +307,7 @@ function FrameHeader({
   onAddClick: () => void
   signedOut: boolean
 }) {
+  const [networkOpen, setNetworkOpen] = useState(false)
   const account = useCurrentAccount()
   const location = useLocation()
   const { data: dusdc } = useDusdcBalance()
@@ -319,12 +321,13 @@ function FrameHeader({
 
   return (
     <header
-      className={`flex justify-between gap-2 px-3 py-3 min-[400px]:justify-between ${isShop
-        ? "min-h-[128px] items-start bg-[url('/decorations/top-decor.png')] bg-[length:auto_100%] bg-repeat-x [image-rendering:pixelated]"
-        : isHome
-          ? "items-center bg-[#151837]"
-          : "items-center"
-        } `}
+      className={`flex justify-between gap-2 px-3 py-3 min-[400px]:justify-between ${
+        isShop
+          ? "min-h-[128px] items-start bg-[url('/decorations/top-decor.png')] bg-[length:auto_100%] bg-repeat-x [image-rendering:pixelated]"
+          : isHome
+            ? "items-center bg-[#151837]"
+            : "items-center"
+      } `}
     >
       {account ? (
         <div className="flex min-w-0 items-center gap-2.5 min-[400px]:gap-4">
@@ -341,7 +344,7 @@ function FrameHeader({
           {/* avatar | balance | menu stay one horizontal row at every width;
               below 400px the two balance chips stack into two rows so the
               balance column is narrow enough for all three to fit. */}
-          <div className="pl-4 flex min-w-0 flex-col gap-1.5 min-[400px]:flex-row min-[400px]:items-center min-[400px]:gap-4">
+          <div className="flex min-w-0 flex-col gap-1.5 pl-4 min-[400px]:flex-row min-[400px]:items-center min-[400px]:gap-4">
             <BalanceChip
               id="balance-wallet"
               icon="/tokens/usdc-icon.png"
@@ -375,7 +378,14 @@ function FrameHeader({
           </span>
         </PixelButton>
       )}
-      {!isShop && account && <MenuButton />}
+      <div className="flex shrink-0 items-center gap-2">
+        <NetworkSwitcher
+          open={networkOpen}
+          onOpen={() => setNetworkOpen(true)}
+          onClose={() => setNetworkOpen(false)}
+        />
+        {!isShop && account && <MenuButton />}
+      </div>
     </header>
   )
 }
@@ -420,7 +430,8 @@ function NavTab({
       aria-label={label}
       onClick={() => playSfx("click")}
       className={({ isActive }) =>
-        `relative flex flex-1 items-center justify-center px-1 py-2 transition-opacity ${isActive ? "opacity-100" : "opacity-55 hover:opacity-85"
+        `relative flex flex-1 items-center justify-center px-1 py-2 transition-opacity ${
+          isActive ? "opacity-100" : "opacity-55 hover:opacity-85"
         }`
       }
     >
@@ -435,8 +446,9 @@ function NavTab({
           <img
             src={icon}
             alt={label}
-            className={`size-12 transition-transform duration-100 [image-rendering:pixelated] ${isActive ? "-translate-y-1" : ""
-              }`}
+            className={`size-12 transition-transform duration-100 [image-rendering:pixelated] ${
+              isActive ? "-translate-y-1" : ""
+            }`}
           />
         </>
       )}

@@ -1,11 +1,15 @@
 import { Transaction } from "@mysten/sui/transactions"
 import type { ClientWithCoreApi } from "@mysten/sui/client"
 
-export const SWAP_PACKAGE_ID = import.meta.env.VITE_SWAP_PACKAGE_ID as string
-export const SWAP_POOL_ID = import.meta.env.VITE_SWAP_POOL_ID as string
-export const SUI_COIN_TYPE = (import.meta.env.VITE_SUI_COIN_TYPE ||
-  "0x2::sui::SUI") as string
-export const DUSDC_COIN_TYPE = import.meta.env.VITE_DUSDC_COIN_TYPE as string
+import { CONFIG } from "@/lib/config"
+
+// Network-scoped — resolved per network in lib/config.ts. On a network with
+// no AMM deployment these are the unset sentinel, and the shop route renders
+// <NetworkGate /> rather than building a swap against it.
+export const SWAP_PACKAGE_ID = CONFIG.swapPackageId
+export const SWAP_POOL_ID = CONFIG.swapPoolId
+export const SUI_COIN_TYPE = CONFIG.stakeType
+export const DUSDC_COIN_TYPE = CONFIG.dusdcCoinType
 
 export const SUI_DECIMALS = 9
 export const DUSDC_DECIMALS = 6
@@ -33,10 +37,10 @@ function parseU64Bytes(bytes: ArrayLike<number>): bigint {
 export function isSwapConfigured(): boolean {
   return Boolean(
     SWAP_PACKAGE_ID &&
-      SWAP_POOL_ID &&
-      SUI_COIN_TYPE &&
-      DUSDC_COIN_TYPE &&
-      SWAP_POOL_ID.startsWith("0x"),
+    SWAP_POOL_ID &&
+    SUI_COIN_TYPE &&
+    DUSDC_COIN_TYPE &&
+    SWAP_POOL_ID.startsWith("0x")
   )
 }
 
@@ -46,7 +50,7 @@ export function isSwapConfigured(): boolean {
  */
 export async function fetchPoolReserves(
   client: ClientWithCoreApi,
-  sender?: string,
+  sender?: string
 ): Promise<PoolReserves | null> {
   if (!isSwapConfigured()) return null
   const tx = new Transaction()
@@ -67,7 +71,7 @@ export async function fetchPoolReserves(
   })
   tx.setSender(
     sender ||
-      "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "0x0000000000000000000000000000000000000000000000000000000000000000"
   )
 
   const result = await client.core.simulateTransaction({
@@ -106,7 +110,7 @@ export async function fetchPoolReserves(
 export function estimateSwapOutput(
   pool: PoolReserves,
   direction: SwapDirection,
-  inputAmount: number,
+  inputAmount: number
 ): number {
   if (inputAmount <= 0) return 0
   const feeFactor = 1 - pool.feeBps / 10_000
@@ -135,7 +139,7 @@ export async function buildSwapTx(
   sender: string,
   direction: SwapDirection,
   inputAmountRaw: bigint,
-  minOutputRaw: bigint,
+  minOutputRaw: bigint
 ): Promise<Transaction> {
   if (!isSwapConfigured()) {
     throw new Error("Swap is not configured. Set VITE_SWAP_POOL_ID.")
@@ -161,7 +165,7 @@ export async function buildSwapTx(
     if (coins.objects.length > 1) {
       tx.mergeCoins(
         primary,
-        coins.objects.slice(1).map((c) => tx.object(c.objectId)),
+        coins.objects.slice(1).map((c) => tx.object(c.objectId))
       )
     }
     const [coinIn] = tx.splitCoins(primary, [tx.pure.u64(inputAmountRaw)])
@@ -184,7 +188,7 @@ export async function buildSwapTx(
 export async function fetchCoinBalance(
   client: ClientWithCoreApi,
   owner: string,
-  coinType: string,
+  coinType: string
 ): Promise<number> {
   const result = await client.core.getBalance({ owner, coinType })
   const totalRaw = BigInt(result.balance.balance)

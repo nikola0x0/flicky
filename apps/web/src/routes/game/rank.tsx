@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { Link } from "react-router"
 import { useCurrentAccount } from "@mysten/dapp-kit-react"
-import { CONFIG } from "@/lib/config"
+import { apiUrl } from "@/lib/config"
 import { prefetchAvatarIcons } from "@/lib/avatar-store"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { SeasonBanner } from "@/components/season-banner"
@@ -65,9 +65,7 @@ export default function GameRank() {
     let timer: ReturnType<typeof setTimeout> | null = null
     const tick = async () => {
       try {
-        const res = await fetch(
-          `${CONFIG.serverHttpUrl}/leaderboard?limit=${FETCH_LIMIT}`
-        )
+        const res = await fetch(apiUrl(`/leaderboard?limit=${FETCH_LIMIT}`))
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const body = (await res.json()) as { players: RankEntry[] }
         if (!cancelled) {
@@ -111,7 +109,7 @@ export default function GameRank() {
   const remaining = season ? Date.parse(season.endsAt) - now : 0
 
   return (
-    <div className="relative isolate flex h-full flex-col gap-2 overflow-y-auto px-4 py-4 font-pixel text-white [mask-image:linear-gradient(to_bottom,transparent_0%,black_6%,black_100%)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div className="relative isolate flex h-full flex-col gap-2 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent_0%,black_6%,black_100%)] px-4 py-4 font-pixel text-white [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {/* Season 0 promo banner (same as home). */}
       <SeasonBanner />
       <header className="flex flex-col items-center">

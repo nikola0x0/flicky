@@ -26,14 +26,19 @@ import { toBase64 } from "@mysten/sui/utils"
 import { Transaction } from "@mysten/sui/transactions"
 import type { ClientWithCoreApi } from "@mysten/sui/client"
 
-const SPONSOR_URL =
-  import.meta.env.VITE_SPONSOR_URL ?? "http://localhost:3001"
+import { ACTIVE_NETWORK } from "@/lib/network"
+
+const SPONSOR_URL = import.meta.env.VITE_SPONSOR_URL ?? "http://localhost:3001"
 
 // Optional static override — skips the GET /sponsor round-trip when the
 // sponsor address is known at build time. Otherwise it's fetched once.
-const SPONSOR_ADDRESS_OVERRIDE = import.meta.env.VITE_SPONSOR_ADDRESS as
-  | string
-  | undefined
+// Per-network: the sponsor is a different funded address on each chain, so a
+// testnet override must never be reused for mainnet.
+const SPONSOR_ADDRESS_OVERRIDE = (
+  ACTIVE_NETWORK === "mainnet"
+    ? import.meta.env.VITE_SPONSOR_ADDRESS_MAINNET
+    : import.meta.env.VITE_SPONSOR_ADDRESS
+) as string | undefined
 
 interface SignerLike {
   toSuiAddress(): string
@@ -93,10 +98,12 @@ async function getSponsorAddress(): Promise<string> {
   }
   let res: Response
   try {
-    res = await fetch(`${SPONSOR_URL}/sponsor`, { method: "GET" })
+    res = await fetch(`${SPONSOR_URL}/sponsor?network=${ACTIVE_NETWORK}`, {
+      method: "GET",
+    })
   } catch (e) {
     throw new SponsorUnreachableError(
-      `sponsor config unreachable: ${e instanceof Error ? e.message : String(e)}`,
+      `sponsor config unreachable: ${e instanceof Error ? e.message : String(e)}`
     )
   }
   if (res.status === 503) {
@@ -107,7 +114,15 @@ async function getSponsorAddress(): Promise<string> {
     const body = await res.text()
     throw new Error(`sponsor config failed: ${res.status} ${body}`)
   }
-  const data = (await res.json()) as { sponsor?: string }
+  const data = (await res.json()) as { sponsor?: string; ready?: boolean }
+  // `ready: false` means the server has a key but this network's package
+  // allowlist can't be built — treat it exactly like a 503 so the caller
+  // takes the same path instead of building bytes nobody will co-sign.
+  if (data.ready === false) {
+    throw new SponsorUnconfiguredError(
+      `sponsor not configured for ${ACTIVE_NETWORK}`
+    )
+  }
   if (!data.sponsor) throw new Error("sponsor config missing address")
   cachedSponsorAddress = data.sponsor
   return cachedSponsorAddress
@@ -183,13 +198,13 @@ async function boundedValidDuring(client: ClientWithCoreApi) {
   const svc = (client as unknown as LedgerServiceLike).ledgerService
   if (!svc) {
     throw new Error(
-      "sponsor build lacks a bounded expiration and the client has no ledger service to derive one",
+      "sponsor build lacks a bounded expiration and the client has no ledger service to derive one"
     )
   }
   const { response } = await svc.getServiceInfo({})
   if (response.epoch == null || !response.chainId) {
     throw new Error(
-      "sponsor build lacks a bounded expiration and getServiceInfo returned no epoch/chainId",
+      "sponsor build lacks a bounded expiration and getServiceInfo returned no epoch/chainId"
     )
   }
   return {
@@ -214,7 +229,7 @@ async function boundedValidDuring(client: ClientWithCoreApi) {
 export async function executeSponsored(
   client: ClientWithCoreApi,
   tx: Transaction,
-  signer: SignerLike,
+  signer: SignerLike
 ): Promise<{ digest: string }> {
   const sender = signer.toSuiAddress()
 
@@ -239,7 +254,7 @@ export async function executeSponsored(
   // window and rebuild — everything is resolved by now, so this is local.
   if (!hasBoundedExpiration(bytes)) {
     console.warn(
-      "[sponsor] built bytes lack a bounded expiration — stamping ValidDuring",
+      "[sponsor] built bytes lack a bounded expiration — stamping ValidDuring"
     )
     tx.setExpiration(await boundedValidDuring(client))
     bytes = await tx.build({ client })
@@ -252,6 +267,9 @@ export async function executeSponsored(
   const res = await postSponsorWithRetry({
     transaction: toBase64(bytes),
     userSignature: signature,
+    // Which chain these bytes target. The server resolves its sponsor key
+    // and MoveCall allowlist per network from this.
+    network: ACTIVE_NETWORK,
   })
   if (!res.ok) {
     const body = await res.text()
@@ -274,7 +292,7 @@ export async function signAndExecuteWithSponsorOrFallback(
   client: ClientWithCoreApi,
   tx: Transaction,
   signer: SignerLike,
-  fallback: FallbackSigner,
+  fallback: FallbackSigner
 ): Promise<{ digest: string; sponsored: boolean }> {
   try {
     const res = await executeSponsored(client, tx, signer)
@@ -286,14 +304,14 @@ export async function signAndExecuteWithSponsorOrFallback(
     ) {
       console.warn(
         "[sponsor] falling back to wallet-paid gas:",
-        e instanceof Error ? e.message : String(e),
+        e instanceof Error ? e.message : String(e)
       )
       const res = await fallback.signAndExecuteTransaction({ transaction: tx })
       return { digest: res.digest, sponsored: false }
     }
     console.error(
       "[sponsor] aborting (not falling back to wallet-paid gas):",
-      e instanceof Error ? e.message : String(e),
+      e instanceof Error ? e.message : String(e)
     )
     throw e
   }

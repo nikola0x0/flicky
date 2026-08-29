@@ -964,13 +964,24 @@ export async function knownHashCount(): Promise<number> {
 
 // ─── HTTP routes ────────────────────────────────────────────────────────────
 
-import { json } from "./lib/http"
+import { json, networkUnavailable, resolveNetworkParam } from "./lib/http"
+import { networkEnv } from "./network-env"
 import { clientIp, consume } from "./ratelimit"
 
 export async function handleDeckmasterRequest(
   req: Request,
   url: URL
 ): Promise<Response | null> {
+  if (!url.pathname.startsWith("/deckmaster")) return null
+
+  // Deck generation reads live markets from the Predict indexer; without a
+  // Predict deployment there are no cards to build a deck from.
+  const resolved = resolveNetworkParam(url)
+  if ("error" in resolved) return resolved.error
+  if (!networkEnv(resolved.network).predictAvailable) {
+    return networkUnavailable(resolved.network)
+  }
+
   if (url.pathname === "/deckmaster/generate" && req.method === "POST") {
     const gate = consume("deckmaster:generate", clientIp(req, null))
     if (!gate.ok) {

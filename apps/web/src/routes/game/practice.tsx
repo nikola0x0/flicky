@@ -21,8 +21,21 @@ import { BtcSpotChart, type StrikeLine } from "@/components/btc-spot-chart"
 import { StreamingPnlChart } from "@/components/streaming-pnl-chart"
 import { PlayerAvatar } from "@/components/player-avatar"
 import { WsErrorBanner } from "@/components/ws-error-banner"
+import { NetworkGate } from "@/components/network-gate"
+import { DUELS_ENABLED } from "@/lib/config"
 
+/**
+ * Route entry. Networks without the contracts this screen needs render the
+ * gate instead — `DUELS_ENABLED` is a module-level constant resolved once at
+ * boot, so this branch is stable for the life of the page and the inner
+ * component's hooks are never conditionally skipped.
+ */
 export default function GamePractice() {
+  if (!DUELS_ENABLED) return <NetworkGate what="practice" />
+  return <GamePracticeInner />
+}
+
+function GamePracticeInner() {
   const account = useCurrentAccount()
   const navigate = useNavigate()
   const { wsOpen, send, onMessage } = useFlickySocket(account?.address)

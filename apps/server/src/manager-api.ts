@@ -13,11 +13,12 @@
 import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils"
 import { getSuiClient } from "./lib/sui"
 import { deriveWrapperFor, readAccountBalance } from "./predict"
-import { json } from "./lib/http"
+import { json, resolveNetworkParam } from "./lib/http"
+import { networkEnv } from "./network-env"
 
 export async function handleManagerRequest(
   req: Request,
-  url: URL,
+  url: URL
 ): Promise<Response | null> {
   if (url.pathname !== "/manager" || req.method !== "GET") return null
 
@@ -32,8 +33,19 @@ export async function handleManagerRequest(
     return json({ error: "invalid owner address" }, 400)
   }
 
+  const resolved = resolveNetworkParam(url)
+  if ("error" in resolved) return resolved.error
+  const { network } = resolved
+
+  // No Predict deployment → no AccountRegistry to derive a wrapper from.
+  // `wrapper: null` is already the documented "none exists yet" answer, so
+  // the client handles it without a special case.
+  if (!networkEnv(network).predictAvailable) {
+    return json({ ok: true, owner, network, wrapper: null, balance: null })
+  }
+
   try {
-    const client = getSuiClient()
+    const client = getSuiClient(network)
     const wrapper = await deriveWrapperFor(client, owner)
     if (!wrapper) return json({ ok: true, owner, wrapper: null, balance: null })
     const balance = await readAccountBalance(client, owner, wrapper)
@@ -44,7 +56,7 @@ export async function handleManagerRequest(
         error: "wrapper lookup failed",
         detail: e instanceof Error ? e.message : String(e),
       },
-      500,
+      500
     )
   }
 }
