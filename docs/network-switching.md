@@ -1,7 +1,7 @@
 # Network switching (testnet ⇄ mainnet)
 
-One deployed app, one backend, two chains. Testnet is the default; a chip in
-the game header switches to mainnet.
+One deployed app, one backend, two chains. Testnet is the default; the settings
+menu (gear → menu) has a network picker.
 
 ## The constraint
 
@@ -63,8 +63,14 @@ deliberate: a live switch would have to tear down the wallet session, the
 react-query cache, the WS socket, and any in-flight duel — all of which are
 network-bound and wrong to carry across a switch.
 
-`VITE_SUI_NETWORKS` controls which networks the chip offers. Set it to
-`testnet` alone and the chip doesn't render.
+`VITE_SUI_NETWORKS` controls which networks the picker offers. Set it to
+`testnet` alone and the picker doesn't render.
+
+The picker lives in `components/network-setting.tsx` and is rendered by
+`components/menu-modal.tsx`. Its active row carries the `no-hover` class from
+`globals.css` — `.pixel-tile:hover` still matches a *disabled* button, so
+without it the current network lights up with the white selection outline as
+if it were clickable.
 
 ## Server: one process, every network
 
