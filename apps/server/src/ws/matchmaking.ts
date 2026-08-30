@@ -23,19 +23,8 @@
  */
 import type { ServerWebSocket } from "bun"
 import { getDuel, getPlayerRating } from "../db"
-import {
-  commitDeck,
-  decideDeckSize,
-  deriveSeed,
-  findDeckMarkets,
-  findTieredDeckMarkets,
-  hashToHex,
-  type MarketSnapshot,
-  readBtcSpot,
-  rememberDeck,
-  resolveDeckBounds,
-} from "../deckmaster"
-import { buildProbedDeck, filterMintableMarkets } from "../mint-probe"
+import { commitDeck, deriveSeed, hashToHex, rememberDeck } from "../deckmaster"
+import { buildDeckFromSource } from "../card-source"
 import { env } from "../env"
 import { makeLogger, shortId } from "../log"
 import { findClosestOpponent } from "../mmr"
@@ -58,57 +47,8 @@ type DeckHashProvider = (opts: {
 // later. Retry a few times HERE (short delay) before letting matchPair fail —
 // that turns most transient dips into a slightly-slower match instead of a
 // visible "trouble setting up" + a 15s outer requeue.
-const DECK_GEN_ATTEMPTS = 4
-const DECK_GEN_RETRY_MS = 2_000
 
 let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
-  let markets: Awaited<ReturnType<typeof filterMintableMarkets>> = []
-  let spot = 0n
-  let decision = decideDeckSize(0, resolveDeckBounds({}))
-  let usedTiered = false
-  let enough = false
-  for (let attempt = 1; attempt <= DECK_GEN_ATTEMPTS; attempt++) {
-    // Tiered selection (2 short + 3 mid, short-first) when enabled — staggered
-    // settle times, ≤~15-min duel. Falls back to the flat horizon picker if
-    // no safe short/mid markets are live so matchmaking never dead-ends.
-    let rawMarkets: MarketSnapshot[] = []
-    usedTiered = false
-    if (env.deckTierEnabled) {
-      rawMarkets = await findTieredDeckMarkets()
-      usedTiered = rawMarkets.length > 0
-      if (!usedTiered) {
-        log.info(
-          "tiered selection empty — falling back to flat findDeckMarkets"
-        )
-      }
-    }
-    if (rawMarkets.length === 0) rawMarkets = await findDeckMarkets(5)
-    spot = await readBtcSpot()
-    // Drop markets whose mint currently aborts on the volatile per-market LP
-    // backing gate (EInsufficientCash) — otherwise cards round-robined onto a
-    // momentarily-dead market abort at swipe time. See mint-probe.ts.
-    markets = await filterMintableMarkets(rawMarkets, spot)
-    // Multi-card-per-market: distribute deckSize cards round-robin across the
-    // live markets (each with a distinct strike). A full deck needs only >= 1
-    // market (decideDeckSize's floor) — the strike grid does the rest.
-    decision = decideDeckSize(markets.length, resolveDeckBounds({}))
-    // Tiered wants >= 2 DISTINCT markets (min 2 cards, no padding — we never
-    // duplicate a market to hit a fixed size, which would repeat the same
-    // question/settle time). The flat fallback keeps decideDeckSize's >= 1 floor.
-    enough = usedTiered ? markets.length >= 2 : decision.ok
-    if (enough) break
-    if (attempt < DECK_GEN_ATTEMPTS) {
-      log.info(
-        `deck-gen attempt ${attempt}/${DECK_GEN_ATTEMPTS}: ${markets.length} mintable market(s) — retrying in ${DECK_GEN_RETRY_MS}ms`
-      )
-      await new Promise((r) => setTimeout(r, DECK_GEN_RETRY_MS))
-    }
-  }
-  if (!enough) {
-    throw new Error(
-      `not enough live BTC markets after ${DECK_GEN_ATTEMPTS} tries — supply is thin right now, retry shortly`
-    )
-  }
   const nonceHex = hashToHex(crypto.getRandomValues(new Uint8Array(16)))
   const seed = deriveSeed({
     sender: creatorAddr,
@@ -117,26 +57,26 @@ let deckHashProvider: DeckHashProvider = async ({ tier, creatorAddr }) => {
     timestampMs: Date.now(),
     nonceHex,
   })
-  // Tiered decks take up to `deckTierSize` (4) DISTINCT markets, soonest-first
-  // (one card each) — never padding/duplicating a market to hit a fixed size,
-  // so every card is a different market + settle time (varied, staggered). The
-  // count floats 2–4 with the live supply. The flat fallback keeps its
-  // round-robin `decision.deckSize`.
-  const deckMarkets = usedTiered ? markets.slice(0, env.deckTierSize) : markets
-  const deckSize = usedTiered ? deckMarkets.length : decision.deckSize
-  const cards = await buildProbedDeck(
-    deckMarkets,
-    spot,
+
+  // Which cards a deck is made of now lives behind `buildDeckFromSource`
+  // (see src/card-source.ts): DeepBook Predict markets when they're live,
+  // Pyth-priced cards when they aren't. Everything from here down —
+  // commit-reveal, swipe, lockup, settle — is unchanged and source-agnostic.
+  const built = await buildDeckFromSource({
     seed,
-    deckSize,
-    Date.now()
+    tier,
+    nowMs: Date.now(),
+  })
+
+  const deck = commitDeck(built.cards)
+  await rememberDeck(deck.hash, deck.cards, seed, built.settleAtMs)
+  log.info(
+    `deck ${shortId(deck.hashHex)}: ${deck.cards.length} card(s) from ${built.source}`
   )
-  const deck = commitDeck(cards)
-  await rememberDeck(deck.hash, deck.cards, seed)
   // `hashToHex` already returns a 0x-prefixed string. Re-prefixing yields
   // `0x0x…` which decodes to 33 bytes and trips create_duel's 32-byte
   // assert.
-  return { deckHash: deck.hashHex, deckSize }
+  return { deckHash: deck.hashHex, deckSize: deck.cards.length }
 }
 
 export function setDeckHashProvider(fn: DeckHashProvider): void {

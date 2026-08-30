@@ -177,6 +177,13 @@ async function ensureSchema(): Promise<void> {
   // read back as a validated 6-24 wrapper. The 6-24 wrapper is
   // deterministic (derived from AccountRegistry + owner via devInspect), so
   // a hit is permanent and skips the devInspect round-trip.
+  // Per-card settle times, JSON `number[]` aligned with `cards`. A card's
+  // settle time is NOT on chain (`Card` is `(expiry_market_id, strike)`
+  // only). A Predict card's is recoverable from its market's expiry, but a
+  // Pyth card has no market to ask — so the server is the only place that
+  // knows it, and the keeper reads it back from here. NULL on rows written
+  // before this column existed; callers fall back to market expiry.
+  await sql`ALTER TABLE deck ADD COLUMN IF NOT EXISTS settle_at_ms TEXT`
   await sql`
     CREATE TABLE IF NOT EXISTS predict_manager (
       owner      TEXT PRIMARY KEY,
@@ -935,21 +942,27 @@ export interface DeckStoreRow {
   /** JSON of [{ expiry_market_id, strike: string }]. */
   cardsJson: string
   seedHex: string | null
+  /** JSON `number[]` of per-card settle times, aligned with `cardsJson`.
+   *  NULL on decks written before the column existed. */
+  settleAtMsJson: string | null
 }
 
 export async function upsertDeck(
   hashHex: string,
   cardsJson: string,
-  seedHex: string | null
+  seedHex: string | null,
+  settleAtMsJson: string | null = null
 ): Promise<void> {
   await ready()
   const sql = getSql()
   await sql`
-    INSERT INTO deck (hash_hex, cards, seed_hex, created_at)
-    VALUES (${hashHex.toLowerCase()}, ${cardsJson}, ${seedHex}, ${Date.now()})
+    INSERT INTO deck (hash_hex, cards, seed_hex, settle_at_ms, created_at)
+    VALUES (${hashHex.toLowerCase()}, ${cardsJson}, ${seedHex},
+            ${settleAtMsJson}, ${Date.now()})
     ON CONFLICT (hash_hex) DO UPDATE SET
-      cards    = EXCLUDED.cards,
-      seed_hex = EXCLUDED.seed_hex
+      cards        = EXCLUDED.cards,
+      seed_hex     = EXCLUDED.seed_hex,
+      settle_at_ms = EXCLUDED.settle_at_ms
   `
 }
 
@@ -957,10 +970,21 @@ export async function getDeck(hashHex: string): Promise<DeckStoreRow | null> {
   await ready()
   const sql = getSql()
   const rows = (await sql`
-    SELECT cards, seed_hex FROM deck WHERE hash_hex = ${hashHex.toLowerCase()}
-  `) as Array<{ cards: string; seed_hex: string | null }>
+    SELECT cards, seed_hex, settle_at_ms FROM deck
+    WHERE hash_hex = ${hashHex.toLowerCase()}
+  `) as Array<{
+    cards: string
+    seed_hex: string | null
+    settle_at_ms: string | null
+  }>
   const row = rows[0]
-  return row ? { cardsJson: row.cards, seedHex: row.seed_hex } : null
+  return row
+    ? {
+        cardsJson: row.cards,
+        seedHex: row.seed_hex,
+        settleAtMsJson: row.settle_at_ms,
+      }
+    : null
 }
 
 export async function deleteDeck(hashHex: string): Promise<void> {

@@ -36,6 +36,7 @@ import { normalizeSuiAddress, normalizeSuiObjectId } from "@mysten/sui/utils"
 import { createHash } from "node:crypto"
 import { countDecks, deleteDeck, getDeck, upsertDeck } from "./db"
 import { env } from "./env"
+import { readBtcSpotOnChain } from "./pyth"
 import { makeLogger } from "./log"
 
 const log = makeLogger("deckmaster")
@@ -287,18 +288,18 @@ export async function findTieredDeckMarkets(
 }
 
 /**
- * Current BTC spot from the propbook indexer's Pyth feed, in the same
- * 1e9-fixed USD unit as `MarketSnapshot.tickSize` (confirmed live
- * 2026-07-10: `/oracles/{pythFeedId}/pyth/latest` → `normalized_spot`,
- * e.g. `"63837582739850"` == $63,837.58273985).
+ * Current BTC spot in the same 1e9-fixed USD unit as
+ * `MarketSnapshot.tickSize` (e.g. `63837582739850` == $63,837.58273985).
+ *
+ * Read from the on-chain `pyth_feed::PythFeed` object, NOT from the propbook
+ * indexer it used to come from — that host stopped resolving and took deck
+ * generation (and practice mode) down with it. The on-chain feed is pushed
+ * by Pyth and keeps ticking independently of DeepBook Predict. See
+ * `./pyth.ts`; it throws on a stale or unparseable price rather than
+ * returning something a caller would build strikes from.
  */
 export async function readBtcSpot(): Promise<bigint> {
-  const res = await fetch(
-    `${env.propbookIndexerUrl}/oracles/${env.pythFeedId}/pyth/latest`
-  )
-  if (!res.ok) throw new Error(`propbook /pyth/latest ${res.status}`)
-  const j = (await res.json()) as { normalized_spot: string }
-  return BigInt(j.normalized_spot)
+  return readBtcSpotOnChain()
 }
 
 /**
@@ -903,6 +904,10 @@ export function decideDeckSize(
 export interface StoreEntry {
   cards: DeckCard[]
   seedHex?: string
+  /** Per-card settle times, aligned with `cards`. Absent on decks stored
+   *  before settle times were persisted — callers fall back to the card's
+   *  market expiry (Predict) or treat the deck as unsettleable (Pyth). */
+  settleAtMs?: number[]
 }
 
 /** Cards serialize to JSON with strikes as decimal strings (u64 > 2^53). */
@@ -929,11 +934,31 @@ function deserializeCards(json: string): DeckCard[] {
 export async function rememberDeck(
   hash: Uint8Array,
   cards: DeckCard[],
-  seed?: Uint8Array
+  seed?: Uint8Array,
+  settleAtMs?: number[]
 ): Promise<string> {
   const hex = hashToHex(hash)
-  await upsertDeck(hex, serializeCards(cards), seed ? hashToHex(seed) : null)
+  await upsertDeck(
+    hex,
+    serializeCards(cards),
+    seed ? hashToHex(seed) : null,
+    settleAtMs ? JSON.stringify(settleAtMs) : null
+  )
   return hex
+}
+
+/** Parse the stored settle-time array, tolerating NULL / malformed rows. */
+function parseSettleAtMs(json: string | null): number[] | undefined {
+  if (!json) return undefined
+  try {
+    const arr = JSON.parse(json) as unknown
+    if (!Array.isArray(arr) || !arr.every((n) => typeof n === "number")) {
+      return undefined
+    }
+    return arr as number[]
+  } catch {
+    return undefined
+  }
 }
 
 export async function fetchDeck(
@@ -951,6 +976,7 @@ export async function fetchDeckEntry(
   return {
     cards: deserializeCards(row.cardsJson),
     seedHex: row.seedHex ?? undefined,
+    settleAtMs: parseSettleAtMs(row.settleAtMsJson),
   }
 }
 

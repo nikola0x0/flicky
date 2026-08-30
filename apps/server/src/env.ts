@@ -109,6 +109,33 @@ export const env = {
     ? "svi_quote"
     : "price_offset") as "price_offset" | "svi_quote",
 
+  // Max age of an on-chain Pyth price before we refuse to use it. Spot feeds
+  // a deck's strikes and (for pyth-sourced cards) the settlement price, so a
+  // stale read must fail loudly rather than settle a card against a price
+  // from an hour ago. 2 min is generous — the feed ticks every few seconds.
+  pythMaxStalenessMs: Number(process.env.PYTH_MAX_STALENESS_MS ?? 120_000),
+
+  // Where a deck's cards come from. See src/card-source.ts.
+  //
+  //   "predict" — DeepBook Predict ExpiryMarkets (the original source; the
+  //               only one the STAKED tier can use, since a staked swipe
+  //               mints a real position against a market).
+  //   "pyth"    — cards synthesized against the Pyth BTC feed, settled by
+  //               the keeper from that same feed. Free tier only.
+  //   "auto"    — prefer Predict, fall back to Pyth when Predict discovery
+  //               comes up empty.
+  //
+  // Default is "auto" deliberately. Predict's 6-24 testnet stopped creating
+  // markets on 2026-08-17 and its read API was torn down, which took the
+  // game down for ~12 days; "auto" is the setting that would have kept free
+  // duels running through it. See docs/superpowers/plans/
+  // 2026-08-30-predict-independence.md.
+  deckSource: ((): "predict" | "pyth" | "auto" => {
+    const raw = process.env.DECK_SOURCE ?? "auto"
+    if (raw === "predict" || raw === "pyth" || raw === "auto") return raw
+    throw new Error(`Bad DECK_SOURCE "${raw}" — want predict | pyth | auto.`)
+  })(),
+
   // Deckmaster: minimum headroom each card's oracle must clear at the
   // moment of duel creation. PRD says >10 min. On testnet the upstream
   // BTC oracle cron creates a new oracle every 15 min with a 1h45m
