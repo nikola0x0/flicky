@@ -117,9 +117,22 @@ const canRun = hasKey && hasPackage
 // ─── Amounts (kept small — this spends real testnet dUSDC/SUI) ─────────────
 
 const STAKE = 1_000_000n // 1 dUSDC per side
-const DEPOSIT = 8_000_000n // 8 dUSDC — each player's AccountWrapper premium float
+// Each mint debits `premium = entry_probability * quantity` from the player's
+// AccountWrapper float; too small a float aborts the swipe with
+// `account::withdraw_balance` EBalanceTooLow (code 1). The deck is snapped to
+// ATM strikes, so entry_probability sits near 0.5 => ~3 dUSDC per card at
+// SWIPE_QTY=6 dUSDC; 4 dUSDC per card leaves headroom for drift and for the
+// zones that price above ATM. Sized off the ACTUAL deck length (see the
+// discovery test, which now runs first) so a 3-card deck does not have to
+// pre-fund a 5-card float.
+const PREMIUM_PER_CARD = 4_000_000n // 4 dUSDC per card of AccountWrapper float
 const P1_FUND_SUI = 500_000_000n // 0.5 SUI — gas for ~8 player-1-signed txs
-const P1_FUND_DUSDC = 10_000_000n // 10 dUSDC — covers stake(1) + deposit(8) + buffer
+const P1_FUND_BUFFER = 1_000_000n // 1 dUSDC slack on top of float + stake
+
+/** AccountWrapper float a player needs to mint every card in the deck. */
+function deckFloat(deckSize: number): bigint {
+  return BigInt(deckSize) * PREMIUM_PER_CARD
+}
 // `quantity` is NOT "1 contract" — it's raw DUSDC-notional units (same base
 // as `net_premium`/`Coin<DUSDC>`, 1e6 = $1). `strike_exposure_config::
 // assert_mint_admission` (predict pkg, abort code 4 = ENetPremiumBelowMinimum)
@@ -135,7 +148,15 @@ const P1_FUND_DUSDC = 10_000_000n // 10 dUSDC — covers stake(1) + deposit(8) +
 // 2026-07-18) clears ATM ~3x and keeps every ZONE_TARGET_PROB long-shot
 // ≥2.2x the floor for the whole swipe window.
 const SWIPE_QTY = 6_000_000n
-const DECK_SIZE = 5
+// Live BTC oracle supply fluctuates: how many markets clear MARKET_HEADROOM_MS
+// varies run to run, so a fixed 5-card deck makes this test fail on market
+// supply rather than on the migration it is meant to gate. Production never
+// forces a size either — `selectMarketRows` "returns only what is safely
+// available" and `buildDeck` round-robins across whatever comes back. Mirror
+// that: take up to MAX distinct markets, and only fail below MIN (a deck that
+// small means supply really is broken, not merely thin).
+const DECK_SIZE_MAX = 5
+const DECK_SIZE_MIN = 3
 const MARKET_HEADROOM_MS = 5 * 60_000 // markets must clear "now + 5min"
 
 const U64_MAX = 2n ** 64n - 1n
@@ -160,9 +181,12 @@ interface SignAndWaitResult {
   objectTypes: Record<string, string>
   /** Created object ids (a subset of `objectTypes`' keys). */
   createdObjectIds: string[]
-  /** Emitted events' `.json` payloads (only populated when
-   *  `include.events` — always requested here). */
-  events: Record<string, unknown>[]
+  /** Emitted events, each as its fully-qualified Move type plus its `.json`
+   *  payload (only populated when `include.events` — always requested here).
+   *  The type is kept because a single tx emits several event types that all
+   *  carry `duel_id` (e.g. per-card settle events alongside DuelFinalized),
+   *  so matching on payload fields alone picks the wrong one. */
+  events: { eventType: string; json: Record<string, unknown> }[]
 }
 
 /**
@@ -210,8 +234,11 @@ async function signAndWait(
     .filter((c) => c.idOperation === "Created")
     .map((c) => c.objectId)
   const events = (res.Transaction.events ?? [])
-    .map((e) => e.json)
-    .filter((j): j is Record<string, unknown> => j != null)
+    .filter((e) => e.json != null)
+    .map((e) => ({
+      eventType: e.eventType,
+      json: e.json as Record<string, unknown>,
+    }))
   return { digest, objectTypes, createdObjectIds, events }
 }
 
@@ -398,7 +425,7 @@ interface DeckCard {
   tickSize: bigint
 }
 
-async function discoverMarkets(n: number): Promise<DeckCard[]> {
+async function discoverMarkets(max: number, min: number): Promise<DeckCard[]> {
   // NOTE: the default (unpaginated) page size on this indexer is small
   // enough that it can omit longer-cadence future markets (e.g. the
   // ~1h/~2h ones) in favor of the dense near-term 1-min-cadence rows —
@@ -414,11 +441,18 @@ async function discoverMarkets(n: number): Promise<DeckCard[]> {
     now: Date.now(),
     minHeadroomMs: MARKET_HEADROOM_MS,
     maxHorizonMs: env.deckCardMaxHorizonMs,
-    count: n,
+    count: max,
   })
-  if (snapshots.length < n) {
+  // Keep the deck ODD. p0 swipes UP and p1 DOWN on every card, so the two
+  // score complementary outcomes per card; an odd card count therefore makes
+  // a tie arithmetically impossible and guarantees the strict winner the
+  // finalize assertion expects (`winner` is @0x0 on a tie). An even count is
+  // trimmed by one rather than failing — supply, not correctness, decides it.
+  if (snapshots.length % 2 === 0) snapshots.pop()
+  if (snapshots.length < min) {
     throw new Error(
-      `discoverMarkets: only ${snapshots.length} live BTC markets available, need ${n}`
+      `discoverMarkets: only ${snapshots.length} live BTC market(s) clear the ` +
+        `${MARKET_HEADROOM_MS / 60_000}min headroom, need at least ${min}`
     )
   }
   const spot = await readBtcSpot()
@@ -453,7 +487,12 @@ function extractDuelFinalizedEvent(
   duelId: string
 ): DuelFinalizedJson {
   const normalizedDuelId = normalizeSuiObjectId(duelId)
-  for (const json of result.events) {
+  for (const { eventType, json } of result.events) {
+    // `finalize_test_one_price` settles every card AND finalizes in one tx,
+    // so this tx also emits per-card events carrying the same `duel_id`.
+    // Match the type or we return one of those instead, and every
+    // DuelFinalized-only field (`winner`, payouts) reads back undefined.
+    if (!eventType.endsWith("::duel::DuelFinalized")) continue
     const j = json as unknown as DuelFinalizedJson
     if (
       typeof j.duel_id === "string" &&
@@ -627,6 +666,28 @@ async function settleAndFinalize(
   return signAndWait(client, p0, tx, "finalize_test_one_price")
 }
 
+/**
+ * The challenger key, derived deterministically from the funded creator key.
+ *
+ * This used to be `Ed25519Keypair.generate()`. A throwaway challenger strands
+ * real money every run: the suite funds p1, deposits its AccountWrapper float,
+ * and then the key is gone when the process exits — so the wrapper (and the
+ * dUSDC still in it) can never be reached again. Deriving p1 instead means the
+ * same challenger — and the same wrapper — is reused on every run, and
+ * `setupAccount` skips the deposit whenever the float is already sufficient.
+ *
+ * Salted with the creator's own secret so two developers (or a laptop and CI)
+ * running against different funded keys do not share one challenger wrapper
+ * and interfere with each other mid-duel.
+ */
+function deriveChallenger(creatorSecretKey: Uint8Array): Ed25519Keypair {
+  const seed = createHash("sha256")
+    .update("flicky-e2e-challenger-v1")
+    .update(creatorSecretKey)
+    .digest()
+  return Ed25519Keypair.fromSecretKey(new Uint8Array(seed))
+}
+
 // ─── Suite ──────────────────────────────────────────────────────────────
 
 const describeFn = canRun ? describe : describe.skip
@@ -652,7 +713,7 @@ describeFn("e2e duel — predict-testnet-8-21 flow", () => {
     client = getSuiClient()
     const { secretKey } = decodeSuiPrivateKey(rawKey!)
     p0 = Ed25519Keypair.fromSecretKey(secretKey)
-    p1 = Ed25519Keypair.generate()
+    p1 = deriveChallenger(secretKey)
     p0Addr = p0.toSuiAddress()
     p1Addr = p1.toSuiAddress()
     console.log(`flicky package:   ${packageId}`)
@@ -660,33 +721,37 @@ describeFn("e2e duel — predict-testnet-8-21 flow", () => {
     console.log(`p1 (challenger):  ${p1Addr}`)
   }, 30_000)
 
+  test("discovers live BTC ExpiryMarkets and builds a committed deck", async () => {
+    cards = await discoverMarkets(DECK_SIZE_MAX, DECK_SIZE_MIN)
+    expect(cards.length).toBeGreaterThanOrEqual(DECK_SIZE_MIN)
+    expect(cards.length).toBeLessThanOrEqual(DECK_SIZE_MAX)
+    hash = deckHash(cards)
+    console.log(
+      `deck (${cards.length} cards): ` +
+        `${cards.map((c) => c.expiryMarketId.slice(0, 10)).join(", ")}`
+    )
+  }, 30_000)
+
   test("funds player 1 with SUI (gas) + dUSDC (stake + account deposit)", async () => {
     const tx = new Transaction()
     const [gas] = tx.splitCoins(tx.gas, [tx.pure.u64(P1_FUND_SUI)])
+    const p1FundDusdc = deckFloat(cards.length) + STAKE + P1_FUND_BUFFER
     const dusdc = tx.add(
-      coinWithBalance({ balance: P1_FUND_DUSDC, type: env.dusdcCoinType })
+      coinWithBalance({ balance: p1FundDusdc, type: env.dusdcCoinType })
     )
     tx.transferObjects([gas, dusdc], tx.pure.address(p1Addr))
     await signAndWait(client, p0, tx, "fund p1")
   }, 60_000)
 
   test("sets up both players' AccountWrapper + deposits dUSDC premium float", async () => {
-    p0Wrapper = await setupAccount(client, p0, DEPOSIT)
-    p1Wrapper = await setupAccount(client, p1, DEPOSIT)
+    const float = deckFloat(cards.length)
+    p0Wrapper = await setupAccount(client, p0, float)
+    p1Wrapper = await setupAccount(client, p1, float)
     expect(p0Wrapper).toBeTruthy()
     expect(p1Wrapper).toBeTruthy()
     console.log(`p0 wrapper: ${p0Wrapper}`)
     console.log(`p1 wrapper: ${p1Wrapper}`)
   }, 60_000)
-
-  test("discovers live BTC ExpiryMarkets and builds a committed deck", async () => {
-    cards = await discoverMarkets(DECK_SIZE)
-    expect(cards.length).toBe(DECK_SIZE)
-    hash = deckHash(cards)
-    console.log(
-      `deck: ${cards.map((c) => c.expiryMarketId.slice(0, 10)).join(", ")}`
-    )
-  }, 30_000)
 
   test("creates duel, challenger joins, creator reveals deck", async () => {
     duelId = await createDuel(client, p0, packageId, hash, cards.length)
@@ -726,9 +791,10 @@ describeFn("e2e duel — predict-testnet-8-21 flow", () => {
 
   test("finalize_test_one_price settles + finalizes; DuelFinalized has a winner", async () => {
     if (!duelId) throw new Error("duelId not set — earlier step failed")
-    // deck_size=5 is odd and p0=UP/p1=DOWN on every card are complementary
-    // outcomes per card, so whichever price we feed, p0-wins + p1-wins ==
-    // 5 with no possible tie in card count — a strict winner is guaranteed.
+    // The deck is always an ODD number of cards (see discoverMarkets) and
+    // p0=UP/p1=DOWN on every card are complementary outcomes per card, so
+    // whichever price we feed, p0-wins + p1-wins == cards.length with no
+    // possible tie in card count — a strict winner is guaranteed.
     let price = await readBtcSpot().catch(() => 0n)
     if (price <= 0n) price = cards[0].strike
     const result = await settleAndFinalize(client, p0, packageId, duelId, price)
