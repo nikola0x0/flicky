@@ -7,7 +7,7 @@
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
-    "test": "bun test src/lib src/ws src/db.test.ts src/deckmaster.test.ts src/mmr.test.ts src/sponsor.test.ts src/keeper.test.ts src/e2e-ws.test.ts src/indexer.test.ts src/predict.test.ts src/avatar-icons.test.ts src/avatar-api.test.ts src/network-env.test.ts src/card-source.test.ts --timeout 10000",
+    "test": "bun test src/lib src/ws src/db.test.ts src/deckmaster.test.ts src/mmr.test.ts src/sponsor.test.ts src/keeper.test.ts src/e2e-ws.test.ts src/indexer.test.ts src/predict.test.ts src/avatar-icons.test.ts src/avatar-api.test.ts src/network-env.test.ts src/card-source.test.ts src/keeper-onchain.test.ts src/discovery.test.ts --timeout 10000",
     "test:e2e": "bun test src/scripts/e2e.test.ts",
     "lint": "eslint",
     "format": "prettier --write \"**/*.ts\"",
@@ -22,7 +22,8 @@
     "fund:sponsor": "bun run src/scripts/fund-sponsor.ts",
     "season:results": "bun run src/scripts/season-results.ts",
     "season:deposit": "bun run src/scripts/season-deposit.ts",
-    "season:distribute": "bun run src/scripts/season-distribute.ts"
+    "season:distribute": "bun run src/scripts/season-distribute.ts",
+    "check:sources": "bun run src/scripts/check-sources.ts"
   },
   "dependencies": {
     "@mysten-incubation/sponsor": "0.2.2",

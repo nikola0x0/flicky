@@ -31,9 +31,14 @@ import { env } from "./env"
 import { fetchDeck } from "./deckmaster"
 import { makeLogger, shortId } from "./log"
 import { deriveWrapperFor } from "./predict"
-import { getGraphQLClient } from "./lib/sui"
+import { getGraphQLClient, getSuiClient } from "./lib/sui"
+import { getOrderPremium } from "./db"
 
 const log = makeLogger("keeper")
+
+function describeErr(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
 
 // GraphQL replaces JSON-RPC queryEvents in sweep (gRPC can't filter events).
 const SWEEP_QUERY = `query Sweep($type: String!) {
@@ -224,117 +229,110 @@ interface MarketSettlementState {
 }
 
 /**
- * Read an `ExpiryMarket`'s settlement state via the predict indexer's
- * current-state lookup: `GET {predictIndexerUrl}/markets/{id}/state` →
- * `{ market, config, mint_paused, oracle_prices, oracle_svi, settlement }`.
- * `settlement` is `null` until `market_settled` has been indexed, else
- * `{ settlement_price: "<u64 decimal string>", settled_at_ms, ... }` (probed
- * live against testnet 2026-07-10: confirmed on both branches — `null` for a
- * future-expiry market, a populated object with `settlement_price` +
- * `kind: "market_settled"` for a past-expiry one).
+ * Read an `ExpiryMarket`'s settlement state straight off the object.
  *
- * THIN LOCAL READER — Task 6 (indexer/ws field renames) added a
- * `market_settlements` Postgres mirror populated by `indexer.ts`'s own
- * `MarketSettled` tracker (see `readExpiryMarketSettlements` there), but
- * deliberately left this HTTP-based reader as the keeper's settle-time
- * source of truth: settle_card's on-chain effects are irreversible, so the
- * keeper should read the indexer directly rather than trust a mirror that
- * could lag behind (the mirror is best-effort, used only for the
- * indexer's own live-PnL preview). Kept as one small exported function so
- * a future consolidation stays a pure relocation.
+ * `ExpiryMarket` carries `settlement_price` and `settled_liability_materialized`
+ * as public fields, so the chain itself is the source of truth — no indexer
+ * required. Verified 2026-08-30 against market
+ * `0xc4b094e765e36bb8…`, which reads back `64493721012300`, exactly the
+ * `settlementPrice` recorded on card 0 of duel `0xf950887b…`.
  *
- * Fails closed: any fetch/parse error reports `settled: false` so the keeper
- * never mistakes an indexer hiccup for "not settled yet" vs. accidentally
- * treats it as settled with a garbage price — `tryClose` just retries later.
+ * This used to `GET {predictIndexerUrl}/markets/{id}/state`. That host stopped
+ * resolving, and the old comment here argued the HTTP indexer was preferable
+ * to the local `market_settlements` mirror because a mirror can lag. Both
+ * concerns are answered by reading the object: it cannot lag, and it cannot be
+ * taken away by a third party.
+ *
+ * This does NOT change the keeper-fed settlement model (CLAUDE.md). There is
+ * still no Move view function to call inside the swipe PTB; the keeper still
+ * supplies `settlement_price` as an argument to `settle_card`. Only where the
+ * keeper reads that argument from has changed.
+ *
+ * Fails closed: any read/parse error reports `settled: false` so the keeper
+ * never mistakes a hiccup for "settled with a garbage price" — `tryClose`
+ * just retries later. A missing object is unsettled-and-retry, never
+ * settled-with-zero.
  */
 export async function readMarketSettlement(
-  expiryMarketId: string
+  expiryMarketId: string,
+  client: SuiGrpcClient = getSuiClient()
 ): Promise<MarketSettlementState> {
   try {
-    const res = await fetch(
-      `${env.predictIndexerUrl}/markets/${expiryMarketId}/state`
-    )
-    if (!res.ok) return { settled: false, settlementPrice: null }
-    const data = (await res.json()) as {
-      settlement?: { settlement_price?: string } | null
-    }
-    const price = data.settlement?.settlement_price
-    if (price === undefined || price === null)
+    const res = await client.core.getObject({
+      objectId: expiryMarketId,
+      include: { json: true },
+    })
+    const json = res.object?.json as
+      | { settlement_price?: string | number | null }
+      | undefined
+    if (!json) return { settled: false, settlementPrice: null }
+
+    // `settlement_price` is the gate, and it distinguishes the two states
+    // cleanly. Verified 2026-08-30 against real markets on both sides:
+    //   settled   → "64493721012300" (a decimal string)
+    //   unsettled → null  (NOT 0 — e.g. 0x1fc9221e…, expiry passed but the
+    //               settler stopped before it ran)
+    // So an absent/null price is "not settled yet", never "settled at zero".
+    const raw = json.settlement_price
+    if (raw === undefined || raw === null) {
       return { settled: false, settlementPrice: null }
-    return { settled: true, settlementPrice: BigInt(price) }
+    }
+    const price = BigInt(raw)
+    if (price <= 0n) return { settled: false, settlementPrice: null }
+    return { settled: true, settlementPrice: price }
   } catch (e) {
     log.warn(
-      `readMarketSettlement(${expiryMarketId}): fetch failed, treating as unsettled: ${e instanceof Error ? e.message : String(e)}`
+      `readMarketSettlement(${expiryMarketId}): read failed, treating as unsettled: ${e instanceof Error ? e.message : String(e)}`
     )
     return { settled: false, settlementPrice: null }
   }
 }
 
-/**
- * Read a minted order's `net_premium` (DUSDC base units) for the settle-time
- * `p0_premium`/`p1_premium` args to `duel::settle_card`.
- *
- * PROBED shape (2026-07-10): the reference doc's guessed `/market-orders`,
- * `/manager-orders`, `/managers` paths all 404 on the live
- * `predict-server-beta` indexer. The real API (`crates/predict-server/API.md`
- * in the deepbookv3 branch) instead exposes a purpose-built current-state
- * lookup: `GET /markets/{expiry_market_id}/positions/{position_root_id}/cashflow`
- * → a `position_cashflow` row aggregating the whole replacement chain
- * (`net_premium`, `mint_fees`, `live_redeem_amount`, `settled_payout`, …),
- * or `null` for an unknown root — confirmed live (`/markets/<id>/positions/12345/cashflow`
- * → `200 null`). A flicky swipe's `order_id` is always a mint root (never a
- * replacement — flicky never partially closes), so `position_root_id ===
- * order_id` always holds and this is the correct, precise lookup (matches
- * `OrderMinted.net_premium` for that order without an unbounded event scan).
- *
- * DEVIATION from the brief's literal `readOrderPremium(orderId)` signature:
- * `API.md` is explicit that `order_id` is **expiry-local, not globally
- * unique** — "always treat `(expiry_market_id, order_id)` as the key" — so
- * this function takes `expiryMarketId` too. Task 6 should carry this two-arg
- * shape forward rather than the brief's one-arg guess.
- *
- * Safe-but-approximate fallback: any failure (HTTP error, no cashflow row —
- * e.g. the indexer hasn't caught up to the mint yet — or a malformed body)
- * resolves to `{ value: 0n, resolved: false }` and logs a warning.
- *
- * IMPORTANT — premium is NOT tie-break-only in flicky's winner decision:
- * `val0 = p0_payout + p1_premium` vs `val1 = p1_payout + p0_premium`, so an
- * asymmetric fallback (one player's real premium vs the other's `0`) can
- * flip who wins a close card, not just an exact tie. Callers MUST check
- * `resolved` and, if either side of a card failed to resolve, zero BOTH
- * players' premiums for that card (see `tryClose`'s per-card resolution
- * loop) so premium drops out of the comparison symmetrically instead of
- * mis-deciding the winner. Flagged LOUDLY per task instructions — see
- * task-5-report.md "premium=0 fallback" section.
- */
 export async function readOrderPremium(
   expiryMarketId: string,
   orderId: bigint
 ): Promise<{ value: bigint; resolved: boolean }> {
+  const key = `${expiryMarketId}, ${orderId}`
+
+  // Primary: the `order_premiums` mirror, filled by DuelIndexer's own
+  // `OrderMinted` tracker (indexer.ts::drainOrderMinted). `net_premium` is a
+  // field ON the event, so this is chain-derived data, not a third party's
+  // opinion of it.
   try {
-    const res = await fetch(
-      `${env.predictIndexerUrl}/markets/${expiryMarketId}/positions/${orderId.toString()}/cashflow`
-    )
-    if (!res.ok) {
-      log.warn(
-        `readOrderPremium(${expiryMarketId}, ${orderId}): HTTP ${res.status} — falling back to premium=0 (not resolved)`
-      )
-      return { value: 0n, resolved: false }
-    }
-    const data = (await res.json()) as { net_premium?: string } | null
-    if (!data || data.net_premium === undefined) {
-      log.warn(
-        `readOrderPremium(${expiryMarketId}, ${orderId}): no cashflow row (indexer lag or unminted order) — falling back to premium=0`
-      )
-      return { value: 0n, resolved: false }
-    }
-    return { value: BigInt(data.net_premium), resolved: true }
+    const mirrored = await getOrderPremium(expiryMarketId, orderId.toString())
+    if (mirrored !== null) return { value: BigInt(mirrored), resolved: true }
   } catch (e) {
-    log.warn(
-      `readOrderPremium(${expiryMarketId}, ${orderId}): fetch failed — falling back to premium=0: ${e instanceof Error ? e.message : String(e)}`
-    )
-    return { value: 0n, resolved: false }
+    log.warn(`readOrderPremium(${key}): mirror read failed: ${describeErr(e)}`)
   }
+
+  // Fallback: the predict indexer, if one is configured. Kept because a
+  // freshly-minted order can beat the indexer's cursor by a poll interval.
+  // Skipped entirely when the host is unreachable — which it currently is.
+  if (env.predictIndexerUrl && !env.predictIndexerUrl.includes(".invalid")) {
+    try {
+      const res = await fetch(
+        `${env.predictIndexerUrl}/markets/${expiryMarketId}/positions/${orderId.toString()}/cashflow`
+      )
+      if (res.ok) {
+        const data = (await res.json()) as { net_premium?: string } | null
+        if (data?.net_premium !== undefined) {
+          return { value: BigInt(data.net_premium), resolved: true }
+        }
+      }
+    } catch {
+      // Fall through to the unresolved path below.
+    }
+  }
+
+  // Genuinely unresolvable. Loud on purpose: settling with premium=0 skews
+  // scoring in the player's favour, and the old code could reach here on
+  // every card without anyone noticing.
+  log.warn(
+    `readOrderPremium(${key}): NOT RESOLVED — no OrderMinted mirror row and ` +
+      `no reachable indexer. Falling back to premium=0, which understates ` +
+      `cost for this swipe.`
+  )
+  return { value: 0n, resolved: false }
 }
 
 /**

@@ -4,6 +4,14 @@
 
 **Goal:** Do everything that can be done and *verified* while DeepBook Predict is dark, so that the day Mysten revives it the game comes back on its own — no scramble, no code change, ideally no deploy. And along the way, unstick the four duels that are already stuck.
 
+> ## STATUS 2026-08-30: EXECUTED — all tasks complete
+>
+> Tasks 1, 2, 5, 6, 7 implemented and verified. Tasks 3+4 resolved with a
+> corrected premise (see below): the four duels are abandoned games, not a
+> bug, and only their players can reclaim — which the UI already supports.
+>
+> **The keeper now settles with zero HTTP calls to any Mysten host.**
+
 **Decision this plan operates under (2026-08-30):** we are **not** adopting a new price oracle. No Pyth key, no CEX median. We wait for Predict. This plan is therefore strictly *preparation* — every task must be completable and testable with Predict still dark, or it doesn't belong here.
 
 ---
@@ -89,64 +97,87 @@ independent of the outage.
 
 The highest-value task in this plan, and it is not blocked on anything.
 
-- [ ] Rewrite `keeper.ts::readMarketSettlement` (`:250`) to `getObject` the
+- [x] Rewrite `keeper.ts::readMarketSettlement` (`:250`) to `getObject` the
       `ExpiryMarket` with `include: { json: true }` and read
       `settlement_price` / `settled_liability_materialized`, instead of
       fetching `{predictIndexerUrl}/markets/{id}/state`.
-- [ ] **Keep the fail-closed contract.** The current function returns
+- [x] **Keep the fail-closed contract.** The current function returns
       `{ settled: false }` on any error so a hiccup never becomes a garbage
       settlement. That property is why nothing was mis-settled during the
       outage — preserve it exactly.
-- [ ] Treat "object missing" as unsettled-and-retry, not as settled-with-zero.
-- [ ] Keep the HTTP path only as an optional override behind
+- [x] Treat "object missing" as unsettled-and-retry, not as settled-with-zero.
+- [x] Keep the HTTP path only as an optional override behind
       `PREDICT_INDEXER_URL`, never as the default.
-- [ ] **Verify against real data:** market `0xc4b094e765e36bb8…` must read
+- [x] **Verify against real data:** market `0xc4b094e765e36bb8…` must read
       back `64493721012300`, matching what card 0 of duel `0xf950887b…`
       actually settled at. That is a regression test with a known answer.
 
 ## Task 2: premium from events, not from HTTP
 
-- [ ] `keeper.ts::readOrderPremium` (`:310`) fetches
+- [x] `keeper.ts::readOrderPremium` (`:310`) fetches
       `/positions/{orderId}/cashflow`. The `OrderMinted` event already carries
       `net_premium`, and `DuelIndexer::drainOrderMinted` **already writes it**
       to `order_premiums`. Read that table first.
-- [ ] Confirm the four stranded duels' order ids resolve. If they predate the
-      indexer's cursor, add a bounded historical backfill — remember the
-      **50-event page cap**; a naive `last: 200` silently returns null, which
-      is exactly the kind of bug that hides for six weeks.
-- [ ] Preserve today's documented fallback (`premium = 0`, `resolved: false`)
+- [x] ~~Confirm the four stranded duels' order ids resolve.~~ **N/A** — those
+      duels are abandoned (neither player finished the deck), so they resolve
+      via `refund_duel`, never `settle_card`. Their premiums are never read.
+      The **50-event page cap** is honoured everywhere regardless
+      (`drainEvents` pages at `first: 50`); a naive `last: 200` returns null
+      rather than erroring, which is exactly the bug class that hides for
+      weeks.
+- [x] Preserve today's documented fallback (`premium = 0`, `resolved: false`)
       when a premium genuinely cannot be resolved, and make sure that path is
       logged loudly rather than silently.
-- [ ] **Verify:** premiums recovered for the 3 unsettled cards of duel
-      `0xf950887b…` match the shape of the 2 already settled.
+- [x] **Verified differently:** `0xf950887b…` has 0 cards settled on chain
+      (the DB mirror's "2/5" is stale) and both players abandoned at card 4,
+      so there is nothing to settle. Premium reads are covered by the mirror
+      path instead.
 
-## Task 3: rescue the four stranded duels
+## Task 3 + 4: the four stranded duels — RESOLVED, premise was wrong
 
-The end-to-end proof that Tasks 1–2 work — with real escrowed stake.
+**Finding (2026-08-30): they are not stuck by a bug. Both players abandoned
+mid-deck.** On-chain swipe counts:
 
-- [ ] Add `bun --filter server rescue:duels` — a dry-run-by-default script
-      that finds ACTIVE duels whose cards' markets have settled on-chain and
-      reports what it *would* settle.
-- [ ] Run it against the four: `0xbaf5bdec…` (0/5), `0xf950887b…` (2/5),
-      `0x7f8cfc1e…` (0/5), `0x0ebe1183…` (0/5).
-- [ ] Then execute for real: `settle_card` × remaining, then `finalize`.
-      dUSDC returns to four players who have had it locked since July.
-- [ ] **Verify:** all four reach COMPLETE, `DuelFinalized` fires, the
-      leaderboard updates, and `/duels/recent?status=ACTIVE` returns empty.
+| Duel | p0 | p1 | of |
+|---|---|---|---|
+| `0xbaf5bdec…` | 1 | 5 | 5 |
+| `0xf950887b…` | 4 | 4 | 5 |
+| `0x7f8cfc1e…` | 3 | 4 | 5 |
+| `0x0ebe1183…` | 1 | 2 | 5 |
 
-## Task 4: find out why they got stuck
+The keeper's `if (!bothDone) return` is **working as designed** — it refuses to
+settle an incomplete duel, which is correct: `settle_card` would score cards
+nobody swiped.
 
-They stalled on 2026-07-18/19, weeks before Predict died. Rescuing them
-without understanding that leaves the bug in place for the next duel.
+And these are already recoverable, by the only party allowed to:
+`duel.move::refund_duel` (`:755`) on an ACTIVE duel requires
+`now > started_at_ms + 1h` (42 days ✓), `!both_done` (✓), and
+`sender == p0 || sender == p1` — **player-signed, by design**. The server
+cannot and should not sign it.
 
-- [ ] Read the keeper logs / reconstruct from `event_cursor` and the duel
-      mirror: did `tryClose` throw, latch, or silently skip? One duel got 2/5
-      cards settled and then stopped — that partial progress is the clue.
-- [ ] Check whether a single unsettleable card blocks the whole duel, since
-      `finalize` needs *all* cards settled. If so, that is a design fragility
-      worth naming, not just a bug.
-- [ ] Add a regression test for whatever it was.
-- [ ] **Verify:** the failure mode is reproducible in a test before it's fixed.
+The path already exists end to end: `refundEligibility` + `buildRefundDuelTx`
+in `lib/flicky.ts`, surfaced in `routes/game/history.tsx` and
+`duel-view.tsx`, and `duel::refund_duel` is already in the sponsor allowlist —
+so a player reclaims with zero SUI. Verified against live data: all four
+return `refundable = true` for both participants.
+
+- [x] Root cause identified — abandoned decks, not a keeper fault.
+- [x] Confirmed the stake is not lost and the reclaim path works.
+- [x] Regression test pinning all four shapes (`flicky.test.ts`,
+      "real abandoned duels") so a future change can't silently strand them.
+- [ ] **Not actionable by us:** the four duels stay ACTIVE until their players
+      open `/game/history` and claim. Four addresses, testnet dUSDC.
+
+**AC correction.** The original criterion — "the four stranded duels are
+COMPLETE and their dUSDC is back with the players" — is **not achievable by
+this repo**, because the contract deliberately requires a player signature.
+Replaced with: *the reclaim path is proven available and covered by tests.*
+Anything else would mean weakening a permission check to hit a checkbox.
+
+**Optional follow-up (not in this plan):** nothing prompts a player that they
+have a reclaimable duel — they have to think to visit history. A "you have N
+duels to reclaim" nudge would close that, but it's a product change, not
+outage preparation.
 
 ## Task 5: event-sourced market discovery
 
@@ -154,16 +185,16 @@ without understanding that leaves the bug in place for the next duel.
 `MarketRow` says so in its own docstring. Build the replacement now and prove
 it against the Aug 5–17 history, which is still on chain.
 
-- [ ] Add a `MarketCreated` tracker to `DuelIndexer` beside the existing
+- [x] Add a `MarketCreated` tracker to `DuelIndexer` beside the existing
       `drainOrderMinted` / `drainMarketSettled`. New `predict_market` table:
       `expiry_market_id` PK, `propbook_underlying_id`, `expiry`, `tick_size`,
       `admission_tick_size`, `created_at_ms` (the event node timestamp),
       `network`.
-- [ ] Page correctly — **50 max per query**.
-- [ ] Re-point `findDeckMarkets` / `findTieredDeckMarkets` / `oracle.ts` at
+- [x] Page correctly — **50 max per query**.
+- [x] Re-point `findDeckMarkets` / `findTieredDeckMarkets` / `oracle.ts` at
       that table. Field mapping is 1:1; `checkpoint_timestamp_ms` becomes the
       event timestamp.
-- [ ] **Verify without live markets:** backfill the Aug 5–17 window and assert
+- [x] **Verify without live markets:** backfill the Aug 5–17 window and assert
       discovery returns the same markets the old HTTP path would have, with a
       frozen clock. Historical data makes this fully testable today.
 
@@ -172,18 +203,18 @@ it against the Aug 5–17 history, which is still on chain.
 Twelve days passed before anyone noticed the outage — and two weeks before
 that, nobody noticed there were no players. Detection is the actual gap.
 
-- [ ] `/health` gains a `predict` block: newest known market, its age, count
+- [x] `/health` gains a `predict` block: newest known market, its age, count
       currently live, and the active `DECK_SOURCE`.
-- [ ] Add `bun --filter server check:sources` — one command answering "can we
+- [x] Add `bun --filter server check:sources` — one command answering "can we
       build a deck right now, and from what?". Fold in `check-6-24-live.ts`
       and `check-market-cadence.ts`, both of which currently fail confusingly
       because they assume the HTTP indexer exists.
-- [ ] A scheduled probe that watches for the first new `MarketCreated` event
+- [x] A scheduled probe that watches for the first new `MarketCreated` event
       and **alerts**. This is the single highest-leverage thing in the plan:
       it converts "wait indefinitely" into "get told the day it's back."
-- [ ] Deck-gen failures must emit a distinct, greppable error — not today's
+- [x] Deck-gen failures must emit a distinct, greppable error — not today's
       generic `market list failed`.
-- [ ] **Verify:** with Predict dark, `/health` says so plainly and names the
+- [x] **Verify:** with Predict dark, `/health` says so plainly and names the
       staleness; the probe fires against a synthetic event.
 
 ## Task 7: survive the pin moving again
@@ -192,14 +223,14 @@ It has already moved twice (`4-16` → `6-24` → dark), and the official docs
 still describe `4-16` — a deployment with **zero events, ever**, behind a dead
 host. Assume the revival is a *new* version, not a resurrection of 6-24.
 
-- [ ] Write `docs/predict-pin-migration.md`: how to identify the live version,
+- [x] Write `docs/predict-pin-migration.md`: how to identify the live version,
       which env vars to change, what ABI drift to look for. All ids are
       already env-driven (`network-env.ts`), so make the doc the missing half.
-- [ ] Make `check:sources` report the *resolved* package ids next to what's
+- [x] Make `check:sources` report the *resolved* package ids next to what's
       actually emitting events, so a pin mismatch is visible in one command.
-- [ ] Record explicitly that the docs are stale and that `predict-server*`
+- [x] Record explicitly that the docs are stale and that `predict-server*`
       hosts are gone, so the next person doesn't spend a day on them.
-- [ ] **Verify:** the doc is good enough that someone could follow it against
+- [x] **Verify:** the doc is good enough that someone could follow it against
       6-24 today and reach the current config.
 
 ---
@@ -226,9 +257,9 @@ network to be dual about.
 ## Definition of done
 
 - The keeper settles a card with **zero HTTP calls to any Mysten host**.
-- The four stranded duels are COMPLETE and their dUSDC is back with the
-  players.
-- The reason they stalled is understood, fixed, and covered by a test.
+- The four stranded duels are understood (abandoned decks, not a bug), their
+  reclaim path is proven available, and all four shapes are covered by tests.
+  Completing them requires a player signature the server must not have.
 - Market discovery reads from indexed events, verified against Aug 5–17
   history.
 - `/health` states plainly whether Predict is alive and how stale the data is.

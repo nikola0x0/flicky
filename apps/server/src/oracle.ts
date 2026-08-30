@@ -18,6 +18,9 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { json, networkUnavailable, resolveNetworkParam } from "./lib/http"
 import { networkEnv } from "./network-env"
+import { listPredictMarkets } from "./db"
+import { getSuiClient } from "./lib/sui"
+import { predictWatchSnapshot } from "./predict-watch"
 import { makeLogger } from "./log"
 
 const log = makeLogger("oracle")
@@ -46,19 +49,53 @@ export interface ExpiryMarketView {
   settled: boolean
 }
 
+/**
+ * Markets from the `predict_market` mirror (see
+ * `DuelIndexer::drainMarketCreated`), not from the predict indexer's
+ * `/markets`. Same reason as `deckmaster.ts::indexedMarketRows` — that host
+ * no longer resolves, and these rows are the same events it replayed.
+ */
 async function fetchMarketRows(): Promise<MarketRow[]> {
-  const res = await fetch(`${env.predictIndexerUrl}/markets`)
-  if (!res.ok) throw new Error(`predict indexer /markets ${res.status}`)
-  return (await res.json()) as MarketRow[]
+  const rows = await listPredictMarkets(1)
+  return rows.map((r) => ({
+    expiry_market_id: r.expiryMarketId,
+    propbook_underlying_id: r.propbookUnderlyingId,
+    expiry: r.expiry,
+    tick_size: r.tickSize,
+    admission_tick_size: r.admissionTickSize,
+    kind: "market_created",
+    checkpoint_timestamp_ms: r.createdAtMs ?? undefined,
+  }))
 }
 
-/** Exported for `ws/oracle-stream.ts` — shared fetch so both call sites agree on the shape. */
+/**
+ * A market's settlement state, read off the `ExpiryMarket` object.
+ *
+ * Exported for `ws/oracle-stream.ts` so both call sites agree on the shape.
+ * Reads the chain rather than `GET /markets/{id}/state`: `settlement_price`
+ * is a public field, and it is null (not 0) until the market settles — see
+ * `keeper.ts::readMarketSettlement`, which uses the same gate.
+ */
 export async function fetchMarketState(
   id: string
 ): Promise<MarketStateResponse | null> {
-  const res = await fetch(`${env.predictIndexerUrl}/markets/${id}/state`)
-  if (!res.ok) return null
-  return (await res.json()) as MarketStateResponse
+  try {
+    const res = await getSuiClient().core.getObject({
+      objectId: id,
+      include: { json: true },
+    })
+    const json = res.object?.json as
+      | { settlement_price?: string | number | null }
+      | undefined
+    if (!json) return null
+    const raw = json.settlement_price
+    const settled = raw !== undefined && raw !== null && BigInt(raw) > 0n
+    return {
+      settlement: settled ? { settlement_price: String(raw) } : null,
+    } as MarketStateResponse
+  } catch {
+    return null
+  }
 }
 
 function isSettled(state: MarketStateResponse | null): boolean {
@@ -144,12 +181,37 @@ export async function handleOracleRequest(
       : env.deckCardMinHeadroomMs
     try {
       const markets = await listEligibleMarkets(asset, minHeadroomMs)
+      // An empty list is ambiguous on its own — "none right now" reads the
+      // same as "upstream has been dark for two weeks", and that ambiguity is
+      // part of why the outage went unnoticed. Say which one it is.
+      if (markets.length === 0) {
+        const watch = predictWatchSnapshot()
+        return json({
+          asset,
+          minHeadroomMs,
+          markets,
+          diagnostic: {
+            reason: "PREDICT_NO_LIVE_MARKETS",
+            lastMarketCreated:
+              watch.newestCreatedMs === null
+                ? null
+                : new Date(watch.newestCreatedMs).toISOString(),
+            staleForDays:
+              watch.newestCreatedMs === null
+                ? null
+                : +((Date.now() - watch.newestCreatedMs) / 86_400_000).toFixed(
+                    1
+                  ),
+            hint: "run `bun run check:sources` for a full diagnosis",
+          },
+        })
+      }
       return json({ asset, minHeadroomMs, markets })
     } catch (e) {
       log.warn(`list ${asset}: ${e instanceof Error ? e.message : String(e)}`)
       return json(
         {
-          error: "market list failed",
+          error: "PREDICT_NO_LIVE_MARKETS",
           detail: e instanceof Error ? e.message : String(e),
         },
         500

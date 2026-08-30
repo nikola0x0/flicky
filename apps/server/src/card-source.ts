@@ -144,10 +144,16 @@ export const predictCardSource: CardSource = {
     }
 
     if (!enough) {
+      // Distinct and greppable on purpose. The old generic "market list
+      // failed" said nothing about WHY, which is part of how a 12-day
+      // upstream outage went unnoticed. `bun run check:sources` prints the
+      // full diagnosis.
       throw new NoCardsAvailableError(
         "predict",
-        `no live BTC ExpiryMarkets after ${DECK_GEN_ATTEMPTS} tries ` +
-          `(found ${markets.length} mintable)`
+        `PREDICT_NO_LIVE_MARKETS: no live BTC ExpiryMarkets after ` +
+          `${DECK_GEN_ATTEMPTS} tries (${markets.length} mintable). ` +
+          `DeepBook Predict may not be creating markets — run ` +
+          `\`bun run check:sources\`.`
       )
     }
 

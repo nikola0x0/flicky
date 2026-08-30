@@ -115,6 +115,15 @@ export const env = {
   // from an hour ago. 2 min is generous — the feed ticks every few seconds.
   pythMaxStalenessMs: Number(process.env.PYTH_MAX_STALENESS_MS ?? 120_000),
 
+  // Predict revival watch (src/predict-watch.ts). Polls for the newest
+  // MarketCreated event and logs PREDICT_REVIVED the moment markets start
+  // flowing again. 6-24 went dark 2026-08-17 and nobody noticed for 12 days
+  // because nothing watched the upstream the whole game depends on.
+  predictWatchEnabled: process.env.PREDICT_WATCH_ENABLED !== "false",
+  predictWatchIntervalMs: Number(
+    process.env.PREDICT_WATCH_INTERVAL_MS ?? 15 * 60 * 1000
+  ),
+
   // Where a deck's cards come from. See src/card-source.ts.
   //
   //   "predict" — DeepBook Predict ExpiryMarkets (the original source; the

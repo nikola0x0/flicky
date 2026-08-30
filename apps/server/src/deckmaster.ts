@@ -34,7 +34,13 @@
 import { bcs } from "@mysten/sui/bcs"
 import { normalizeSuiAddress, normalizeSuiObjectId } from "@mysten/sui/utils"
 import { createHash } from "node:crypto"
-import { countDecks, deleteDeck, getDeck, upsertDeck } from "./db"
+import {
+  countDecks,
+  deleteDeck,
+  getDeck,
+  listPredictMarkets,
+  upsertDeck,
+} from "./db"
 import { env } from "./env"
 import { readBtcSpotOnChain } from "./pyth"
 import { makeLogger } from "./log"
@@ -241,6 +247,30 @@ export function selectTieredMarkets(
 }
 
 /**
+ * Live BTC markets as `MarketRow`s, read from the `predict_market` mirror that
+ * `DuelIndexer::drainMarketCreated` fills from `config_events::MarketCreated`.
+ *
+ * Replaces `GET {predictIndexerUrl}/markets`. That endpoint was only ever a
+ * replay of these same events, and its host stopped resolving — indexing them
+ * ourselves removes the last third-party HTTP dependency from deck generation.
+ * The field mapping is 1:1, so `selectMarketRows` / `selectTieredMarkets` are
+ * unchanged; `kind` is synthesized because every indexed row IS a
+ * market_created event by construction.
+ */
+async function indexedMarketRows(): Promise<MarketRow[]> {
+  const rows = await listPredictMarkets(1)
+  return rows.map((r) => ({
+    expiry_market_id: r.expiryMarketId,
+    propbook_underlying_id: r.propbookUnderlyingId,
+    expiry: r.expiry,
+    tick_size: r.tickSize,
+    admission_tick_size: r.admissionTickSize,
+    kind: "market_created",
+    checkpoint_timestamp_ms: r.createdAtMs ?? undefined,
+  }))
+}
+
+/**
  * Fetch the `count` nearest live BTC `ExpiryMarket`s from the predict
  * indexer, i.e. those whose expiry clears `now + minHeadroomMs` but falls
  * within `now + maxHorizonMs`. Sorted soonest-first. De-dupes by
@@ -252,9 +282,7 @@ export async function findDeckMarkets(
   maxHorizonMs = env.deckCardMaxHorizonMs,
   minHeadroomMs = env.deckCardMinHeadroomMs
 ): Promise<MarketSnapshot[]> {
-  const res = await fetch(`${env.predictIndexerUrl}/markets`)
-  if (!res.ok) throw new Error(`predict indexer /markets ${res.status}`)
-  const rows = (await res.json()) as MarketRow[]
+  const rows = await indexedMarketRows()
   return selectMarketRows(rows, {
     now: Date.now(),
     minHeadroomMs,
@@ -273,9 +301,7 @@ export async function findDeckMarkets(
 export async function findTieredDeckMarkets(
   opts: Partial<TieredSelectOpts> = {}
 ): Promise<MarketSnapshot[]> {
-  const res = await fetch(`${env.predictIndexerUrl}/markets`)
-  if (!res.ok) throw new Error(`predict indexer /markets ${res.status}`)
-  const rows = (await res.json()) as MarketRow[]
+  const rows = await indexedMarketRows()
   return selectTieredMarkets(rows, {
     now: Date.now(),
     shortCount: env.deckShortCount,

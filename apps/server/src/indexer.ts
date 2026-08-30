@@ -26,6 +26,7 @@ import { normalizeSuiObjectId } from "@mysten/sui/utils"
 import { env } from "./env"
 import { getGraphQLClient } from "./lib/sui"
 import {
+  savePredictMarket,
   getDuel,
   getMarketSettlement,
   getOrderPremium,
@@ -52,7 +53,7 @@ const log = makeLogger("indexer")
 const EVENTS_QUERY = `query Ev($type: String!, $after: String, $first: Int, $last: Int) {
   events(filter: { type: $type }, after: $after, first: $first, last: $last) {
     pageInfo { hasNextPage endCursor }
-    nodes { contents { json } }
+    nodes { contents { json } timestamp }
   }
 }`
 
@@ -60,7 +61,10 @@ type GraphQLEventsResult = {
   data?: {
     events?: {
       pageInfo?: { hasNextPage: boolean; endCursor: string | null }
-      nodes?: Array<{ contents: { json: Record<string, unknown> } }>
+      nodes?: Array<{
+        contents: { json: Record<string, unknown> }
+        timestamp?: string | null
+      }>
     }
   }
 }
@@ -459,6 +463,7 @@ export class DuelIndexer {
    */
   private readonly orderMintedType: string
   private readonly marketSettledType: string
+  private readonly marketCreatedType: string
   private readonly gql = getGraphQLClient()
   private stopped = false
 
@@ -483,6 +488,7 @@ export class DuelIndexer {
     ]
     this.orderMintedType = `${env.deepbookPredictPackageId}::order_events::OrderMinted`
     this.marketSettledType = `${env.deepbookPredictPackageId}::config_events::MarketSettled`
+    this.marketCreatedType = `${env.deepbookPredictPackageId}::config_events::MarketCreated`
   }
 
   /**
@@ -605,7 +611,10 @@ export class DuelIndexer {
    */
   private async drainEvents(
     eventType: string,
-    onPage: (nodes: Array<Record<string, unknown>>) => Promise<void>
+    onPage: (
+      nodes: Array<Record<string, unknown>>,
+      timestampsMs: Array<number | null>
+    ) => Promise<void>
   ): Promise<void> {
     let cursor: string | null = await loadCursor(eventType)
     for (let page = 0; page < 10; page++) {
@@ -616,10 +625,13 @@ export class DuelIndexer {
       const events = res.data?.events
       const nodes = events?.nodes ?? []
       if (nodes.length === 0) return
-      const jsons = nodes
-        .map((n) => n.contents.json)
-        .filter((j): j is Record<string, unknown> => !!j)
-      await onPage(jsons)
+      const kept = nodes.filter((n) => !!n.contents?.json)
+      const jsons = kept.map((n) => n.contents.json)
+      const timestampsMs = kept.map((n) => {
+        const t = n.timestamp ? Date.parse(n.timestamp) : NaN
+        return Number.isFinite(t) ? t : null
+      })
+      await onPage(jsons, timestampsMs)
       const end = events?.pageInfo?.endCursor
       if (end) {
         await saveCursor(eventType, end)
@@ -688,6 +700,47 @@ export class DuelIndexer {
     })
   }
 
+  /**
+   * Mirror `deepbook_predict::config_events::MarketCreated` into
+   * `predict_market`.
+   *
+   * This replaces `GET {predictIndexerUrl}/markets`, which was only ever a
+   * replay of these same events (see `deckmaster.ts::MarketRow`, whose own
+   * docstring says the indexer "returns every `market_created` event ever
+   * emitted"). Sourcing them here removes the last hard dependency on a
+   * third-party HTTP service for deck generation.
+   *
+   * The event node's `timestamp` becomes `created_at_ms`, which is what the
+   * HTTP indexer exposed as `checkpoint_timestamp_ms` and what tier
+   * classification derives `lifetime = expiry - created` from.
+   */
+  private async drainMarketCreated(): Promise<void> {
+    await this.drainEvents(
+      this.marketCreatedType,
+      async (nodes, timestamps) => {
+        for (let i = 0; i < nodes.length; i++) {
+          const p = nodes[i]
+          const expiryMarketId = p.expiry_market_id as string | undefined
+          const expiry = p.expiry as string | number | undefined
+          if (!expiryMarketId || expiry === undefined) continue
+          try {
+            await savePredictMarket({
+              expiryMarketId: normalizeSuiObjectId(expiryMarketId),
+              propbookUnderlyingId: Number(p.propbook_underlying_id ?? 0),
+              expiry: Number(expiry),
+              tickSize: String(p.tick_size ?? "0"),
+              admissionTickSize: String(p.admission_tick_size ?? "0"),
+              createdAtMs: timestamps[i],
+              network: env.network,
+            })
+          } catch (e) {
+            log.warn(`MarketCreated persist: ${describeError(e)}`)
+          }
+        }
+      }
+    )
+  }
+
   async tick(): Promise<void> {
     const touched = new Set<string>()
     const finalized: Array<{
@@ -714,6 +767,11 @@ export class DuelIndexer {
     }
     try {
       await this.drainMarketSettled()
+    } catch (e) {
+      log.warn(`MarketSettled drain: ${describeError(e)}`)
+    }
+    try {
+      await this.drainMarketCreated()
     } catch (e) {
       log.warn(`MarketSettled: ${describeError(e)}`)
     }

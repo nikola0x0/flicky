@@ -213,6 +213,27 @@ async function ensureSchema(): Promise<void> {
   // the indexer's own `fetchDuel` in place of the old on-chain `OracleSVI`
   // read (6-24 has no such struct — settlement now only surfaces via this
   // event / the predict indexer's `/markets/{id}/state`).
+  // Mirror of `config_events::MarketCreated`, filled by DuelIndexer. Replaces
+  // `GET {predictIndexerUrl}/markets`, which was only ever a replay of these
+  // same events — so deck discovery no longer needs a third-party HTTP host.
+  await sql`
+    CREATE TABLE IF NOT EXISTS predict_market (
+      expiry_market_id       TEXT PRIMARY KEY,
+      propbook_underlying_id INTEGER NOT NULL,
+      expiry                 BIGINT  NOT NULL,
+      tick_size              TEXT    NOT NULL,
+      admission_tick_size    TEXT    NOT NULL,
+      -- Event checkpoint time. The HTTP indexer exposed this as
+      -- checkpoint_timestamp_ms; tier classification derives
+      -- lifetime = expiry - created_at_ms from it. NULL when the event
+      -- node carried no timestamp (such rows classify as long).
+      created_at_ms          BIGINT,
+      network                TEXT    NOT NULL DEFAULT 'testnet',
+      updated_at             BIGINT  NOT NULL
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS predict_market_expiry
+            ON predict_market (network, propbook_underlying_id, expiry)`
   await sql`
     CREATE TABLE IF NOT EXISTS market_settlements (
       expiry_market_id TEXT   PRIMARY KEY,
@@ -1096,6 +1117,98 @@ export async function getOrderPremium(
       `getOrderPremium(${expiryMarketId}, ${orderId}): ${describeError(e)}`
     )
     return null
+  }
+}
+
+export interface PredictMarketRow {
+  expiryMarketId: string
+  propbookUnderlyingId: number
+  expiry: number
+  tickSize: string
+  admissionTickSize: string
+  createdAtMs: number | null
+  network?: Network
+}
+
+/** Best-effort mirror write — a bad row must not stall the indexer's loop. */
+export async function savePredictMarket(m: PredictMarketRow): Promise<void> {
+  await ready()
+  const sql = getSql()
+  try {
+    await sql`
+      INSERT INTO predict_market
+        (expiry_market_id, propbook_underlying_id, expiry, tick_size,
+         admission_tick_size, created_at_ms, network, updated_at)
+      VALUES (${m.expiryMarketId}, ${m.propbookUnderlyingId}, ${m.expiry},
+              ${m.tickSize}, ${m.admissionTickSize}, ${m.createdAtMs},
+              ${m.network ?? env.network}, ${Date.now()})
+      ON CONFLICT (expiry_market_id) DO UPDATE SET
+        expiry              = EXCLUDED.expiry,
+        tick_size           = EXCLUDED.tick_size,
+        admission_tick_size = EXCLUDED.admission_tick_size,
+        created_at_ms       = COALESCE(EXCLUDED.created_at_ms,
+                                       predict_market.created_at_ms),
+        updated_at          = EXCLUDED.updated_at
+    `
+  } catch (e) {
+    log.error(`savePredictMarket(${m.expiryMarketId}): ${describeError(e)}`)
+  }
+}
+
+/**
+ * Indexed markets for one asset, newest-expiry-last. Returns the raw shape the
+ * deck selectors already consume so `selectMarketRows` / `selectTieredMarkets`
+ * need no changes — the mapping from event fields to `MarketRow` is 1:1.
+ */
+export async function listPredictMarkets(
+  propbookUnderlyingId = 1,
+  network: Network = env.network
+): Promise<PredictMarketRow[]> {
+  await ready()
+  const sql = getSql()
+  const rows = (await sql`
+    SELECT expiry_market_id, propbook_underlying_id, expiry, tick_size,
+           admission_tick_size, created_at_ms
+    FROM predict_market
+    WHERE network = ${network}
+      AND propbook_underlying_id = ${propbookUnderlyingId}
+    ORDER BY expiry ASC
+  `) as Array<{
+    expiry_market_id: string
+    propbook_underlying_id: number
+    expiry: string | number
+    tick_size: string
+    admission_tick_size: string
+    created_at_ms: string | number | null
+  }>
+  return rows.map((r) => ({
+    expiryMarketId: r.expiry_market_id,
+    propbookUnderlyingId: Number(r.propbook_underlying_id),
+    expiry: Number(r.expiry),
+    tickSize: r.tick_size,
+    admissionTickSize: r.admission_tick_size,
+    createdAtMs: r.created_at_ms === null ? null : Number(r.created_at_ms),
+  }))
+}
+
+/** Newest indexed market's expiry + count still live — for /health staleness. */
+export async function predictMarketStats(
+  network: Network = env.network
+): Promise<{ count: number; newestExpiry: number | null; liveCount: number }> {
+  await ready()
+  const sql = getSql()
+  const now = Date.now()
+  const rows = (await sql`
+    SELECT COUNT(*)::int AS c,
+           MAX(expiry)   AS newest,
+           COUNT(*) FILTER (WHERE expiry > ${now})::int AS live
+    FROM predict_market WHERE network = ${network}
+  `) as Array<{ c: number; newest: string | number | null; live: number }>
+  const r = rows[0]
+  return {
+    count: r?.c ?? 0,
+    newestExpiry: r?.newest == null ? null : Number(r.newest),
+    liveCount: r?.live ?? 0,
   }
 }
 

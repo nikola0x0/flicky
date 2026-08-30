@@ -127,7 +127,68 @@ describe("refundEligibility", () => {
   })
 
   test("COMPLETE duels are never refundable", () => {
-    expect(refundEligibility(row(5, 0, "COMPLETE"), P0, AFTER_TIMEOUT)).toBeNull()
+    expect(
+      refundEligibility(row(5, 0, "COMPLETE"), P0, AFTER_TIMEOUT)
+    ).toBeNull()
+  })
+})
+
+/**
+ * Abandoned-duel regression, built from the four duels actually stuck on
+ * testnet since 2026-07-18/19.
+ *
+ * They stalled because NEITHER player finished their deck — the keeper's
+ * `bothDone` gate correctly refuses to settle an incomplete duel, and
+ * `duel.move::refund_duel` requires `!both_done` plus a player signature. So
+ * the stake is reclaimable by the players and by nobody else. These cases pin
+ * that down so a future change can't silently strand them.
+ */
+describe("refundEligibility — real abandoned duels", () => {
+  const HOUR = 3_600_000
+  const started = Date.now() - 42 * 24 * HOUR // ~42 days ago
+  const P0 = "0xc77e125fb0"
+  const P1 = "0x870d96f52e"
+
+  /** Deck of 5 with `p0`/`p1` swipes filled in from the front. */
+  const duel = (p0: number, p1: number) => ({
+    status: "ACTIVE",
+    creator: P0,
+    challenger: P1,
+    cardCount: 5,
+    startedAtMs: started,
+    swipes: Array.from({ length: 5 }, (_, i) => ({
+      p0Swipe: i < p0 ? {} : null,
+      p1Swipe: i < p1 ? {} : null,
+    })),
+  })
+
+  // p0Next/p1Next as measured on chain 2026-08-30.
+  const CASES: Array<[string, number, number]> = [
+    ["0xbaf5bdec…", 1, 5],
+    ["0xf950887b…", 4, 4],
+    ["0x7f8cfc1e…", 3, 4],
+    ["0x0ebe1183…", 1, 2],
+  ]
+
+  for (const [id, p0, p1] of CASES) {
+    test(`${id} (p0=${p0}/5, p1=${p1}/5) is refundable by either player`, () => {
+      expect(refundEligibility(duel(p0, p1), P0)).toBe("refund")
+      expect(refundEligibility(duel(p0, p1), P1)).toBe("refund")
+    })
+  }
+
+  test("a non-participant can never refund someone else's duel", () => {
+    expect(refundEligibility(duel(1, 2), "0xstranger")).toBeNull()
+  })
+
+  test("a completed deck is NOT refundable — it must finalize instead", () => {
+    // Mirrors the contract's ERefundDuelComplete assert.
+    expect(refundEligibility(duel(5, 5), P0)).toBeNull()
+  })
+
+  test("still locked inside the 1h timeout", () => {
+    const fresh = { ...duel(1, 2), startedAtMs: Date.now() - 60_000 }
+    expect(refundEligibility(fresh, P0)).toBeNull()
   })
 })
 

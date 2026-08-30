@@ -40,6 +40,7 @@ import {
   sponsorBalanceSnapshot,
   startSponsorBalanceMonitor,
 } from "./sponsor-balance"
+import { predictWatchSnapshot, startPredictWatch } from "./predict-watch"
 import { websocketHandler } from "./ws/handlers"
 import { newSocketState } from "./ws/matchmaking"
 import { connectedAddressCount, queueStats, roomCount } from "./ws/matchmaking"
@@ -52,9 +53,64 @@ import {
 } from "./ws/oracle-stream"
 import { DuelIndexer } from "./indexer"
 import { Keeper } from "./keeper"
-import { closeDb, listCursors, ready } from "./db"
+import { closeDb, listCursors, predictMarketStats, ready } from "./db"
 
 const log = makeLogger("server")
+
+/**
+ * Is DeepBook Predict actually alive, and how stale is what we know?
+ *
+ * Twelve days passed before anyone noticed 6-24 stopped creating markets, and
+ * two weeks before that nobody noticed there were no players. `/health` said
+ * `ok: true` throughout, because nothing it reported was about the upstream
+ * the whole game depends on. This is that missing signal.
+ */
+async function predictHealth(): Promise<unknown> {
+  const watch = predictWatchSnapshot()
+  const now = Date.now()
+  try {
+    const stats = await predictMarketStats()
+    // Staleness comes from the WATCH, not the mirror. The indexer seeds its
+    // cursor at the newest event and skips historical replay (correctly —
+    // expired markets are useless for a deck), so on a fresh deploy the
+    // mirror is empty while upstream may have been dark for weeks. The watch
+    // queries the newest MarketCreated directly and always has an answer.
+    const newestCreated = watch.newestCreatedMs
+    const ageMs = newestCreated === null ? null : now - newestCreated
+    return {
+      deckSource: env.deckSource,
+      // The single field to alert on.
+      alive: stats.liveCount > 0,
+      lastMarketCreated:
+        newestCreated === null ? null : new Date(newestCreated).toISOString(),
+      staleForDays: ageMs === null ? null : +(ageMs / 86_400_000).toFixed(1),
+      liveMarkets: stats.liveCount,
+      indexedMarkets: stats.count,
+      newestExpiry:
+        stats.newestExpiry === null
+          ? null
+          : new Date(stats.newestExpiry).toISOString(),
+      watch,
+    }
+  } catch (e) {
+    // The mirror is unreadable, but the watch still answers the question that
+    // matters, so degrade rather than losing the signal entirely.
+    return {
+      deckSource: env.deckSource,
+      alive: false,
+      lastMarketCreated:
+        watch.newestCreatedMs === null
+          ? null
+          : new Date(watch.newestCreatedMs).toISOString(),
+      staleForDays:
+        watch.newestCreatedMs === null
+          ? null
+          : +((now - watch.newestCreatedMs) / 86_400_000).toFixed(1),
+      watch,
+      mirrorError: e instanceof Error ? e.message : String(e),
+    }
+  }
+}
 
 async function safeListCursors(): Promise<unknown> {
   try {
@@ -90,9 +146,10 @@ const server = Bun.serve({
       // Both reads hit Postgres — run them together and degrade
       // gracefully (null / error payload) so /health still answers even
       // if the DB is briefly unreachable.
-      const [decks, cursors] = await Promise.all([
+      const [decks, cursors, predict] = await Promise.all([
         knownHashCount().catch(() => null),
         safeListCursors(),
+        predictHealth(),
       ])
       return json({
         ok: true,
@@ -138,6 +195,7 @@ const server = Bun.serve({
             env.indexerEnabled && env.flickyPackageId ? "enabled" : "disabled",
         },
         cursors,
+        predict,
         oracleStream: oracleStreamStats(),
         sponsorBalance: sponsorBalanceSnapshot(),
       })
@@ -255,6 +313,7 @@ startMatchClock()
 startOracleStream()
 startChatPruneLoop()
 startSponsorBalanceMonitor()
+startPredictWatch()
 
 if (env.keeperEnabled && env.keeperSecretKey && env.flickyPackageId) {
   try {
