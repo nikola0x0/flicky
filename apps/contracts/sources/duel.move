@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Flicky duel: a two-player, N-card prediction match escrowing stakes
-/// in a shared object, scoring swipes against DeepBook Predict (6-24)
+/// in a shared object, scoring swipes against DeepBook Predict (8-21)
 /// expiry-market outcomes. Each card pins its OWN `ExpiryMarket` (via
 /// `expiry_market_id` + `strike`), so a deck of 5 cards can span 5
 /// different expiry markets / strikes.
@@ -15,7 +15,7 @@
 /// Finalization is two-phase:
 ///   1. `settle_card(card_idx, settlement_price, p0_premium, p1_premium)` ×
 ///      `deck_size` — once a card's expiry market has settled off-chain, a
-///      keeper feeds the settlement price and per-player premium (6-24
+///      keeper feeds the settlement price and per-player premium (8-21
 ///      exposes no public on-chain read for either) and anyone calls this
 ///      to score both players' swipes for that card and accumulate the
 ///      per-card payout/premium onto the Duel. Each call emits a
@@ -32,7 +32,7 @@
 /// for one card doesn't roll back the rest.
 ///
 /// Tiers:
-///   `STAKED` — players mint 6-24 `ExpiryMarket` positions off-chain via
+///   `STAKED` — players mint 8-21 `ExpiryMarket` positions off-chain via
 ///              `expiry_market::mint_exact_quantity`, chained into
 ///              `record_swipe` in the same player-signed PTB; only the
 ///              resulting `order_id` is recorded on-chain. Anti-replay is
@@ -103,7 +103,7 @@ const REVEAL_TIMEOUT_MS: u64 = 300_000; // 5 minutes — challenger can claim fo
 // === Structs ===
 
 public struct Card has copy, drop, store {
-    /// The 6-24 `ExpiryMarket` this card is bet on. Passed in at reveal
+    /// The 8-21 `ExpiryMarket` this card is bet on. Passed in at reveal
     /// (committed via the deck hash), used for settle-time anti-replay.
     expiry_market_id: ID,
     /// Raw strike price (`tick * tick_size`). `actual_up = settlement_price > strike`.
@@ -404,7 +404,7 @@ fun join_internal<T>(
 /// Record a player's swipe on `card_idx`. `order_id` is the id returned by
 /// `expiry_market::mint_exact_quantity`, chained from the mint command in
 /// the SAME player-signed PTB — so a genuine mint backs every staked swipe.
-/// Premium/p_swiped are no longer snapshotted here (6-24 exposes no public
+/// Premium/p_swiped are no longer snapshotted here (8-21 exposes no public
 /// on-chain quote); premium is keeper-fed at settle time.
 public fun record_swipe<T>(
     duel: &mut Duel<T>,
@@ -489,11 +489,11 @@ fun record_swipe_internal<T>(
 
 /// Settle one card. `settlement_price` (keeper-fed from the `MarketSettled`
 /// event) and per-player `premium` (keeper-fed from `OrderMinted`) are
-/// supplied as arguments — 6-24 exposes no public on-chain read for either.
+/// supplied as arguments — 8-21 exposes no public on-chain read for either.
 /// Scores both players' swipes (UP wins if `settlement_price > strike`) and
 /// accumulates payout/premium onto the duel. Idempotent via
 /// `cards_settled[card_idx]`. Anti-replay: `predict_account::has_position`
-/// on each player's `AccountWrapper` — a player who redeemed their 6-24
+/// on each player's `AccountWrapper` — a player who redeemed their 8-21
 /// position before settle has their payout zeroed (premium still counts).
 public fun settle_card<T>(
     duel: &mut Duel<T>,

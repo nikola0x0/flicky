@@ -16,7 +16,11 @@ import {
   type DeckCard,
 } from "./flicky"
 import { CONFIG } from "./config"
-import { DEEPBOOK } from "./deepbook"
+import { DEEPBOOK, WRAPPER_CACHE_KEY } from "./deepbook"
+
+test("8-21 wrappers use a deployment-specific cache namespace", () => {
+  expect(WRAPPER_CACHE_KEY).toBe("flicky.wrapper.v3")
+})
 
 // The dUSDC create/join builders no longer read wallet coins — the stake is
 // withdrawn from the player's AccountWrapper, resolved via `resolveWrapper`
@@ -526,6 +530,24 @@ describe("PTB builders", () => {
     ).toBe(true)
     // record_swipe is the last command, chaining the mint's order id.
     expect(targets[targets.length - 1]).toMatch(/::duel::record_swipe$/)
+  })
+
+  test("buildSwipeTx (staked) uses the 8-21 pricer and mint ABIs", () => {
+    const commands = buildSwipeTx(stakedSwipeArgs).getData().commands
+    const pricer = commands.find(
+      (c) => "MoveCall" in c && c.MoveCall?.function === "load_live_pricer"
+    )
+    const mint = commands.find(
+      (c) => "MoveCall" in c && c.MoveCall?.function === "mint_exact_quantity"
+    )
+    expect(pricer).toBeDefined()
+    expect(mint).toBeDefined()
+    if (!pricer || pricer.$kind !== "MoveCall") throw new Error("no pricer")
+    if (!mint || mint.$kind !== "MoveCall") throw new Error("no mint")
+    // market, config, propbook registry, pyth, BS value store, SVI store, clock
+    expect(pricer.MoveCall.arguments).toHaveLength(7)
+    // 8-21 removed the explicit leverage argument (Flicky previously used 1x).
+    expect(mint.MoveCall.arguments).toHaveLength(12)
   })
 
   test("buildSwipeTx (staked) record_swipe type arg matches the duel's stake coin type, not SUI", () => {

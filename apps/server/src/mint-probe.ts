@@ -1,7 +1,7 @@
 /**
  * Deck-gen mint-admissibility probe.
  *
- * 6-24 `ExpiryMarket`s gate every mint on a volatile per-market LP cash
+ * 8-21 `ExpiryMarket`s gate every mint on a volatile per-market LP cash
  * reserve (`expiry_cash::assert_backing`, `EInsufficientCash` / abort code
  * 0): a market that admits a mint one minute can reject it the next, and the
  * indexer exposes no backing field to read (see
@@ -35,14 +35,12 @@ import { makeLogger } from "./log"
 
 const log = makeLogger("mint-probe")
 
-/** Open-upper-bound sentinel tick — `(1 << 30) - 1`, per the 6-24 tick grid. */
+/** Open-upper-bound sentinel tick — `(1 << 30) - 1`. */
 const POS_INF_TICK = (1n << 30n) - 1n
 const U64_MAX = 2n ** 64n - 1n
-/** 1e9-scaled leverage; 1e9 == 1x. Matches the web swipe PTB. */
-const LEVERAGE_1X = 1_000_000_000n
 /**
  * Probe notional — MUST match the web's `SWIPE_QUANTITY` so the probe's
- * admission math (`net_premium = probability × quantity / leverage` vs
+ * admission math (`premium = probability × quantity` vs
  * `min_net_premium`) mirrors what a real swipe will do.
  */
 const PROBE_QTY = 6_000_000n
@@ -95,9 +93,8 @@ function digitalBsProbability(
 
 /**
  * On-chain `min_net_premium` floor = $1 dUSDC = 1_000_000 micro-units.
- * A swipe's `net_premium = probability × quantity / leverage`. At leverage
- * 1× (the only lever Flicky uses), the premium for the swiped direction
- * is `p × quantity`.  If this falls below $1, the mint aborts with
+ * A swipe's premium is `probability × quantity`. If this falls below $1,
+ * the mint aborts with
  * `ENetPremiumBelowMinimum`.
  *
  * The deck is generated at match creation, but the player may swipe up to
@@ -206,9 +203,8 @@ function buildMintProbeTx(
       tx.object(env.protocolConfigId),
       tx.object(env.oracleRegistryId),
       tx.object(env.pythFeedId),
-      tx.object(env.bsSpotFeedId),
-      tx.object(env.bsForwardFeedId),
-      tx.object(env.bsSviFeedId),
+      tx.object(env.bsValueStoreId),
+      tx.object(env.bsSviStoreId),
       tx.object("0x6"),
     ],
   })
@@ -223,7 +219,6 @@ function buildMintProbeTx(
       tx.pure.u64(lowerTick),
       tx.pure.u64(higherTick),
       tx.pure.u64(PROBE_QTY),
-      tx.pure.u64(LEVERAGE_1X),
       tx.pure.u64(U64_MAX),
       tx.pure.u64(U64_MAX),
       tx.object(env.accumulatorRootId),

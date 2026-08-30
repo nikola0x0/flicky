@@ -1,5 +1,10 @@
 # @flicky/contracts
 
+> The deployment tables below are historical and are not the source of truth
+> for the active Predict pin. Flicky now targets `predict-testnet-8-21`; use
+> `apps/server/src/network-env.ts`, `apps/web/src/lib/config.ts`, and
+> `docs/predict-pin-migration.md` for current deployment and cutover details.
+
 Move 2024 smart contract package for **Flicky** — a Tinder-style PvP prediction duel built on top of **DeepBook Predict** on Sui testnet.
 
 ---

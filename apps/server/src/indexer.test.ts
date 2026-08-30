@@ -5,7 +5,58 @@
  * per card.
  */
 import { describe, expect, test } from "bun:test"
-import { computeCardOutcomes } from "./indexer"
+import {
+  computeCardOutcomes,
+  parseMarketSettledEvent,
+  parseOrderMintedEvent,
+} from "./indexer"
+
+describe("Predict 8-21 event compatibility", () => {
+  test("reads OrderMinted.premium", () => {
+    expect(
+      parseOrderMintedEvent({
+        expiry_market_id: "0x123",
+        order_id: "42",
+        premium: "900001",
+      })
+    ).toEqual({
+      expiryMarketId: "0x123",
+      orderId: "42",
+      premium: "900001",
+    })
+  })
+
+  test("reads MarketSettled.onchain_timestamp_ms", () => {
+    expect(
+      parseMarketSettledEvent({
+        expiry_market_id: "0x123",
+        settlement_price: "64000000000000",
+        onchain_timestamp_ms: "1788076800000",
+      })
+    ).toEqual({
+      expiryMarketId: "0x123",
+      settlementPrice: "64000000000000",
+      settledAtMs: 1788076800000,
+    })
+  })
+
+  test("keeps 6-24 field aliases while old cursor pages drain", () => {
+    expect(
+      parseOrderMintedEvent({
+        expiry_market_id: "0x123",
+        order_id: 7,
+        net_premium: 11,
+      })?.premium
+    ).toBe("11")
+    expect(
+      parseMarketSettledEvent({
+        expiry_market_id: "0x123",
+        settlement_price: 12,
+        settled_at_ms: 13,
+      })?.settledAtMs
+    ).toBe(13)
+  })
+})
 
 describe("computeCardOutcomes", () => {
   test("returns empty when no markets settled", () => {

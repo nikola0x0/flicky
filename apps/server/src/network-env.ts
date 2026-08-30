@@ -123,40 +123,37 @@ const GRAPHQL_DEFAULTS: Record<Network, string> = {
 }
 
 /**
- * Baked-in testnet defaults (DeepBook Predict 6-24). Only applied on
+ * Baked-in testnet defaults (DeepBook Predict 8-21). Only applied on
  * non-mainnet networks — mainnet gets `UNSET_ID` unless a `_MAINNET` var
  * supplies a real value.
  */
 const TESTNET_DEFAULTS = {
   DEEPBOOK_PREDICT_PACKAGE:
-    "0xdb3ef5a5129920e59c9b2ae25a77eddb48acd0e1c6307b97073f0e076016446e",
-  DEEPBOOK_PREDICT_OBJECT_ID:
-    "0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a",
+    "0x421041754244cf0e985fb9c9f5e1f49428caf3df4cde3a7b266d8e18ea63597b",
   PROTOCOL_CONFIG_ID:
-    "0x2325224629b4bd96d1f1d7ee937e07f8a06f861018a130bbb26db09cb0394cb6",
+    "0x7ef1ac99c2f0a77e7aa2602b5ea7bff68750cff0d80f09bdf827bfb345128f33",
   POOL_VAULT_ID:
-    "0xfde98c636eb8a7aba59c3a238cfee6b576b7118d1e5ffa2952876c4b270a3a2a",
+    "0x2a31f592d8fd3d0781e2233770d02d67797890ac82c3d18796d7eb0997896602",
   PREDICT_REGISTRY_ID:
-    "0x54afbf245caf42466cedb5756ed7816f34f544afdfa13579a862eccf3afa21ca",
+    "0x3d486bd50bb5bb5450ddbcb4f74776b6135f416c09024a6674ac266e77e1870a",
   ACCOUNT_PACKAGE:
-    "0xb9389eac8d59170ffd1427c1a66e5c8306263464fcc6615e825c1f5b3e15da3b",
+    "0xa94ec89b6cbb3e2609c7ca65bd77885b7513f852922ebdf8e766851fb6f85259",
   ACCOUNT_REGISTRY_ID:
-    "0x3c54d5b8b6bca376fc289121838ad02f8a5b3843242b9ad7e8f8245720e685a2",
+    "0x5682c73d657de1546374e632369a25c82744c8a20e9b4f47e6558e3d4bde88d3",
   PROPBOOK_PACKAGE_ID:
-    "0x8eb2adde1c91f8b7c9ba5e9b0a32bfb804510c342939c5f77458fd8143f9755b",
+    "0xd8b402609b1728f60cf20bfaaec5255701df54350ec13e93aac39463b00bf97b",
   ORACLE_REGISTRY_ID:
-    "0xf3deaff68cbd081a35ec21653af6f671d2ad5f012f3b4d817d81752843374136",
+    "0x715f5ae4aac0078f4d0c6bf9ea2815614e799e909a90b577aeb8de9ad8bab142",
   BTC_PYTH_FEED_ID:
-    "0xc78d7de16217d46d21b92ae475da799448be30b71a758dc6d7bb3ac2f1c35afb",
-  BTC_BS_SPOT_FEED_ID:
-    "0xcdc5fa7364e60fd2504aa96f65b707dc0734e507a919b1a7d7d63164fd67b745",
-  BTC_BS_FWD_FEED_ID:
-    "0xe72c734ea8d8dcbc9183d9d8f96f51aaa1fb5034d5ed33ac60d67d261e15b48a",
-  BTC_BS_SVI_FEED_ID:
-    "0xdc2f8270676bd05fb28491e8d4a41a495722fda7a454926dd66dbba256a21c69",
-  ACCUMULATOR_ROOT_ID: "0xacc",
-  PREDICT_INDEXER_URL: "https://predict-server-beta.testnet.mystenlabs.com",
-  PROPBOOK_INDEXER_URL: "https://propbook.api.testnet.mystenlabs.com",
+    "0xea8fd4624002516b28b495051c838b2c9a34a4f22ae281d328e1bec47f54cd24",
+  BTC_BS_VALUE_STORE_ID:
+    "0x9b64cc860ac09e6dcd675fc579c1048792ddce51cc018f2ca16aeb4a1a5684a3",
+  BTC_BS_SVI_STORE_ID:
+    "0xd5bc586e99c8d595e0ba5e0a2ef2295e652db8934ffbeda630d60e207bedab8f",
+  ACCUMULATOR_ROOT_ID:
+    "0x0000000000000000000000000000000000000000000000000000000000000acc",
+  PREDICT_INDEXER_URL: "https://predict-server-v4.testnet.mystenlabs.com",
+  PROPBOOK_INDEXER_URL: "https://propbook-server-v4.testnet.mystenlabs.com",
   DUSDC_COIN_TYPE:
     "0xe95040085976bfd54a1a07225cd46c8a2b4e8e2b6732f140a0fc49850ba73e1a::dusdc::DUSDC",
   SWAP_PACKAGE:
@@ -189,7 +186,6 @@ export interface NetworkEnv {
   flickyPackageId: string | null
   /** DeepBook Predict package + shared objects. */
   deepbookPredictPackageId: string
-  deepbookPredictObjectId: string
   protocolConfigId: string
   poolVaultId: string
   predictRegistryId: string
@@ -198,9 +194,8 @@ export interface NetworkEnv {
   propbookPackageId: string
   oracleRegistryId: string
   pythFeedId: string
-  bsSpotFeedId: string
-  bsForwardFeedId: string
-  bsSviFeedId: string
+  bsValueStoreId: string
+  bsSviStoreId: string
   accumulatorRootId: string
   predictIndexerUrl: string
   propbookIndexerUrl: string
@@ -232,7 +227,6 @@ function build(net: Network): NetworkEnv {
     graphqlUrl: pick("SUI_GRAPHQL_URL", net) ?? GRAPHQL_DEFAULTS[net],
     flickyPackageId,
     deepbookPredictPackageId,
-    deepbookPredictObjectId: id("DEEPBOOK_PREDICT_OBJECT_ID", net),
     protocolConfigId: id("PROTOCOL_CONFIG_ID", net),
     poolVaultId: id("POOL_VAULT_ID", net),
     predictRegistryId: id("PREDICT_REGISTRY_ID", net),
@@ -241,9 +235,8 @@ function build(net: Network): NetworkEnv {
     propbookPackageId: id("PROPBOOK_PACKAGE_ID", net),
     oracleRegistryId: id("ORACLE_REGISTRY_ID", net),
     pythFeedId: id("BTC_PYTH_FEED_ID", net),
-    bsSpotFeedId: id("BTC_BS_SPOT_FEED_ID", net),
-    bsForwardFeedId: id("BTC_BS_FWD_FEED_ID", net),
-    bsSviFeedId: id("BTC_BS_SVI_FEED_ID", net),
+    bsValueStoreId: id("BTC_BS_VALUE_STORE_ID", net),
+    bsSviStoreId: id("BTC_BS_SVI_STORE_ID", net),
     accumulatorRootId: id("ACCUMULATOR_ROOT_ID", net),
     predictIndexerUrl: url("PREDICT_INDEXER_URL", net),
     propbookIndexerUrl: url("PROPBOOK_INDEXER_URL", net),

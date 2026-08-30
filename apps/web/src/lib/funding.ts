@@ -12,8 +12,8 @@ import { DEFAULT_DECK_SIZE } from "@/lib/flicky"
  * Per-swipe Predict `mint_exact_quantity` size (notional, dUSDC micro-units).
  *
  * This is the position NOTIONAL, not the premium paid. The mint's
- * `net_premium = entry_probability × quantity / leverage` must clear the
- * protocol's `min_net_premium` floor ($1 = 1_000_000) or the mint aborts
+ * `premium = entry_probability × quantity` must clear the protocol's
+ * `min_net_premium` floor ($1 = 1_000_000) or the mint aborts
  * with `ENetPremiumBelowMinimum` (`strike_exposure_config::assert_mint_admission`,
  * abort code 4). The duel STAKE (side-pot) is the game's real prize; the mint
  * is just how each swipe takes a genuine Predict position for scoring. This
@@ -49,7 +49,7 @@ export const MAX_PREMIUM_BUDGET = BigInt(DEFAULT_DECK_SIZE) * SWIPE_QUANTITY
 /**
  * dUSDC the player's AccountWrapper must hold before queueing at `stake`.
  *
- * In the 6-24 model BOTH the duel stake and every swipe premium are withdrawn
+ * In the 8-21 model BOTH the duel stake and every swipe premium are withdrawn
  * from the AccountWrapper (`account::withdraw_funds`, see
  * `buildCreateDuelDusdcTx` in `flicky.ts`) — the wallet only funds the
  * account, it does NOT pay the stake separately. So the account must hold the

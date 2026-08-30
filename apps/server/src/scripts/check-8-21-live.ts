@@ -1,5 +1,5 @@
 /**
- * Deploy-gate verification for the DeepBook Predict 6-24 migration.
+ * Deploy-gate verification for the DeepBook Predict 8-21 migration.
  *
  * Confirms the ids baked into `env.ts` actually resolve on testnet and the
  * off-chain surfaces the server depends on (predict indexer `/markets`,
@@ -11,7 +11,7 @@
  * (⚠️ not ❌) — they probe shapes/freshness that can legitimately be empty
  * or transiently stale without meaning the deploy is broken.
  *
- * Usage (from apps/server): bun run check:6-24
+ * Usage (from apps/server): bun run check:8-21
  */
 import { Transaction } from "@mysten/sui/transactions"
 import { normalizeSuiAddress } from "@mysten/sui/utils"
@@ -38,7 +38,7 @@ console.log(`network:            ${env.network}`)
 console.log(`predictIndexerUrl:  ${env.predictIndexerUrl}`)
 console.log()
 
-// ─── Gate 1 (hard): 6-24 shared objects resolve with the expected type ───
+// ─── Gate 1 (hard): 8-21 shared objects resolve with the expected type ───
 
 console.log("── Gate 1: shared object resolution (gRPC getObject) ──")
 
@@ -191,9 +191,8 @@ if (liveMarkets.length === 0) {
         tx.object(env.protocolConfigId),
         tx.object(env.oracleRegistryId),
         tx.object(env.pythFeedId),
-        tx.object(env.bsSpotFeedId),
-        tx.object(env.bsForwardFeedId),
-        tx.object(env.bsSviFeedId),
+        tx.object(env.bsValueStoreId),
+        tx.object(env.bsSviStoreId),
         tx.object("0x6"),
       ],
     })
@@ -225,7 +224,9 @@ console.log()
 // ─── Summary ───
 
 if (hardFailures > 0) {
-  console.log(`RESULT: ${hardFailures} hard gate failure(s) — deploy NOT ready.`)
+  console.log(
+    `RESULT: ${hardFailures} hard gate failure(s) — deploy NOT ready.`
+  )
   process.exit(1)
 } else {
   console.log("RESULT: all hard gates passed.")

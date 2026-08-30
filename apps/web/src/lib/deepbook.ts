@@ -1,10 +1,10 @@
 /**
- * DeepBook Predict (6-24) integration — staked-tier swipes + account onboarding.
+ * DeepBook Predict (8-21) integration — staked-tier swipes + account onboarding.
  *
  * Each staked swipe is ONE player-signed, sponsored PTB combining:
  *   - `account::generate_auth` — owner auth for the player's AccountWrapper
  *   - `expiry_market::load_live_pricer` — market-bound live pricer (once per tx)
- *   - `expiry_market::mint_exact_quantity` — mints a real 6-24 binary position
+ *   - `expiry_market::mint_exact_quantity` — mints a real 8-21 binary position
  *     funded from the player's escrowed dUSDC; returns a `u256` order id
  *   - `duel::record_swipe(..., order_id, ...)` — records the swipe in the Flicky
  *     duel for score-based PvP payout, chaining the mint's order id
@@ -28,7 +28,7 @@ import * as duel from "@/sui/gen/flicky/duel"
 import { CONFIG, apiUrl } from "./config"
 
 /**
- * DeepBook Predict (6-24) object / package ids for the ACTIVE network — a
+ * DeepBook Predict (8-21) object / package ids for the ACTIVE network — a
  * flat re-export of the network slice in lib/config.ts, kept under this name
  * so the PTB builders below read `DEEPBOOK.foo` unchanged.
  */
@@ -39,9 +39,8 @@ export const DEEPBOOK = {
   protocolConfigId: CONFIG.protocolConfigId,
   oracleRegistryId: CONFIG.oracleRegistryId,
   pythFeedId: CONFIG.pythFeedId,
-  bsSpotFeedId: CONFIG.bsSpotFeedId,
-  bsForwardFeedId: CONFIG.bsForwardFeedId,
-  bsSviFeedId: CONFIG.bsSviFeedId,
+  bsValueStoreId: CONFIG.bsValueStoreId,
+  bsSviStoreId: CONFIG.bsSviStoreId,
   accumulatorRootId: CONFIG.accumulatorRootId,
   predictIndexerUrl: CONFIG.predictIndexerUrl,
   /** dUSDC on testnet (1e6 decimals); native USDC on mainnet. */
@@ -54,11 +53,10 @@ export const DEEPBOOK = {
  * localStorage namespace for cached AccountWrapper ids.
  *
  * A player's wrapper is deterministic + permanent (DeepBook never deletes it),
- * so this cache is effectively long-lived. The `wrapper:v2` namespace exists so
- * stale 4-16-era PredictManager ids (from the previous integration) can never be
- * returned here — it mirrors the server's `wrapper:v2:` fix.
+ * so this cache is effectively long-lived. Each registry migration gets a new
+ * namespace so an old deployment's deterministic wrapper is never reused.
  */
-const WRAPPER_CACHE_KEY = "flicky.wrapper.v2"
+export const WRAPPER_CACHE_KEY = "flicky.wrapper.v3"
 
 function readWrapperCache(owner: string): string | null {
   try {
@@ -273,10 +271,8 @@ export async function fetchMarketTickSize(marketId: string): Promise<bigint> {
 // === PTB builders ===
 
 const U64_MAX = 2n ** 64n - 1n
-const LEVERAGE_1X = 1_000_000_000n // 1e9-scaled; 1e9 == 1x
-
 /**
- * Atomic staked swipe: mint a real 6-24 binary position on DeepBook AND record
+ * Atomic staked swipe: mint a real 8-21 binary position on DeepBook AND record
  * the swipe in the Flicky duel, in ONE player-signed (sponsored) PTB.
  *
  * `quantity` is in u64 contracts. The premium is withdrawn from the player's
@@ -321,9 +317,8 @@ export function buildStakedSwipeTx(args: {
       tx.object(DEEPBOOK.protocolConfigId),
       tx.object(DEEPBOOK.oracleRegistryId),
       tx.object(DEEPBOOK.pythFeedId),
-      tx.object(DEEPBOOK.bsSpotFeedId),
-      tx.object(DEEPBOOK.bsForwardFeedId),
-      tx.object(DEEPBOOK.bsSviFeedId),
+      tx.object(DEEPBOOK.bsValueStoreId),
+      tx.object(DEEPBOOK.bsSviStoreId),
       tx.object(CONFIG.CLOCK_ID),
     ],
   })
@@ -340,7 +335,6 @@ export function buildStakedSwipeTx(args: {
       tx.pure.u64(lowerTick),
       tx.pure.u64(higherTick),
       tx.pure.u64(args.quantity),
-      tx.pure.u64(LEVERAGE_1X), // leverage: 1x
       tx.pure.u64(U64_MAX), // max_cost: uncapped
       tx.pure.u64(U64_MAX), // max_probability: uncapped
       tx.object(DEEPBOOK.accumulatorRootId),

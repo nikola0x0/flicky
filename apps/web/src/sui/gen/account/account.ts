@@ -4,8 +4,8 @@
 
 
 /**
- * Local link stub for the on-chain `account` package (0xb9389eac...15da3b,
- * predict-testnet-6-24). Only the surface flicky calls on-chain is stubbed:
+ * Local link stub for the on-chain `account` package (0xa94ec89b...85259,
+ * predict-testnet-8-21). Only the surface flicky calls on-chain is stubbed:
  * `load_account` + a position set for anti-replay reads. Bodies are local test
  * math; on-chain dispatch hits the real package via `published-at`.
  */

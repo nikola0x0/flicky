@@ -1,12 +1,12 @@
 [package]
 name = "account"
 edition = "2024"
-published-at = "0xb9389eac8d59170ffd1427c1a66e5c8306263464fcc6615e825c1f5b3e15da3b"
+published-at = "0xa94ec89b6cbb3e2609c7ca65bd77885b7513f852922ebdf8e766851fb6f85259"
 
 [dependencies]
 
 [addresses]
-account = "0xb9389eac8d59170ffd1427c1a66e5c8306263464fcc6615e825c1f5b3e15da3b"
+account = "0xa94ec89b6cbb3e2609c7ca65bd77885b7513f852922ebdf8e766851fb6f85259"
 
 [dev-dependencies]
 

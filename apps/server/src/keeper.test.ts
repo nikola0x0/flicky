@@ -5,8 +5,8 @@
  */
 import { describe, expect, test } from "bun:test"
 import { Transaction } from "@mysten/sui/transactions"
-import { env } from "./env"
 import {
+  addPermissionlessRedeem,
   hexFromBytes,
   isTerminalSettleError,
   parseDuelFromObject,
@@ -207,7 +207,7 @@ describe("parseDuelFromObject", () => {
   })
 })
 
-describe("settle PTB shape (6-24 model)", () => {
+describe("settle PTB shape (8-21 model)", () => {
   // Builds the same PTB shape `Keeper.tryClose` builds, given already-resolved
   // keeper-fed values (settlement price, premiums, wrappers) — asserts arg
   // counts/order without touching RPC/signing.
@@ -263,30 +263,20 @@ describe("settle PTB shape (6-24 model)", () => {
     expect(call.MoveCall.arguments).toHaveLength(2)
   })
 
-  test("redeem_settled is built with the 10-arg 6-24 object graph and NO type argument (non-generic — DUSDC is hardcoded inside)", () => {
+  test("redeem_settled_permissionless uses the 7-arg 8-21 object graph", () => {
     const tx = new Transaction()
-    tx.moveCall({
-      target: `${env.deepbookPredictPackageId}::expiry_market::redeem_settled`,
-      arguments: [
-        tx.object(expiryMarketId),
-        tx.object(env.accountRegistryId),
-        tx.object(p0Wrapper),
-        tx.object(env.protocolConfigId),
-        tx.object(env.oracleRegistryId),
-        tx.object(env.pythFeedId),
-        tx.pure.u256(orderId),
-        tx.pure.u64(1_000_000n),
-        tx.object(env.accumulatorRootId),
-        tx.object("0x6"),
-      ],
+    addPermissionlessRedeem(tx, {
+      expiryMarketId,
+      wrapperId: p0Wrapper,
+      orderId,
     })
     const call = tx.getData().commands[0]
     expect(call.$kind).toBe("MoveCall")
     if (call.$kind !== "MoveCall") throw new Error("unreachable")
-    expect(call.MoveCall.function).toBe("redeem_settled")
+    expect(call.MoveCall.function).toBe("redeem_settled_permissionless")
     expect(call.MoveCall.module).toBe("expiry_market")
-    expect(call.MoveCall.arguments).toHaveLength(10)
-    // `redeem_settled` takes ZERO type parameters — passing one aborts the
+    expect(call.MoveCall.arguments).toHaveLength(7)
+    // The permissionless call takes ZERO type parameters.
     // whole settle PTB (Move arity mismatch). See keeper.ts moveCall above.
     expect(call.MoveCall.typeArguments).toEqual([])
   })

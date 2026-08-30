@@ -57,12 +57,27 @@ describe("pick", () => {
 })
 
 describe("networkEnv", () => {
-  test("testnet resolves the baked-in 6-24 defaults", () => {
+  test("testnet resolves the baked-in 8-21 defaults", () => {
     const ne = networkEnv("testnet")
     expect(ne.network).toBe("testnet")
-    expect(ne.deepbookPredictPackageId).not.toBe(UNSET_ID)
-    expect(ne.deepbookPredictPackageId).toStartWith("0x")
-    expect(ne.predictIndexerUrl).toContain("testnet")
+    expect(ne.deepbookPredictPackageId).toBe(
+      "0x421041754244cf0e985fb9c9f5e1f49428caf3df4cde3a7b266d8e18ea63597b"
+    )
+    expect(ne.accountPackageId).toBe(
+      "0xa94ec89b6cbb3e2609c7ca65bd77885b7513f852922ebdf8e766851fb6f85259"
+    )
+    expect(ne.accountRegistryId).toBe(
+      "0x5682c73d657de1546374e632369a25c82744c8a20e9b4f47e6558e3d4bde88d3"
+    )
+    expect(ne.bsValueStoreId).toBe(
+      "0x9b64cc860ac09e6dcd675fc579c1048792ddce51cc018f2ca16aeb4a1a5684a3"
+    )
+    expect(ne.bsSviStoreId).toBe(
+      "0xd5bc586e99c8d595e0ba5e0a2ef2295e652db8934ffbeda630d60e207bedab8f"
+    )
+    expect(ne.predictIndexerUrl).toBe(
+      "https://predict-server-v4.testnet.mystenlabs.com"
+    )
   })
 
   test("mainnet leaves Predict ids unset — no testnet bleed-through", () => {

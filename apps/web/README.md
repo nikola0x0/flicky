@@ -33,12 +33,14 @@ This reads the currently-deployed `packageId` from `apps/contracts/deployed.json
 
 Optional overrides in `.env.local`:
 
-| Var | Used by | Default |
-| --- | --- | --- |
-| `VITE_FLICKY_PACKAGE_ID_TESTNET` | `lib/config.ts` | mirrored automatically by `bun --filter @flicky/contracts upgrade` |
-| `VITE_DEEPBOOK_PREDICT_PACKAGE_ID` | `lib/config.ts` | `0xf5ea2b3749…` (testnet) |
-| `VITE_DEEPBOOK_BTC_ORACLE_ID` | `lib/config.ts` | fallback `OracleSVI`; runtime resolves the freshest active one anyway |
-| `VITE_DEEPBOOK_PREDICT_OBJECT_ID` | `lib/deepbook.ts` | testnet singleton |
+| Var                                 | Used by         | Default                                                            |
+| ----------------------------------- | --------------- | ------------------------------------------------------------------ |
+| `VITE_FLICKY_PACKAGE_ID_TESTNET`    | `lib/config.ts` | mirrored automatically by `bun --filter @flicky/contracts upgrade` |
+| `VITE_DEEPBOOK_PREDICT_PACKAGE_ID`  | `lib/config.ts` | Predict 8-21 testnet package                                       |
+| `VITE_DEEPBOOK_ACCOUNT_PACKAGE_ID`  | `lib/config.ts` | Account 8-21 testnet package                                       |
+| `VITE_DEEPBOOK_ACCOUNT_REGISTRY_ID` | `lib/config.ts` | AccountRegistry 8-21 object                                        |
+| `VITE_DEEPBOOK_BS_VALUE_STORE_ID`   | `lib/config.ts` | BTC Block Scholes value store                                      |
+| `VITE_DEEPBOOK_BS_SVI_STORE_ID`     | `lib/config.ts` | BTC Block Scholes SVI store                                        |
 
 ## Tests
 

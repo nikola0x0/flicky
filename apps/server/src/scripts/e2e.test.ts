@@ -1,26 +1,26 @@
 /**
- * End-to-end test against live Sui testnet — predict-testnet-6-24 flow.
+ * End-to-end test against live Sui testnet — predict-testnet-8-21 flow.
  *
- * Exercises the FULL staked-duel lifecycle against real 6-24 DeepBook
+ * Exercises the FULL staked-duel lifecycle against real 8-21 DeepBook
  * Predict infrastructure:
  *   fund player 1 → onboard both players' `AccountWrapper`s (create + share
  *   + deposit dUSDC) → discover live BTC `ExpiryMarket`s from the predict
  *   indexer → create/join/reveal a duel → both players ATOMICALLY mint a
- *   real 6-24 position AND record the swipe (one PTB per swipe, chaining
+ *   real 8-21 position AND record the swipe (one PTB per swipe, chaining
  *   `mint_exact_quantity`'s `order_id` into `duel::record_swipe`) → settle
  *   via the `finalize_test_one_price` dev shortcut → assert a winner.
  *
  * This supersedes the 4-16 version of this file (deleted): that version
  * discovered a settled `OracleSVI`, created a `PredictManager` via
  * `predict::create_manager`, and used JSON-RPC `queryEvents` — all gone in
- * 6-24 (no on-chain oracle scan, account model instead of PredictManager,
+ * 8-21 (on-chain event discovery, account model instead of PredictManager,
  * gRPC + GraphQL replace JSON-RPC).
  *
  * PTB recipes / ids are copied verbatim from this repo's own working code,
- * NOT re-derived from SDK types (see `check-6-24-live.ts`, `keeper.ts`,
+ * NOT re-derived from SDK types (see `check-8-21-live.ts`, `keeper.ts`,
  * `predict.ts`, `apps/web/src/lib/deepbook.ts`):
  *   - gRPC `getObject` / `simulateTransaction` / `signAndExecuteTransaction`
- *     / `waitForTransaction` shapes: `check-6-24-live.ts` + `keeper.ts`.
+ *     / `waitForTransaction` shapes: `check-8-21-live.ts` + `keeper.ts`.
  *   - devInspect + `bcs.Address` decode (wrapper resolution): `predict.ts`'s
  *     `deriveWrapperFor` — reimplemented locally here (see note below) to
  *     avoid `predict.ts`'s Postgres-backed cache, which throws if
@@ -123,7 +123,7 @@ const P1_FUND_DUSDC = 10_000_000n // 10 dUSDC — covers stake(1) + deposit(8) +
 // `quantity` is NOT "1 contract" — it's raw DUSDC-notional units (same base
 // as `net_premium`/`Coin<DUSDC>`, 1e6 = $1). `strike_exposure_config::
 // assert_mint_admission` (predict pkg, abort code 4 = ENetPremiumBelowMinimum)
-// requires `net_premium = entry_probability * quantity / leverage >= 1_000_000`
+// requires `premium = entry_probability * quantity >= 1_000_000`
 // (min_net_premium, $1). Confirmed live 2026-07-10 via devInspect probe
 // against a real ATM BTC ExpiryMarket (entry_probability ~0.50, both UP and
 // DOWN): quantity=1_000_000 aborts with code 4 (net_premium ~500k, half the
@@ -139,7 +139,6 @@ const DECK_SIZE = 5
 const MARKET_HEADROOM_MS = 5 * 60_000 // markets must clear "now + 5min"
 
 const U64_MAX = 2n ** 64n - 1n
-const LEVERAGE_1X = 1_000_000_000n // 1e9-scaled; 1e9 == 1x
 const POS_INF_TICK = (1n << 30n) - 1n
 const CLOCK = "0x6"
 
@@ -575,9 +574,8 @@ async function atomicSwipe(
       tx.object(env.protocolConfigId),
       tx.object(env.oracleRegistryId),
       tx.object(env.pythFeedId),
-      tx.object(env.bsSpotFeedId),
-      tx.object(env.bsForwardFeedId),
-      tx.object(env.bsSviFeedId),
+      tx.object(env.bsValueStoreId),
+      tx.object(env.bsSviStoreId),
       tx.object(CLOCK),
     ],
   })
@@ -592,7 +590,6 @@ async function atomicSwipe(
       tx.pure.u64(lowerTick),
       tx.pure.u64(higherTick),
       tx.pure.u64(qty),
-      tx.pure.u64(LEVERAGE_1X),
       tx.pure.u64(U64_MAX),
       tx.pure.u64(U64_MAX),
       tx.object(env.accumulatorRootId),
@@ -634,7 +631,7 @@ async function settleAndFinalize(
 
 const describeFn = canRun ? describe : describe.skip
 
-describeFn("e2e duel — predict-testnet-6-24 flow", () => {
+describeFn("e2e duel — predict-testnet-8-21 flow", () => {
   let client: SuiGrpcClient
   let packageId: string
   let p0: Ed25519Keypair

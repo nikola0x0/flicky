@@ -2,18 +2,19 @@
  * Settled-redeem keeper — runs as a background service inside the same
  * Bun process as the HTTP/WS server.
  *
- * Flow (6-24 model — feed-settle, no on-chain oracle read):
+ * Flow (8-21 model — keeper-fed settlement):
  *   1. Sweep recent `${packageId}::duel::DuelCreated` events.
  *   2. For each duel that's not yet COMPLETE:
  *      - If ACTIVE and not revealed, reveal the deck (deckmaster has
  *        the plaintext if anyone called /deckmaster/generate before
  *        the server restart).
  *      - If both players finished all swipes and every card's `ExpiryMarket`
- *        has settled (per the predict indexer's `/markets/{id}/state`), build
+ *        has settled (read directly from each market object), build
  *        a single PTB chaining `settle_card × deck_size` (keeper-fed
- *        `settlement_price` + per-player `net_premium`, per card) +
- *        `finalize` (distributes the side-pot) + `redeem_settled × N`
- *        (materialises each player's 6-24 `AccountWrapper` payout). Settles
+ *        `settlement_price` + per-player premium, per card) +
+ *        `finalize` (distributes the side-pot) +
+ *        `redeem_settled_permissionless × N` (materialises each player's
+ *        8-21 `AccountWrapper` payout). Settles
  *        run first so `settle_card`'s anti-replay check
  *        (`predict_account::has_position`) sees live positions before
  *        redeem zeroes them.
@@ -382,6 +383,25 @@ export function readyCardIndices(
   return out
 }
 
+/** Append the exact DeepBook Predict 8-21 permissionless redemption call. */
+export function addPermissionlessRedeem(
+  tx: Transaction,
+  args: { expiryMarketId: string; wrapperId: string; orderId: bigint }
+): void {
+  tx.moveCall({
+    target: `${env.deepbookPredictPackageId}::expiry_market::redeem_settled_permissionless`,
+    arguments: [
+      tx.object(args.expiryMarketId),
+      tx.object(env.accountRegistryId),
+      tx.object(args.wrapperId),
+      tx.object(env.protocolConfigId),
+      tx.pure.u256(args.orderId),
+      tx.object(env.accumulatorRootId),
+      tx.object("0x6"),
+    ],
+  })
+}
+
 export class Keeper {
   readonly client: SuiGrpcClient
   private readonly gql = getGraphQLClient()
@@ -598,7 +618,7 @@ export class Keeper {
 
       // 3) Redeem the READY cards' recorded positions (both players) so
       //    their dUSDC payout materializes in their AccountWrapper as soon
-      //    as that specific card is settled — `redeem_settled` is a
+      //    as that specific card is settled — the permissionless redeem is a
       //    permissionless Predict call keyed on the position's own market,
       //    independent of flicky's `Duel.status`/finalize, so it doesn't
       //    need to wait for the whole deck either.
@@ -610,20 +630,10 @@ export class Keeper {
           [p1Wrapper, duel.p1Swipes[i]] as const,
         ]) {
           if (!swipe || swipe.quantity <= 0n) continue
-          tx.moveCall({
-            target: `${env.deepbookPredictPackageId}::expiry_market::redeem_settled`,
-            arguments: [
-              tx.object(card.expiryMarketId),
-              tx.object(env.accountRegistryId),
-              tx.object(wrapper),
-              tx.object(env.protocolConfigId),
-              tx.object(env.oracleRegistryId),
-              tx.object(env.pythFeedId),
-              tx.pure.u256(swipe.orderId),
-              tx.pure.u64(swipe.quantity),
-              tx.object(env.accumulatorRootId),
-              tx.object("0x6"),
-            ],
+          addPermissionlessRedeem(tx, {
+            expiryMarketId: card.expiryMarketId,
+            wrapperId: wrapper,
+            orderId: swipe.orderId,
           })
           redeemsCount++
         }

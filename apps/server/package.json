@@ -18,7 +18,7 @@
     "check:cadence": "bun run src/scripts/check-market-cadence.ts",
     "clear:duels": "bun run src/scripts/clear-duels.ts",
     "backfill:ratings": "bun run src/scripts/backfill-ratings.ts",
-    "check:6-24": "bun run src/scripts/check-6-24-live.ts",
+    "check:8-21": "bun run src/scripts/check-8-21-live.ts",
     "fund:sponsor": "bun run src/scripts/fund-sponsor.ts",
     "season:results": "bun run src/scripts/season-results.ts",
     "season:deposit": "bun run src/scripts/season-deposit.ts",

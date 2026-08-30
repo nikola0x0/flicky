@@ -1,15 +1,22 @@
 # When the DeepBook Predict pin moves
 
 Flicky is pinned to a specific DeepBook Predict deployment. **That pin has
-already moved twice** — `predict-testnet-4-16` → `predict-testnet-6-24` → the
-6-24 testnet going dark on 2026-08-17. Assume it will move again, and that the
-next revival is a *new* version rather than 6-24 coming back.
+already moved repeatedly** — `predict-testnet-4-16` → `predict-testnet-6-24`
+→ `predict-testnet-8-21`. Assume it will move again.
 
 This is the checklist for that day. Everything is env-driven
 (`apps/server/src/network-env.ts`), so a pin move should be configuration plus
 an ABI check — never a rewrite.
 
-## First: do not trust the docs
+## Current pin
+
+The code defaults to `predict-testnet-8-21`. The source of truth is the
+upstream branch's `packages/predict/deployment/deployment.testnet.json`, not a
+copied list of ids. See
+`docs/superpowers/specs/2026-08-30-predict-8-21-migration-design.md` for the
+verified ABI delta and deployment values.
+
+## First: verify the deployment artifacts
 
 As of 2026-08-30 the official pages
 (`docs.sui.io/onchain-finance/deepbook/deepbook-predict/*`) still document
@@ -22,8 +29,9 @@ As of 2026-08-30 the official pages
   `propbook.api.testnet.mystenlabs.com`.
 - They confirm there is **no mainnet deployment**.
 
-So the docs describe a deployment that was never live, reachable through a host
-that no longer exists. Verify against the chain, not the docs.
+Those pages described a deployment that was never live, reachable through a
+host that no longer exists. Prefer the deployment branch, then verify against
+the chain.
 
 ## Step 1 — find out what is actually live
 
@@ -34,11 +42,11 @@ bun --filter server check:sources
 It prints the resolved package ids next to what is actually emitting events,
 and exits non-zero when no deck can be built. Three shapes to read:
 
-| Output | Meaning |
-|---|---|
-| `MarketCreated … (2m ago)` + `still live: N>0` | Healthy. Nothing to do. |
-| `MarketCreated … (12d ago)` + `still live: 0` | Right pin, upstream is dark. Wait. |
-| `MarketCreated  NO EVENTS EVER` | **Wrong pin.** Continue below. |
+| Output                                         | Meaning                            |
+| ---------------------------------------------- | ---------------------------------- |
+| `MarketCreated … (2m ago)` + `still live: N>0` | Healthy. Nothing to do.            |
+| `MarketCreated … (12d ago)` + `still live: 0`  | Right pin, upstream is dark. Wait. |
+| `MarketCreated  NO EVENTS EVER`                | **Wrong pin.** Continue below.     |
 
 `NO EVENTS EVER` against a package that exists on chain is the signature of a
 moved pin — it's exactly what 4-16 reports today.
@@ -69,15 +77,14 @@ Only these change. All are read through `pick()` in `network-env.ts`, which
 accepts the bare name (testnet) or a `_MAINNET` suffix, and **never** falls a
 mainnet key back to a testnet value.
 
-| Var | What it is |
-|---|---|
-| `DEEPBOOK_PREDICT_PACKAGE_ID` | the new Predict package |
-| `DEEPBOOK_PREDICT_OBJECT_ID` | its shared Predict object, if the new version still has one |
-| `PROTOCOL_CONFIG_ID`, `POOL_VAULT_ID`, `PREDICT_REGISTRY_ID` | shared objects |
-| `ACCOUNT_PACKAGE_ID`, `ACCOUNT_REGISTRY_ID` | account/wrapper model |
-| `ORACLE_REGISTRY_ID`, `BTC_PYTH_FEED_ID`, `BTC_BS_*_FEED_ID` | oracle wiring |
-| `ACCUMULATOR_ROOT_ID` | usually `0xacc` |
-| `DUSDC_COIN_TYPE` | quote asset — check it didn't change |
+| Var                                                                                      | What it is                           |
+| ---------------------------------------------------------------------------------------- | ------------------------------------ |
+| `DEEPBOOK_PREDICT_PACKAGE_ID`                                                            | the new Predict package              |
+| `PROTOCOL_CONFIG_ID`, `POOL_VAULT_ID`, `PREDICT_REGISTRY_ID`                             | shared objects                       |
+| `ACCOUNT_PACKAGE_ID`, `ACCOUNT_REGISTRY_ID`                                              | account/wrapper model                |
+| `ORACLE_REGISTRY_ID`, `BTC_PYTH_FEED_ID`, `BTC_BS_VALUE_STORE_ID`, `BTC_BS_SVI_STORE_ID` | oracle wiring                        |
+| `ACCUMULATOR_ROOT_ID`                                                                    | usually `0xacc`                      |
+| `DUSDC_COIN_TYPE`                                                                        | quote asset — check it didn't change |
 
 Set them on the `flicky-server` Railway service. Use `--skip-deploys` to stage
 without restarting production mid-duel:
@@ -111,16 +118,38 @@ Check each of these against the new package:
   that call.
 - **Mint PTB shape** (`apps/web/src/lib/deepbook.ts`, `mint-probe.ts`) —
   argument order and types.
-- **Keeper redeem** (`keeper.ts`) — `expiry_market::redeem_settled` args.
+- **Keeper redeem** (`keeper.ts`) — 8-21 uses
+  `expiry_market::redeem_settled_permissionless` with seven explicit args.
+- **Dependency type identity** (`duel.move`) — if a public function mentions a
+  type from a newly published upstream package, Sui compatible upgrade rules
+  require a fresh Flicky publish.
 
 ## Step 5 — verify before trusting
 
 ```bash
 bun --filter server check:sources   # must exit 0
+bun --filter server check:8-21      # objects, API shape, live pricer
 bun typecheck && bun --filter server test
 ```
 
 Then a real free-tier duel end to end before re-enabling staked.
+
+## 8-21 cutover order
+
+1. Stop new matchmaking and drain, finalize, or refund all active 6-24 duels.
+2. While the old app/config remains available, users withdraw dUSDC from their
+   6-24 AccountWrappers. This migration is intentionally manual.
+3. Publish Flicky as a **fresh package**; do not use the upgrade script for the
+   dependency identity change.
+4. Regenerate bindings and set the new Flicky package id in server and web
+   deployment variables before deploying either service.
+5. Run `bun --filter server check:8-21`, then create/fund 8-21
+   AccountWrappers and run `bun --filter server test:e2e` against the fresh
+   Flicky package.
+6. Complete the browser gameplay test through a free duel and a staked duel:
+   create, join, reveal, mint, settle, finalize, and permissionless redeem.
+7. Merge only after both live E2E layers pass. Roll back by restoring the prior
+   server/web release and 6-24 Flicky package id; do not delete new objects.
 
 ## What does NOT need to change
 

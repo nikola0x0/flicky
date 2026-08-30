@@ -172,7 +172,7 @@ async function ensureSchema(): Promise<void> {
   // the deleted 4-16 `findManagerFor` wrote legacy `PredictManager` ids
   // here under the bare owner address; the 6-24 `predict.ts::deriveWrapperFor`
   // now writes/reads `AccountWrapper` ids under a namespaced
-  // `wrapper:v2:${owner}` key (see `WRAPPER_CACHE_PREFIX` in predict.ts) so
+  // a versioned `wrapper:v3:${owner}` key (see `WRAPPER_CACHE_PREFIX`) so
   // a legacy bare-owner row surviving on a REUSED Postgres can never be
   // read back as a validated 6-24 wrapper. The 6-24 wrapper is
   // deterministic (derived from AccountRegistry + owner via devInspect), so

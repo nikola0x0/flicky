@@ -114,12 +114,12 @@ export function requiredQueueBalance(tier: Tier): bigint {
  * note above. Exported only so `predict.test.ts` can construct/assert
  * against the exact namespaced key without duplicating the literal.
  */
-export const WRAPPER_CACHE_PREFIX = "wrapper:v2:"
+export const WRAPPER_CACHE_PREFIX = "wrapper:v3:"
 
 /**
  * Resolve the `AccountWrapper` address logically owned by `owner`.
  *
- * Fast path: a persistent Postgres cache (namespaced `wrapper:v2:${owner}`
+ * Fast path: a persistent Postgres cache (namespaced `wrapper:v3:${owner}`
  * → wrapper address — see `WRAPPER_CACHE_PREFIX`). The wrapper address is
  * deterministic and permanent once derived, so a hit is authoritative and
  * skips all RPC.

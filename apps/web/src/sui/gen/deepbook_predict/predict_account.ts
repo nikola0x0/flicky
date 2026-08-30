@@ -4,8 +4,8 @@
 
 
 /**
- * Local link stub for `deepbook_predict::predict_account` (0xdb3ef5a5...446e,
- * predict-testnet-6-24). flicky's only on-chain call into the predict package is
+ * Local link stub for `deepbook_predict::predict_account` (0x42104175...3597b,
+ * predict-testnet-8-21). flicky's only on-chain call into the predict package is
  * `has_position` for settle-time anti-replay.
  */
 

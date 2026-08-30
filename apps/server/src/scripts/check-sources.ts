@@ -1,7 +1,7 @@
 /**
  * `bun run check:sources` — can we build a deck right now, and from what?
  *
- * Exists because the previous diagnostics (`check:6-24-live`,
+ * Exists because the previous pin-specific diagnostics (`check:8-21`,
  * `check:cadence`) both assume the predict HTTP indexer is reachable, so when
  * it vanished they failed with connection errors that said nothing about the
  * actual problem. Twelve days passed before anyone worked out that DeepBook

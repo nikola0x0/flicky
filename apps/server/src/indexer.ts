@@ -81,6 +81,53 @@ function describeError(e: unknown): string {
   return String(e)
 }
 
+export function parseOrderMintedEvent(
+  event: Record<string, unknown>
+): { expiryMarketId: string; orderId: string; premium: string } | null {
+  const expiryMarketId = event.expiry_market_id
+  const orderId = event.order_id
+  // 8-21 renamed the on-chain field to `premium`. Keep the 6-24 alias while
+  // an existing cursor can still drain an old page during cutover.
+  const premium = event.premium ?? event.net_premium
+  if (
+    typeof expiryMarketId !== "string" ||
+    orderId === undefined ||
+    premium === undefined
+  ) {
+    return null
+  }
+  return {
+    expiryMarketId,
+    orderId: String(orderId),
+    premium: String(premium),
+  }
+}
+
+export function parseMarketSettledEvent(
+  event: Record<string, unknown>,
+  fallbackTimestampMs = Date.now()
+): {
+  expiryMarketId: string
+  settlementPrice: string
+  settledAtMs: number
+} | null {
+  const expiryMarketId = event.expiry_market_id
+  const settlementPrice = event.settlement_price
+  const timestamp =
+    event.onchain_timestamp_ms ?? event.settled_at_ms ?? fallbackTimestampMs
+  if (typeof expiryMarketId !== "string" || settlementPrice === undefined) {
+    return null
+  }
+  const settledAtMs = Number(timestamp)
+  return {
+    expiryMarketId,
+    settlementPrice: String(settlementPrice),
+    settledAtMs: Number.isFinite(settledAtMs)
+      ? settledAtMs
+      : fallbackTimestampMs,
+  }
+}
+
 const STATUS_MAP: Record<string, "PENDING" | "ACTIVE" | "COMPLETE"> = {
   "1": "PENDING",
   "2": "ACTIVE",
@@ -649,20 +696,13 @@ export class DuelIndexer {
   private async drainOrderMinted(): Promise<void> {
     await this.drainEvents(this.orderMintedType, async (nodes) => {
       for (const p of nodes) {
-        const expiryMarketId = p.expiry_market_id as string | undefined
-        const orderId = p.order_id as string | number | undefined
-        const netPremium = p.net_premium as string | number | undefined
-        if (
-          !expiryMarketId ||
-          orderId === undefined ||
-          netPremium === undefined
-        )
-          continue
+        const parsed = parseOrderMintedEvent(p)
+        if (!parsed) continue
         try {
           await saveOrderPremium(
-            normalizeSuiObjectId(expiryMarketId),
-            String(orderId),
-            String(netPremium)
+            normalizeSuiObjectId(parsed.expiryMarketId),
+            parsed.orderId,
+            parsed.premium
           )
         } catch (e) {
           log.warn(`OrderMinted persist: ${describeError(e)}`)
@@ -680,18 +720,13 @@ export class DuelIndexer {
   private async drainMarketSettled(): Promise<void> {
     await this.drainEvents(this.marketSettledType, async (nodes) => {
       for (const p of nodes) {
-        const expiryMarketId = p.expiry_market_id as string | undefined
-        const settlementPrice = p.settlement_price as
-          | string
-          | number
-          | undefined
-        const settledAtMs = p.settled_at_ms as string | number | undefined
-        if (!expiryMarketId || settlementPrice === undefined) continue
+        const parsed = parseMarketSettledEvent(p)
+        if (!parsed) continue
         try {
           await saveMarketSettlement(
-            normalizeSuiObjectId(expiryMarketId),
-            String(settlementPrice),
-            Number(settledAtMs ?? Date.now())
+            normalizeSuiObjectId(parsed.expiryMarketId),
+            parsed.settlementPrice,
+            parsed.settledAtMs
           )
         } catch (e) {
           log.warn(`MarketSettled persist: ${describeError(e)}`)

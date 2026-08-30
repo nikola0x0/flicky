@@ -1,4 +1,4 @@
-import type { SuiCodegenConfig } from "@mysten/codegen";
+import type { SuiCodegenConfig } from "@mysten/codegen"
 
 /**
  * Sui TypeScript codegen — emits typed bindings for every Move function +
@@ -24,14 +24,13 @@ const config: SuiCodegenConfig = {
       package: "flicky",
     },
     {
-      // DeepBook Predict — the on-chain `0xf5ea2b3749…` package. Generated
-      // bindings now cover only predict_account (6-24 stub); the full
-      // 6-24 mint bindings are added in Plan 3.
+      // DeepBook Predict 8-21. Generated bindings cover the local
+      // predict_account link stub; player mint calls remain raw PTB calls.
       path: "./deepbook_predict_min",
       package: "deepbook_predict",
     },
     {
-      // account_min — 6-24 account stub (generate_auth, etc.).
+      // account_min — 8-21 account link stub.
       path: "./account_min",
       package: "account",
     },
@@ -42,6 +41,6 @@ const config: SuiCodegenConfig = {
 
   // Skip framework transitive types we don't directly consume.
   prune: true,
-};
+}
 
-export default config;
+export default config
