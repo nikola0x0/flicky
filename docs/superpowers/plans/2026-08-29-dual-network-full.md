@@ -19,7 +19,7 @@ What is NOT dual-network yet is the **write and realtime plane**: one keeper, on
 These gate the *mainnet half* of the goal. Everything else in this plan can land and be verified on testnet first.
 
 1. **DeepBook Predict has no mainnet deployment.** `predict-testnet-6-24` is testnet-only; Mysten has mainnet slated for later in 2026 and warns the contracts may still change. Until it ships there is no mainnet `ExpiryMarket` to mint against, so the staked tier cannot run on mainnet at all.
-2. **The Predict indexer host is currently NXDOMAIN.** `predict-server-beta.testnet.mystenlabs.com` and `propbook.api.testnet.mystenlabs.com` both fail to resolve (verified against 8.8.8.8 and 1.1.1.1 on 2026-08-29). **Testnet deck generation and settlement are broken in production right now** — `/oracle/list` returns `500 market list failed`. Both are `PREDICT_INDEXER_URL` / `PROPBOOK_INDEXER_URL` env overrides, so the fix is a Railway variable once the successor hostname is known. **Task 0 below.**
+2. **The 6-24 testnet deployment is dark, not just its indexer.** Last `MarketCreated` 2026-08-17T21:03Z; 0 live markets as of 2026-08-30; the read API hosts are NXDOMAIN. This is NOT fixable with a Railway variable — see `2026-08-30-predict-independence.md`, which **blocks this plan**.
 3. **Real money on mainnet.** The sponsor and keeper address balances must be funded with real SUI, and Enoki zkLogin is paid on mainnet at scale.
 
 Do not treat 1 as "not started" — treat it as **the flip is config-only on the web, and this plan's Tasks 1–9 on the server.**
@@ -71,11 +71,23 @@ Verified while writing this plan — these need no work:
 
 ---
 
-## Task 0: unblock the Predict indexer (do this first, independent of everything else)
+## Task 0: ~~unblock the Predict indexer~~ — SUPERSEDED, and the premise was wrong
 
-Production testnet is currently broken; this is not part of dual-network but blocks verifying any of it.
+> **Superseded 2026-08-30 by `2026-08-30-predict-independence.md`.**
+>
+> This task assumed a successor hostname existed to point at. It does not.
+> Measuring on 2026-08-30: the last `MarketCreated` event on 6-24 was
+> **2026-08-17T21:03Z**, the last market expiry **21:15Z**, and **0 of the most
+> recent 50 markets are still live** — 12.3 days of silence. Mysten wound down
+> the testnet market-making cron, *then* tore down the read API. The contracts
+> are still deployed and healthy, but market creation is `AdminCap`-gated so we
+> cannot create our own.
+>
+> There is no hostname to find. **This whole plan is blocked** until Flicky can
+> build a deck without Predict — see the superseding plan. Dual-network is
+> meaningless while zero networks work.
 
-- [ ] Find the current DeepBook Predict indexer + propbook oracle hostnames (Mysten docs / Discord / the `predict-testnet-6-24` release notes). The old `predict-server-beta.testnet.mystenlabs.com` and `propbook.api.testnet.mystenlabs.com` are both NXDOMAIN.
+- [ ] ~~Find the current DeepBook Predict indexer + propbook oracle hostnames.~~ **No successor exists — do not spend time on this.**
 - [ ] Confirm the response shapes still match what `deckmaster.ts::MarketRow` and `oracle.ts` parse — CLAUDE.md warns this pin has moved before (`4-16` → `6-24`) and changed what it exposes.
 - [ ] Set `PREDICT_INDEXER_URL` and `PROPBOOK_INDEXER_URL` on the `flicky-server` Railway service (no code change needed — both are already env overrides).
 - [ ] Update the baked defaults in `network-env.ts::TESTNET_DEFAULTS` to match, so fresh checkouts work.
