@@ -125,13 +125,16 @@ export const env = {
   //   "auto"    — prefer Predict, fall back to Pyth when Predict discovery
   //               comes up empty.
   //
-  // Default is "auto" deliberately. Predict's 6-24 testnet stopped creating
-  // markets on 2026-08-17 and its read API was torn down, which took the
-  // game down for ~12 days; "auto" is the setting that would have kept free
-  // duels running through it. See docs/superpowers/plans/
-  // 2026-08-30-predict-independence.md.
+  // Default is "predict" — today's exact behavior. "auto"/"pyth" are opt-in
+  // and currently NOT usable: the pyth source has no live price to read.
+  // DeepBook's on-chain pyth_feed mirror is Mysten-pushed and went stale
+  // 2026-08-05, and Pyth's own Hermes API requires a key (401 on both the
+  // stable and beta channels). Until a price source is chosen, leaving this
+  // on "auto" would turn one clear "no live markets" error into a confusing
+  // two-stage failure ending in a staleness message that hides the real
+  // cause. See docs/superpowers/plans/2026-08-30-predict-independence.md.
   deckSource: ((): "predict" | "pyth" | "auto" => {
-    const raw = process.env.DECK_SOURCE ?? "auto"
+    const raw = process.env.DECK_SOURCE ?? "predict"
     if (raw === "predict" || raw === "pyth" || raw === "auto") return raw
     throw new Error(`Bad DECK_SOURCE "${raw}" — want predict | pyth | auto.`)
   })(),

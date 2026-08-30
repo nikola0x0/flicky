@@ -6,6 +6,22 @@
 
 **Status of the game right now: the staked AND free tiers are both unrunnable in production, and have been for ~12 days.** Not because of a bug we introduced — because the upstream protocol went dark.
 
+> ## STATUS 2026-08-30: Task 1 landed, Tasks 2–3 PARKED
+> **Decision: wait for DeepBook Predict rather than adopt a new price oracle.**
+>
+> The card-source seam shipped (PR #60) and `DECK_SOURCE` defaults to
+> `predict`, so production behavior is unchanged. The `pyth` source is wired
+> and unit-tested but **cannot run** — it has no live price to read (see
+> "Price sources" below). Task 3 (keeper settlement) is not started.
+>
+> **When Predict returns, or a price source is chosen, resume at Task 2.**
+> Everything below Task 1 is still the intended design.
+>
+> Also decided: duels settled from a non-Predict price feed **DO count**
+> toward MMR and Season eligibility. Freezing the ladder for an open-ended
+> outage is worse than folding in a slightly different skill test. This
+> settles the "open question" at the bottom of this document.
+
 ---
 
 ## Evidence (measured 2026-08-30, not recalled)
@@ -35,10 +51,36 @@ Three facts, each verified against the source:
 
 **Therefore a Pyth-sourced deck requires ZERO Move changes.** No republish, no upgrade, no migration. This is a server + web change against the already-deployed contract.
 
-And Pyth is live and independent of Mysten's hosting:
+**CORRECTION (2026-08-30):** an earlier revision of this plan claimed the
+on-chain Pyth feed was "confirmed live". That was wrong — only its *existence*
+was confirmed, not its freshness. Measured:
 
-- `pyth_feed::PythFeed` object `0xc78d…35afb` — **exists on-chain**
-- `hermes.pyth.network` — **HTTP 200**, operated by Pyth, not Mysten
+- `pyth_feed::PythFeed` `0xc78d…35afb` — exists, but **last updated
+  2026-08-05**, 12 days BEFORE Predict's markets stopped. It is
+  `propbook::pyth_feed` — DeepBook's own **Mysten-pushed mirror** of Pyth,
+  not Pyth itself, which is why it died with everything else Mysten operates.
+- Real Pyth on Sui is a **pull** oracle: nothing sits continuously fresh
+  on-chain. You fetch from Hermes and apply the update in the same
+  transaction — so "read Pyth on-chain" collapses back to needing Hermes.
+- `hermes.pyth.network` **and** `hermes-beta.pyth.network` (the correct
+  channel for Sui testnet) both return **HTTP 401** — an API key is required.
+
+Verifying existence is not verifying freshness. Every feasibility claim in
+this document should say which one was checked.
+
+## Price sources — measured 2026-08-30
+
+| Source | Status | Notes |
+|---|---|---|
+| DeepBook `propbook::pyth_feed` (on-chain) | **stale since 2026-08-05** | Mysten-pushed mirror, not real Pyth |
+| Pyth Hermes — stable channel | **HTTP 401** | needs an API key |
+| Pyth Hermes — beta channel (Sui testnet) | **HTTP 401** | needs an API key |
+| Real Pyth on Sui (on-chain) | pull oracle | needs a Hermes update pushed first → same key |
+| Coinbase / Binance / Kraken spot | HTTP 200, free | CEX quotes, not an oracle |
+
+**Decision: park.** A CEX median changes what the game's outcomes rest on, and
+a Pyth key is a real ops commitment; the team chose to wait for Predict rather
+than take either on under outage pressure. Revisit if the outage runs long.
 
 ## Why the old dependency has to go regardless
 
@@ -143,7 +185,9 @@ Then `2026-08-29-dual-network-full.md` resumes on top — but note it is **block
 - Nothing in the Move package changed.
 - The staked tier stays honestly gated until Predict has live markets again.
 
-## Open question for the team
+## RESOLVED: do non-Predict duels count toward the ladder?
+
+**Yes — they count.** Decided 2026-08-30. Original framing kept below.
 
 Pyth-sourced cards are a **different product** in one real way: a Predict card's strike carries a market-implied probability (that is where `deckQuoteMinProb`/`deckQuoteMaxProb` came from), and a Pyth card's does not — it is a pure price-offset bet with no market view behind it. That is fine for the free tier and for practice. It is **not** obviously fine as the basis for the ranked ladder and Season prizes.
 
