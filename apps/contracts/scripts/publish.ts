@@ -14,10 +14,12 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { config as loadEnv } from "dotenv";
 
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
+import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Transaction } from "@mysten/sui/transactions";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+import { normalizeStructTag } from "@mysten/sui/utils";
+import { fromBase58, toHex } from "@mysten/bcs";
 
 // -----------------------------------------------------------------------------
 
@@ -130,9 +132,13 @@ function computeTransitiveDependencyClosure(seedDependencies: string[]): string[
 async function main() {
   const keypair = loadDeployerKeypair();
   const address = keypair.toSuiAddress();
-  const client = new SuiJsonRpcClient({
-    url: process.env.SUI_RPC_URL ?? getJsonRpcFullnodeUrl(NETWORK),
+  const client = new SuiGrpcClient({
     network: NETWORK,
+    baseUrl:
+      process.env.SUI_GRPC_URL ??
+      (NETWORK === "localnet"
+        ? "http://127.0.0.1:9000"
+        : `https://fullnode.${NETWORK}.sui.io:443`),
   });
 
   console.log(`Deployer: ${address}`);
@@ -175,7 +181,7 @@ async function main() {
     result = await client.signAndExecuteTransaction({
       transaction: tx,
       signer: keypair,
-      options: { showEffects: true, showObjectChanges: true },
+      include: { effects: true, objectTypes: true },
     });
   } catch (err: any) {
     console.error("FULL ERROR DETAILS:");
@@ -184,26 +190,36 @@ async function main() {
     process.exit(1);
   }
 
-  if (result.effects?.status?.status !== "success") {
-    console.error("Publish failed:", result.effects?.status);
+  if (result.$kind !== "Transaction" || !result.Transaction.status.success) {
+    console.error(
+      "Publish failed:",
+      result.$kind === "FailedTransaction"
+        ? result.FailedTransaction.status.error?.message
+        : "unknown",
+    );
     process.exit(1);
   }
 
   // 4. Extract packageId + UpgradeCap. Flicky has no `init` functions, so
   //    no extra shared objects/caps come out of the publish tx.
-  const changes = result.objectChanges ?? [];
-  const packageChange = changes.find((c) => c.type === "published") as
-    | { packageId: string }
-    | undefined;
+  const executed = result.Transaction;
+  const changes = executed.effects?.changedObjects ?? [];
+  const packageChange = changes.find(
+    (c) => c.idOperation === "Created" && c.outputState === "PackageWrite",
+  );
   if (!packageChange) {
-    console.error("No package id in objectChanges — aborting.");
+    console.error("No created package in transaction effects — aborting.");
     process.exit(1);
   }
-  const packageId = packageChange.packageId;
-  const upgradeCapId = findObjectId(changes, "0x2::package::UpgradeCap");
+  const packageId = packageChange.objectId;
+  const upgradeCapId = findObjectId(
+    changes,
+    executed.objectTypes ?? {},
+    "0x2::package::UpgradeCap",
+  );
 
   if (!upgradeCapId) {
-    console.error("UpgradeCap not in objectChanges — aborting.");
+    console.error("UpgradeCap not in transaction effects — aborting.");
     process.exit(1);
   }
 
@@ -212,7 +228,7 @@ async function main() {
     packageId,
     originalPackageId: packageId,
     publishedAt: new Date().toISOString(),
-    publishTxDigest: result.digest,
+    publishTxDigest: executed.digest,
     publisherAddress: address,
     upgradeCap: upgradeCapId,
     notes: "Written by scripts/publish.ts. originalPackageId is preserved across upgrades.",
@@ -224,7 +240,11 @@ async function main() {
 
   // Mirror to Published.toml so both files agree on the active address.
   try {
-    const chainId = await client.getChainIdentifier();
+    // gRPC reports the full genesis checkpoint digest (base58); Published.toml
+    // wants the short chain-id the Move toolchain matches on — the first four
+    // bytes as hex (testnet => 4c78adac).
+    const { chainIdentifier } = await client.core.getChainIdentifier();
+    const chainId = toHex(fromBase58(chainIdentifier).slice(0, 4));
     syncPublishedToml(packageId, upgradeCapId, chainId);
     console.log(`Wrote ${PUBLISHED_TOML} (chain-id=${chainId})`);
   } catch (e) {
@@ -261,10 +281,23 @@ function loadDeployerKeypair(): Ed25519Keypair {
   return Ed25519Keypair.fromSecretKey(secretKey);
 }
 
-function findObjectId(changes: any[], objectType: string): string | null {
-  const found = changes.find(
-    (c) => c.type === "created" && c.objectType === objectType,
-  ) as { objectId: string } | undefined;
+function findObjectId(
+  changes: Array<{ objectId: string; idOperation: string }>,
+  objectTypes: Record<string, string>,
+  objectType: string,
+): string | null {
+  // gRPC reports struct tags zero-padded (0x0000..0002::package::UpgradeCap)
+  // where JSON-RPC used the short form, so normalize both sides before
+  // comparing. The published package itself shows up with the bare type
+  // "package", which is not a struct tag — skip anything without "::" so
+  // normalizeStructTag never sees it.
+  const want = normalizeStructTag(objectType);
+  const found = changes.find((c) => {
+    if (c.idOperation !== "Created") return false;
+    const type = objectTypes[c.objectId];
+    if (type == null || !type.includes("::")) return false;
+    return normalizeStructTag(type) === want;
+  });
   return found?.objectId ?? null;
 }
 
