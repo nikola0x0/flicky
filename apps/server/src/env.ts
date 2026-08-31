@@ -88,6 +88,21 @@ function loadSeasonPrizeSplit(): PrizeTier[] {
   })
 }
 
+/**
+ * Parse a bigint env var. `.env.example` documents optional vars as
+ * `NAME=` (empty); Bun's dotenv loads that as `""`, and `BigInt("")`
+ * is `0n`. Using `??` alone therefore turns "leave the default" into
+ * a 0-MIST sponsor cap that 403s every transaction.
+ */
+export function parseEnvBigInt(
+  raw: string | undefined,
+  fallback: bigint | number
+): bigint {
+  const trimmed = raw?.trim()
+  if (!trimmed) return BigInt(fallback)
+  return BigInt(trimmed)
+}
+
 export const env = {
   port: Number(process.env.PORT ?? 3001),
 
@@ -239,8 +254,9 @@ export const env = {
   // and the web client falls back to wallet-paid gas.
   // Max gas (MIST) the sponsor will cover per transaction — a defensive cap
   // enforced by the `gasBudget` validator (default 0.1 SUI).
-  sponsorMaxGasBudget: BigInt(
-    process.env.SPONSOR_MAX_GAS_BUDGET ?? 100_000_000
+  sponsorMaxGasBudget: parseEnvBigInt(
+    process.env.SPONSOR_MAX_GAS_BUDGET,
+    100_000_000n
   ),
   // Sponsor address-balance monitor. Sponsored gas is paid from the sponsor
   // key's on-chain address balance (empty gas payment), which drains with use
@@ -248,8 +264,9 @@ export const env = {
   // withdraw reservation" — a silent outage. The monitor polls the balance and
   // WARNs below the threshold so it can be topped up (fund:sponsor) first.
   // Default warn floor 0.5 SUI; check every 5 min.
-  sponsorMinBalanceWarnMist: BigInt(
-    process.env.SPONSOR_MIN_BALANCE_WARN_MIST ?? 500_000_000
+  sponsorMinBalanceWarnMist: parseEnvBigInt(
+    process.env.SPONSOR_MIN_BALANCE_WARN_MIST,
+    500_000_000n
   ),
   sponsorBalanceCheckIntervalMs: Number(
     process.env.SPONSOR_BALANCE_CHECK_INTERVAL_MS ?? 5 * 60 * 1000
