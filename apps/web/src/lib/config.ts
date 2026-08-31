@@ -91,7 +91,7 @@ interface NetworkConfig {
 const TESTNET: NetworkConfig = {
   packageId: envOr(
     import.meta.env.VITE_FLICKY_PACKAGE_ID_TESTNET,
-    "0x5ceae1cacbba1862e0f0c4e8861280b8a1e9530ce4049317daf5d3951778582f"
+    "0x23650c9d799238da660c602a6fe02074f864ce3ff2cc90f569a8eaa754b0418b"
   ),
   deepbookPredictPackageId: envOr(
     import.meta.env.VITE_DEEPBOOK_PREDICT_PACKAGE_ID,

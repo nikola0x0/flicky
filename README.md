@@ -8,7 +8,7 @@
 | | |
 | --- | --- |
 | 🎬 **Demo video** | https://youtu.be/sKIKsmdRs9U |
-| 📦 **Package (testnet)** | [`0x5ceae1cacbba1862e0f0c4e8861280b8a1e9530ce4049317daf5d3951778582f`](https://suiscan.xyz/testnet/object/0x5ceae1cacbba1862e0f0c4e8861280b8a1e9530ce4049317daf5d3951778582f) |
+| 📦 **Package (testnet)** | [`0x23650c9d799238da660c602a6fe02074f864ce3ff2cc90f569a8eaa754b0418b`](https://suiscan.xyz/testnet/object/0x23650c9d799238da660c602a6fe02074f864ce3ff2cc90f569a8eaa754b0418b) |
 | 🔗 **On-chain primitive** | DeepBook Predict (binary digitals) |
 | 🔑 **Identity / gas** | zkLogin via Enoki, or connect a wallet · sponsored gas end-to-end |
 
