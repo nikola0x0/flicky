@@ -120,10 +120,14 @@ const STAKE = 1_000_000n // 1 dUSDC per side
 // Each mint debits `premium = entry_probability * quantity` from the player's
 // AccountWrapper float; too small a float aborts the swipe with
 // `account::withdraw_balance` EBalanceTooLow (code 1). The deck is snapped to
-// ATM strikes, so entry_probability sits near 0.5 => ~1.5 dUSDC per card at
-// the E2E-only SWIPE_QTY=3 dUSDC. Two dUSDC per card leaves room for drift and
-// fees while keeping a live test run materially cheaper than production.
-const PREMIUM_PER_CARD = 2_000_000n // 2 dUSDC per card of AccountWrapper float
+// ATM strikes, but the all-in withdrawal also includes trading fees, builder
+// fees, EWMA penalties, and inventory impact. A live 8-21 run on 2026-08-31
+// left 1.846273 dUSDC after two DOWN swipes; the third quote was 1.844092
+// shortly afterward, so ordinary live drift crossed the remaining balance.
+// Reserve the full quantity per card so live price/fee drift cannot turn the
+// wrapper balance into a timing-sensitive boundary. Unspent float remains in
+// the deterministic wrappers and is reused by later runs.
+const PREMIUM_PER_CARD = 3_000_000n // 3 dUSDC per card of AccountWrapper float
 const P1_FUND_SUI = 500_000_000n // 0.5 SUI — gas for ~8 player-1-signed txs
 const P1_FUND_BUFFER = 1_000_000n // 1 dUSDC slack on top of float + stake
 
