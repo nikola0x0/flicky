@@ -104,6 +104,46 @@ describe("readMarketSettlement (on-chain)", () => {
     expect((await readMarketSettlement("0xdead", stub)).settled).toBe(false)
   })
 
+  test("8-21 nested strike_exposure.settlement_price counts as settled", async () => {
+    // predict-testnet-8-21 does not put settlement_price on the object
+    // root. The settled price lives under strike_exposure — confirmed
+    // live 2026-08-31 on market 0xdff4d6ac… (duel 0x9ecf…7f6e card 0):
+    // indexer MarketSettled = 78163816154180, top-level field absent.
+    const stub = {
+      core: {
+        getObject: async () => ({
+          object: {
+            json: {
+              expiry: "1788163260000",
+              strike_exposure: { settlement_price: "78163816154180" },
+            },
+          },
+        }),
+      },
+    } as unknown as SuiGrpcClient
+    const s = await readMarketSettlement("0xdead", stub)
+    expect(s.settled).toBe(true)
+    expect(s.settlementPrice).toBe(78_163_816_154_180n)
+  })
+
+  test("8-21 unsettled (nested null, no top-level) is not settled", async () => {
+    const stub = {
+      core: {
+        getObject: async () => ({
+          object: {
+            json: {
+              expiry: "1788163500000",
+              strike_exposure: { settlement_price: null },
+            },
+          },
+        }),
+      },
+    } as unknown as SuiGrpcClient
+    const s = await readMarketSettlement("0xdead", stub)
+    expect(s.settled).toBe(false)
+    expect(s.settlementPrice).toBeNull()
+  })
+
   maybe("a real never-settled market reads as unsettled", async () => {
     // Created 2026-08-17, expiry passed, but the settler stopped before it
     // ran — so this object EXISTS and reports settlement_price: null. That

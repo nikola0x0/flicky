@@ -264,17 +264,24 @@ export async function readMarketSettlement(
       include: { json: true },
     })
     const json = res.object?.json as
-      | { settlement_price?: string | number | null }
+      | {
+          settlement_price?: string | number | null
+          strike_exposure?: { settlement_price?: string | number | null }
+        }
       | undefined
     if (!json) return { settled: false, settlementPrice: null }
 
     // `settlement_price` is the gate, and it distinguishes the two states
-    // cleanly. Verified 2026-08-30 against real markets on both sides:
-    //   settled   → "64493721012300" (a decimal string)
+    // cleanly. Verified 2026-08-30 against real 6-24 markets on both sides:
+    //   settled   → "64493721012300" (a decimal string) at the object root
     //   unsettled → null  (NOT 0 — e.g. 0x1fc9221e…, expiry passed but the
     //               settler stopped before it ran)
-    // So an absent/null price is "not settled yet", never "settled at zero".
-    const raw = json.settlement_price
+    // predict-testnet-8-21 moved the field under `strike_exposure` (confirmed
+    // live 2026-08-31 on 0xdff4d6ac… / duel 0x9ecf…7f6e: indexer MarketSettled
+    // matched the nested price, top-level was absent). Fall back to nested
+    // so 8-21 duels actually settle. An absent/null price is "not settled
+    // yet", never "settled at zero".
+    const raw = json.settlement_price ?? json.strike_exposure?.settlement_price
     if (raw === undefined || raw === null) {
       return { settled: false, settlementPrice: null }
     }
