@@ -34,7 +34,9 @@ export function cardSwipeRemainingMs(params: {
   serverClockOffsetMs: number
   nowMs: number
 }): number | null {
-  if (params.cardExpiryMs === undefined) return null
+  // 0 (and other non-positive values) is "tick arrived without an expiry",
+  // not Unix epoch. Treating it as a timestamp locks the deck as expired.
+  if (params.cardExpiryMs === undefined || params.cardExpiryMs <= 0) return null
   const deadline = params.cardExpiryMs - CARD_SWIPE_BUFFER_MS
   const serverEstimatedNow = params.nowMs + params.serverClockOffsetMs
   return deadline - serverEstimatedNow

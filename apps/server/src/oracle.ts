@@ -34,10 +34,42 @@ interface MarketRow {
 }
 
 /** Raw shape from `GET {predictIndexerUrl}/markets/{id}/state`. */
-interface MarketStateResponse {
+export interface MarketStateResponse {
   market?: { expiry_market_id?: string; expiry?: string | number }
   oracle_prices?: { spot?: string; forward?: string }
   settlement?: { settlement_price?: string; settled_at_ms?: string } | null
+}
+
+/**
+ * Pull `expiry` + settlement out of an `ExpiryMarket` object's JSON.
+ *
+ * 8-21 stores `expiry` at the top level of the object. The previous
+ * chain-read only forwarded `settlement_price`, so `oracle_tick.expiry`
+ * was always `"0"` and the swipe UI hung on "Loading card 1…" (0n is
+ * falsy) while the countdown treated epoch-0 as "time's up".
+ *
+ * Settlement stays a TOP-LEVEL `settlement_price` (null until the market
+ * actually settles). 8-21 also puts a live mark under `strike_exposure`;
+ * that is not settlement — don't promote it.
+ */
+export function parseExpiryMarketJson(
+  json: unknown
+): MarketStateResponse | null {
+  if (!json || typeof json !== "object") return null
+  const obj = json as {
+    expiry?: string | number | null
+    settlement_price?: string | number | null
+  }
+  const expiry =
+    obj.expiry === undefined || obj.expiry === null
+      ? undefined
+      : String(obj.expiry)
+  const raw = obj.settlement_price
+  const settled = raw !== undefined && raw !== null && BigInt(String(raw)) > 0n
+  return {
+    market: expiry && expiry !== "0" ? { expiry } : undefined,
+    settlement: settled ? { settlement_price: String(raw) } : null,
+  }
 }
 
 export interface ExpiryMarketView {
@@ -84,15 +116,7 @@ export async function fetchMarketState(
       objectId: id,
       include: { json: true },
     })
-    const json = res.object?.json as
-      | { settlement_price?: string | number | null }
-      | undefined
-    if (!json) return null
-    const raw = json.settlement_price
-    const settled = raw !== undefined && raw !== null && BigInt(raw) > 0n
-    return {
-      settlement: settled ? { settlement_price: String(raw) } : null,
-    } as MarketStateResponse
+    return parseExpiryMarketJson(res.object?.json)
   } catch {
     return null
   }

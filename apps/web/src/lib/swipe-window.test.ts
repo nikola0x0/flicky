@@ -81,6 +81,19 @@ test("cardSwipeRemainingMs: null when the card's expiry is unknown", () => {
   ).toBeNull()
 })
 
+test("cardSwipeRemainingMs: null when expiry is 0 (missing tick, not epoch 0)", () => {
+  // oracle_tick used to send expiry "0" when fetchMarketState omitted the
+  // field; Number("0") is 0, which is a timestamp 55 years in the past and
+  // would lock the deck as "time's up" before the first card rendered.
+  expect(
+    cardSwipeRemainingMs({
+      cardExpiryMs: 0,
+      serverClockOffsetMs: 0,
+      nowMs: Date.now(),
+    })
+  ).toBeNull()
+})
+
 test("cardSwipeRemainingMs: applies the server clock offset", () => {
   // Client clock is 4s ahead of server (offset -4000): true now is 4s earlier,
   // so 4_000 more ms remain than the raw client clock implies.
