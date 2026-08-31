@@ -120,12 +120,10 @@ const STAKE = 1_000_000n // 1 dUSDC per side
 // Each mint debits `premium = entry_probability * quantity` from the player's
 // AccountWrapper float; too small a float aborts the swipe with
 // `account::withdraw_balance` EBalanceTooLow (code 1). The deck is snapped to
-// ATM strikes, so entry_probability sits near 0.5 => ~3 dUSDC per card at
-// SWIPE_QTY=6 dUSDC; 4 dUSDC per card leaves headroom for drift and for the
-// zones that price above ATM. Sized off the ACTUAL deck length (see the
-// discovery test, which now runs first) so a 3-card deck does not have to
-// pre-fund a 5-card float.
-const PREMIUM_PER_CARD = 4_000_000n // 4 dUSDC per card of AccountWrapper float
+// ATM strikes, so entry_probability sits near 0.5 => ~1.5 dUSDC per card at
+// the E2E-only SWIPE_QTY=3 dUSDC. Two dUSDC per card leaves room for drift and
+// fees while keeping a live test run materially cheaper than production.
+const PREMIUM_PER_CARD = 2_000_000n // 2 dUSDC per card of AccountWrapper float
 const P1_FUND_SUI = 500_000_000n // 0.5 SUI — gas for ~8 player-1-signed txs
 const P1_FUND_BUFFER = 1_000_000n // 1 dUSDC slack on top of float + stake
 
@@ -145,9 +143,10 @@ function deckFloat(deckSize: number): bigint {
 // offset-strike long-shot side only $0.11-0.32 above the floor — eroded by
 // time decay/drift mid-match (docs/report/2026-07-18-longshot-swipe-abort-
 // report.md). quantity=6_000_000 (apps/web's SWIPE_QUANTITY since
-// 2026-07-18) clears ATM ~3x and keeps every ZONE_TARGET_PROB long-shot
-// ≥2.2x the floor for the whole swipe window.
-const SWIPE_QTY = 6_000_000n
+// 2026-07-18) clears ATM ~3x and keeps long-shot zones safely above the floor.
+// Production remains at 6 dUSDC for those zones; this E2E uses ATM strikes, so
+// quantity=3_000_000 keeps ~50% margin without paying an irrelevant premium.
+const SWIPE_QTY = 3_000_000n
 // Live BTC oracle supply fluctuates: how many markets clear MARKET_HEADROOM_MS
 // varies run to run, so a fixed 5-card deck makes this test fail on market
 // supply rather than on the migration it is meant to gate. Production never
@@ -155,7 +154,9 @@ const SWIPE_QTY = 6_000_000n
 // available" and `buildDeck` round-robins across whatever comes back. Mirror
 // that: take up to MAX distinct markets, and only fail below MIN (a deck that
 // small means supply really is broken, not merely thin).
-const DECK_SIZE_MAX = 5
+// Three cards cover repeated mint/record commands and guarantee an odd result,
+// while bounding each live run's real dUSDC spend.
+const DECK_SIZE_MAX = 3
 const DECK_SIZE_MIN = 3
 const MARKET_HEADROOM_MS = 5 * 60_000 // markets must clear "now + 5min"
 
@@ -354,6 +355,28 @@ async function accountBalance(
   )
   if (!bytes) throw new Error(`accountBalance(${owner}): no return value`)
   return BigInt(bcs.u64().parse(bytes))
+}
+
+async function walletBalance(
+  client: SuiGrpcClient,
+  owner: string,
+  coinType: string
+): Promise<bigint> {
+  const result = await client.core.getBalance({ owner, coinType })
+  return BigInt(result.balance.balance)
+}
+
+async function existingAccountBalance(
+  client: SuiGrpcClient,
+  owner: string
+): Promise<bigint> {
+  if (!(await derivedWrapperExists(client, owner))) return 0n
+  const wrapperId = await derivedWrapperAddress(client, owner)
+  return accountBalance(client, owner, wrapperId)
+}
+
+function shortfall(target: bigint, current: bigint): bigint {
+  return target > current ? target - current : 0n
 }
 
 /**
@@ -704,6 +727,9 @@ describeFn("e2e duel — predict-testnet-8-21 flow", () => {
   let cards: DeckCard[] = []
   let hash: Uint8Array
   let duelId: string | null = null
+  let fundingReady = false
+  let accountsReady = false
+  let swipesReady = false
 
   beforeAll(async () => {
     const pkg = env.flickyPackageId
@@ -733,27 +759,75 @@ describeFn("e2e duel — predict-testnet-8-21 flow", () => {
   }, 30_000)
 
   test("funds player 1 with SUI (gas) + dUSDC (stake + account deposit)", async () => {
+    const float = deckFloat(cards.length)
+    const [p0WalletDusdc, p1WalletDusdc, p0AccountDusdc, p1AccountDusdc, p1WalletSui] =
+      await Promise.all([
+        walletBalance(client, p0Addr, env.dusdcCoinType),
+        walletBalance(client, p1Addr, env.dusdcCoinType),
+        existingAccountBalance(client, p0Addr),
+        existingAccountBalance(client, p1Addr),
+        walletBalance(client, p1Addr, "0x2::sui::SUI"),
+      ])
+
+    const p1DusdcTarget = shortfall(float, p1AccountDusdc) + STAKE + P1_FUND_BUFFER
+    const p1DusdcTopUp = shortfall(p1DusdcTarget, p1WalletDusdc)
+    const p1SuiTopUp = shortfall(P1_FUND_SUI, p1WalletSui)
+    const p0RunBudget =
+      p1DusdcTopUp + shortfall(float, p0AccountDusdc) + STAKE
+
+    // Fail before sending anything. A previous version discovered budget
+    // exhaustion only after funding p1, which stranded partial-run funds.
+    if (p0WalletDusdc < p0RunBudget) {
+      throw new Error(
+        `insufficient p0 dUSDC for complete ${cards.length}-card run: ` +
+          `have ${p0WalletDusdc}, need ${p0RunBudget} ` +
+          `(p1 top-up ${p1DusdcTopUp}, p0 wrapper top-up ` +
+          `${shortfall(float, p0AccountDusdc)}, p0 stake ${STAKE})`
+      )
+    }
+
+    if (p1SuiTopUp === 0n && p1DusdcTopUp === 0n) {
+      console.log("fund p1: existing balances already satisfy the run budget")
+      fundingReady = true
+      return
+    }
+
     const tx = new Transaction()
-    const [gas] = tx.splitCoins(tx.gas, [tx.pure.u64(P1_FUND_SUI)])
-    const p1FundDusdc = deckFloat(cards.length) + STAKE + P1_FUND_BUFFER
-    const dusdc = tx.add(
-      coinWithBalance({ balance: p1FundDusdc, type: env.dusdcCoinType })
-    )
-    tx.transferObjects([gas, dusdc], tx.pure.address(p1Addr))
+    const transfers = []
+    if (p1SuiTopUp > 0n) {
+      const [gas] = tx.splitCoins(tx.gas, [tx.pure.u64(p1SuiTopUp)])
+      transfers.push(gas)
+    }
+    if (p1DusdcTopUp > 0n) {
+      transfers.push(
+        tx.add(
+          coinWithBalance({ balance: p1DusdcTopUp, type: env.dusdcCoinType })
+        )
+      )
+    }
+    tx.transferObjects(transfers, tx.pure.address(p1Addr))
     await signAndWait(client, p0, tx, "fund p1")
+    fundingReady = true
   }, 60_000)
 
   test("sets up both players' AccountWrapper + deposits dUSDC premium float", async () => {
+    if (!fundingReady) {
+      throw new Error("refusing account setup because funding preflight did not pass")
+    }
     const float = deckFloat(cards.length)
     p0Wrapper = await setupAccount(client, p0, float)
     p1Wrapper = await setupAccount(client, p1, float)
     expect(p0Wrapper).toBeTruthy()
     expect(p1Wrapper).toBeTruthy()
+    accountsReady = true
     console.log(`p0 wrapper: ${p0Wrapper}`)
     console.log(`p1 wrapper: ${p1Wrapper}`)
   }, 60_000)
 
   test("creates duel, challenger joins, creator reveals deck", async () => {
+    if (!accountsReady) {
+      throw new Error("refusing duel creation because account setup did not pass")
+    }
     duelId = await createDuel(client, p0, packageId, hash, cards.length)
     expect(duelId).toBeTruthy()
     await joinDuel(client, p1, packageId, duelId)
@@ -787,9 +861,13 @@ describeFn("e2e duel — predict-testnet-8-21 flow", () => {
         SWIPE_QTY
       )
     }
+    swipesReady = true
   }, 300_000)
 
   test("finalize_test_one_price settles + finalizes; DuelFinalized has a winner", async () => {
+    if (!swipesReady) {
+      throw new Error("refusing finalization because every swipe did not pass")
+    }
     if (!duelId) throw new Error("duelId not set — earlier step failed")
     // The deck is always an ODD number of cards (see discoverMarkets) and
     // p0=UP/p1=DOWN on every card are complementary outcomes per card, so
@@ -832,13 +910,20 @@ describeFn("e2e duel — predict-testnet-8-21 flow", () => {
 
   afterAll(async () => {
     if (!canRun) return
-    // Best-effort: sweep p1's leftover SUI back to p0 so testnet SUI/dUSDC
-    // don't pile up in a throwaway keypair across repeated runs.
+    // Best-effort: return wallet-level dUSDC plus leftover SUI to p0. Wrapper
+    // float stays in the deterministic p1 account and is reused next run.
     try {
       const tx = new Transaction()
+      const p1Dusdc = await walletBalance(client, p1Addr, env.dusdcCoinType)
+      if (p1Dusdc > 0n) {
+        const dusdc = tx.add(
+          coinWithBalance({ balance: p1Dusdc, type: env.dusdcCoinType })
+        )
+        tx.transferObjects([dusdc], tx.pure.address(p0Addr))
+      }
       tx.setGasBudget(3_000_000n)
       tx.transferObjects([tx.gas], tx.pure.address(p0Addr))
-      await signAndWait(client, p1, tx, "sweep leftover SUI")
+      await signAndWait(client, p1, tx, "sweep leftover wallet funds")
     } catch {
       // best-effort
     }
